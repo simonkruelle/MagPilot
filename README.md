@@ -474,6 +474,7 @@ This project includes a Python program for reading magnetometer data from a seri
 ### Files
 
 - `magnetometer_reader.py` - Main program for reading and processing magnetometer data
+- `csv_visualizer.py` - Script for visualizing recorded CSV data with multiple plot types
 - `test_components.py` - Test script to verify program components
 - `requirements.txt` - Python dependencies
 
@@ -492,26 +493,123 @@ This project includes a Python program for reading magnetometer data from a seri
 ### Running the Program
 
 1. Connect your magnetometer hardware to a serial port
-2. Run the program:
+2. Run the program with optional parameters:
    ```bash
-   python magnetometer_reader.py
+   python magnetometer_reader.py --sensor 5 --csv experiment1.csv
    ```
 
-3. The program will:
-   - List available serial ports
-   - Let you choose the correct port
-   - Open the port at 921600 baud
-   - Start a reading thread at 100 Hz
-   - Parse incoming packets (header 0xAA, 54 floats, tail 0xBB)
-   - Display decoded data in terminal
-   - Save data to CSV file (`magnetometer_data.csv`)
-   - Show real-time plots using matplotlib
+#### Command Line Options
+
+- `--sensor, -s`: Sensor number to plot (1-16, default: 1)
+- `--baudrate, -b`: Serial baudrate (default: 921600)
+- `--csv, -c`: CSV output filename (default: magnetometer_data.csv)
+
+#### Session Recording Controls
+
+The program supports recording separate data sessions for different experimental conditions:
+
+- **1**: Start recording "no_magnet" session
+- **2**: Start recording "magnet_still" session  
+- **3**: Start recording "magnet_moving" session
+- **s**: Stop current recording session
+- **q**: Quit program
+
+Each session creates a separate CSV file with timestamp and session name.
+
+#### Examples
+
+```bash
+# Plot sensor 3 with default settings
+python magnetometer_reader.py -s 3
+
+# Use custom baudrate and output file
+python magnetometer_reader.py --sensor 7 --baudrate 115200 --csv test_data.csv
+
+# Default settings (plots sensor 1)
+python magnetometer_reader.py
+```
+
+### Session Recording Workflow
+
+1. Start the program normally
+2. Press **1** to record baseline data (no magnet)
+3. Press **s** to stop recording
+4. Press **2** to record data with magnet held still
+5. Press **s** to stop recording
+6. Press **3** to record data while moving the magnet
+7. Press **s** to stop recording
+8. Press **q** to quit
+
+This creates three separate CSV files for analysis:
+- `no_magnet_YYYYMMDD_HHMMSS.csv`
+- `magnet_still_YYYYMMDD_HHMMSS.csv`
+- `magnet_moving_YYYYMMDD_HHMMSS.csv`
+
+### CSV Data Visualization
+
+After recording sessions, use the CSV visualizer to analyze your data:
+
+```bash
+python csv_visualizer.py no_magnet_20260424_143022.csv
+```
+
+#### Visualization Options
+
+The visualizer provides multiple plot types:
+- **Z-axis overview**: Shows Z-component for all 16 sensors
+- **Single sensor analysis**: Bx, By, Bz components for one sensor
+- **Pose data**: Position and orientation over time
+- **3D trajectory**: Spatial movement patterns
+- **Statistical analysis**: Mean, std, min/max values
+
+#### Visualizer Examples
+
+```bash
+# Visualize all sensors Z-axis
+python csv_visualizer.py data.csv --plot z_all
+
+# Analyze single sensor with all components
+python csv_visualizer.py data.csv --plot sensor --sensor 5
+
+# Show pose data
+python csv_visualizer.py data.csv --plot pose
+
+# Statistical summary
+python csv_visualizer.py data.csv --plot stats
+```
 
 ### Data Format
 
 The CSV file contains rows with the following format:
 - **Magnetic field data** (48 values): Bx1, By1, Bz1, ..., Bx16, By16, Bz16 (16 sensors × 3 axes)
 - **Pose data** (6 values): x, y, z, mx, my, mz
+
+### Measurement Units
+
+**CRITICAL:** The magnetic field measurement units depend on your specific magnetometer hardware. You must check your sensor's datasheet for exact specifications.
+
+#### Common Magnetometer Units:
+
+| Unit | Symbol | Conversion | Typical Earth Field | Typical Sensor Range |
+|------|--------|------------|-------------------|-------------------|
+| **Tesla** | T | 1 T = 10,000 G | ~0.00005 T | 0.00001 - 0.0001 T |
+| **Gauss** | G | 1 G = 0.0001 T | ~0.5 G | 0.0001 - 0.001 G |
+| **milliGauss** | mG | 1 mG = 0.001 G | ~500 mG | 0.1 - 1.0 mG |
+| **microTesla** | μT | 1 μT = 0.000001 T | ~50 μT | 10 - 100 μT |
+
+#### How to Identify Your Units:
+
+1. **Check your magnetometer datasheet** - This is the authoritative source
+2. **Look for Earth field values** - Earth's magnetic field is ~25-65 μT or ~0.25-0.65 G
+3. **Test with known magnets** - Strong magnets should show large changes
+4. **Contact sensor manufacturer** if documentation is unclear
+
+#### Coordinate System:
+
+The Bx, By, Bz axes depend on your sensor's orientation. Check the datasheet for:
+- Which axis points in which direction
+- How the sensor should be mounted
+- Any calibration requirements
 
 ### Packet Structure
 
