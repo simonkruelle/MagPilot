@@ -414,18 +414,23 @@ class MagnetometerReader:
         ax3.grid(True)
         line_bz, = ax3.plot([], [], 'r-', label='Bz', linewidth=2)
 
-        # 3D sensor-grid field magnitude plot
-        ax4.set_title('16-Sensor Grid Field Magnitude')
-        ax4.set_xlabel('Grid X')
-        ax4.set_ylabel('Grid Y')
-        ax4.set_zlabel('Field magnitude')
+        # 3D magnet trajectory plot from pose coordinates
+        ax4.set_title('Magnet Trajectory from Pose X/Y/Z')
+        ax4.set_xlabel('X')
+        ax4.set_ylabel('Y')
+        ax4.set_zlabel('Z')
         ax4.grid(True)
-
-        sensor_grid_x = np.array([i % 4 for i in range(16)])
-        sensor_grid_y = np.array([i // 4 for i in range(16)])
+        ax4.view_init(elev=30, azim=135)
+        try:
+            ax4.set_box_aspect([1, 1, 1])
+        except Exception:
+            pass
+        ax4.set_xlim(-0.05, 0.05)
+        ax4.set_ylim(-0.05, 0.05)
+        ax4.set_zlim(-0.05, 0.05)
 
         # Initialize empty 3D scatter - will be updated in animation
-        scatter_3d = ax4.scatter(sensor_grid_x, sensor_grid_y, np.zeros(16), c=np.zeros(16), cmap='viridis', s=60)
+        scatter_3d = ax4.scatter([], [], [], c=[], cmap='viridis', s=80, edgecolors='k', linewidths=0.5)
 
         def init_plot():
             line_bx.set_data([], [])
@@ -455,22 +460,41 @@ class MagnetometerReader:
                 if data_vals:
                     ax.set_xlim(0, len(data_vals))
                     ax.set_ylim(min(data_vals) * 1.1, max(data_vals) * 1.1)
+                    ax.legend(loc='upper right')
 
-            # Use the most recent full-row reading for the 16-sensor grid
-            latest_row = data[-1]
-            mag_data = latest_row[1:49]
-            magnitudes = np.array([np.sqrt(mag_data[i*3]**2 + mag_data[i*3+1]**2 + mag_data[i*3+2]**2) for i in range(16)])
+            # Use pose coordinates from each row for magnet trajectory
+            pose_x = [row[-6] for row in data]
+            pose_y = [row[-5] for row in data]
+            pose_z = [row[-4] for row in data]
+
+            # Keep the trajectory long enough to draw letters, but still limit noise
+            trail_length = 150
+            if len(pose_x) > trail_length:
+                pose_x = pose_x[-trail_length:]
+                pose_y = pose_y[-trail_length:]
+                pose_z = pose_z[-trail_length:]
 
             ax4.clear()
-            ax4.set_title('16-Sensor Grid Field Magnitude')
-            ax4.set_xlabel('Grid X')
-            ax4.set_ylabel('Grid Y')
-            ax4.set_zlabel('Field magnitude')
+            ax4.set_title('Magnet Trajectory from Pose X/Y/Z')
+            ax4.set_xlabel('X')
+            ax4.set_ylabel('Y')
+            ax4.set_zlabel('Z')
             ax4.grid(True)
+            ax4.view_init(elev=30, azim=135)
+            try:
+                ax4.set_box_aspect([1, 1, 1])
+            except Exception:
+                pass
+            ax4.set_xlim(-0.05, 0.05)
+            ax4.set_ylim(-0.05, 0.05)
+            ax4.set_zlim(-0.05, 0.05)
 
-            if len(magnitudes) == 16:
-                scatter_3d = ax4.scatter(sensor_grid_x, sensor_grid_y, magnitudes, c=magnitudes, cmap='viridis', s=80)
-                ax4.plot_trisurf(sensor_grid_x, sensor_grid_y, magnitudes, cmap='viridis', alpha=0.5, linewidth=0.2)
+            if len(pose_x) > 1:
+                colors = np.linspace(0, 1, len(pose_x))
+                scatter_3d = ax4.scatter(pose_x, pose_y, pose_z, c=colors, cmap='plasma', s=150, edgecolors='k', linewidths=0.6)
+                ax4.plot(pose_x, pose_y, pose_z, color='#333333', alpha=0.65, linewidth=1.5)
+                ax4.scatter(pose_x[-1:], pose_y[-1:], pose_z[-1:], c='red', s=120, label='Current position')
+                ax4.legend(loc='best', fontsize='small')
 
             plt.tight_layout()
             return line_bx, line_by, line_bz, scatter_3d

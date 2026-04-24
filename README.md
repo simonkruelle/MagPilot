@@ -628,6 +628,10 @@ python test_components.py
 
 This tests port listing, packet parsing, and CSV writing without requiring hardware.
 
+### Recent changes
+
+- Corrected the 3D plot scale in `magnetometer_reader.py`: the pose trajectory axis limits now use ±0.05 instead of ±0.5.
+
 ### Safety
 
 - Press `Ctrl+C` to safely close the serial port and exit
