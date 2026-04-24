@@ -175,6 +175,9 @@ Resolve conflicts carefully if Git reports any.
 
 ---
 
+**For all previous instructions/commands, you can alternatively use the Github Desktop app available here https://desktop.github.com/download/**
+
+
 ### 10. Do Not Work Directly on `main`
 
 The `main` branch is managed only by the instructors.
