@@ -414,24 +414,29 @@ class MagnetometerReader:
         ax3.grid(True)
         line_bz, = ax3.plot([], [], 'r-', label='Bz', linewidth=2)
 
-        # 3D trajectory plot
-        ax4.set_title(f'Sensor {self.plot_sensor} - 3D Trajectory')
-        ax4.set_xlabel('Bx')
-        ax4.set_ylabel('By')
-        ax4.set_zlabel('Bz')
+        # 3D sensor-grid field magnitude plot
+        ax4.set_title('16-Sensor Grid Field Magnitude')
+        ax4.set_xlabel('Grid X')
+        ax4.set_ylabel('Grid Y')
+        ax4.set_zlabel('Field magnitude')
+        ax4.grid(True)
+
+        sensor_grid_x = np.array([i % 4 for i in range(16)])
+        sensor_grid_y = np.array([i // 4 for i in range(16)])
+
         # Initialize empty 3D scatter - will be updated in animation
-        scatter_3d = None
+        scatter_3d = ax4.scatter(sensor_grid_x, sensor_grid_y, np.zeros(16), c=np.zeros(16), cmap='viridis', s=60)
 
         def init_plot():
             line_bx.set_data([], [])
             line_by.set_data([], [])
             line_bz.set_data([], [])
-            return line_bx, line_by, line_bz
+            return line_bx, line_by, line_bz, scatter_3d
 
         def update_plot(frame):
             data = self.get_data_copy()
             if not data:
-                return line_bx, line_by, line_bz
+                return line_bx, line_by, line_bz, scatter_3d
 
             # Extract Bx, By, Bz for selected sensor
             sensor_idx = self.plot_sensor - 1
@@ -451,21 +456,24 @@ class MagnetometerReader:
                     ax.set_xlim(0, len(data_vals))
                     ax.set_ylim(min(data_vals) * 1.1, max(data_vals) * 1.1)
 
-            # Update 3D scatter plot
+            # Use the most recent full-row reading for the 16-sensor grid
+            latest_row = data[-1]
+            mag_data = latest_row[1:49]
+            magnitudes = np.array([np.sqrt(mag_data[i*3]**2 + mag_data[i*3+1]**2 + mag_data[i*3+2]**2) for i in range(16)])
+
             ax4.clear()
-            ax4.set_title(f'Sensor {self.plot_sensor} - 3D Trajectory')
-            ax4.set_xlabel('Bx')
-            ax4.set_ylabel('By')
-            ax4.set_zlabel('Bz')
+            ax4.set_title('16-Sensor Grid Field Magnitude')
+            ax4.set_xlabel('Grid X')
+            ax4.set_ylabel('Grid Y')
+            ax4.set_zlabel('Field magnitude')
             ax4.grid(True)
 
-            if len(bx_data) > 1:
-                colors = np.linspace(0, 1, len(bx_data))
-                scatter_3d = ax4.scatter(bx_data, by_data, bz_data, c=colors, cmap='viridis', s=20)
-                ax4.plot(bx_data, by_data, bz_data, 'k-', alpha=0.3, linewidth=1)
+            if len(magnitudes) == 16:
+                scatter_3d = ax4.scatter(sensor_grid_x, sensor_grid_y, magnitudes, c=magnitudes, cmap='viridis', s=80)
+                ax4.plot_trisurf(sensor_grid_x, sensor_grid_y, magnitudes, cmap='viridis', alpha=0.5, linewidth=0.2)
 
             plt.tight_layout()
-            return line_bx, line_by, line_bz
+            return line_bx, line_by, line_bz, scatter_3d
 
         ani = FuncAnimation(fig, update_plot, init_func=init_plot, interval=100, blit=False)
         plt.show()
