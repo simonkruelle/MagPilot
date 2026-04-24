@@ -1,0 +1,46 @@
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+*.tmp
+*.temp
+
+# Data files
+*.csv
+magnetometer_data.csv
+test_output.csv
+
+# Logs
+*.log
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Build and distribution
+build/
+dist/
+*.egg-info/
+
+# Test coverage
+.coverage
+htmlcov/
+
+# Node modules (if any)
+node_modules/

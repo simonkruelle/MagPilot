@@ -464,3 +464,74 @@ git branch
 ```
 
 **Make sure you are working on your own branch, not on `main`.**
+
+---
+
+## Magnetometer Data Reader
+
+This project includes a Python program for reading magnetometer data from a serial port, as required for the Collaborative Robotics seminar.
+
+### Files
+
+- `magnetometer_reader.py` - Main program for reading and processing magnetometer data
+- `test_components.py` - Test script to verify program components
+- `requirements.txt` - Python dependencies
+
+### Setup
+
+1. Activate your conda environment:
+   ```bash
+   conda activate simon
+   ```
+
+2. Install dependencies (if not already installed):
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+### Running the Program
+
+1. Connect your magnetometer hardware to a serial port
+2. Run the program:
+   ```bash
+   python magnetometer_reader.py
+   ```
+
+3. The program will:
+   - List available serial ports
+   - Let you choose the correct port
+   - Open the port at 921600 baud
+   - Start a reading thread at 100 Hz
+   - Parse incoming packets (header 0xAA, 54 floats, tail 0xBB)
+   - Display decoded data in terminal
+   - Save data to CSV file (`magnetometer_data.csv`)
+   - Show real-time plots using matplotlib
+
+### Data Format
+
+The CSV file contains rows with the following format:
+- **Magnetic field data** (48 values): Bx1, By1, Bz1, ..., Bx16, By16, Bz16 (16 sensors × 3 axes)
+- **Pose data** (6 values): x, y, z, mx, my, mz
+
+### Packet Structure
+
+- **Header**: 0xAA (1 byte)
+- **Data**: 54 floats (216 bytes, little-endian)
+- **Tail**: 0xBB (1 byte)
+- **Total packet size**: 218 bytes
+
+### Testing
+
+Run the component tests to verify functionality:
+
+```bash
+python test_components.py
+```
+
+This tests port listing, packet parsing, and CSV writing without requiring hardware.
+
+### Safety
+
+- Press `Ctrl+C` to safely close the serial port and exit
+- The program uses threading locks for thread-safe data access
+- Data is buffered in memory for plotting and saved to disk
