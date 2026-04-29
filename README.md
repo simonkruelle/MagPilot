@@ -546,6 +546,39 @@ This creates files such as:
 - `digit_5_YYYYMMDD_HHMMSS.csv`
 - `digit_images/digit_5_YYYYMMDD_HHMMSS_64px.png`
 
+## Data Processing Pipeline
+
+The project implements a complete pipeline for processing magnetometer data and classifying 2D magnet trajectories as digits. The pipeline consists of the following stages:
+
+1. **Data Acquisition**:
+   - Reads serial data from the magnetometer hardware at high baudrates (default: 921600).
+   - Parses packets containing magnetic field data (48 floats for 16 sensors × 3 axes) and pose data (6 floats for position and orientation).
+   - Buffers data in memory for real-time processing.
+
+2. **Real-time Visualization and Logging**:
+   - Plots magnetic field components (Bx, By, Bz) for a selected sensor in real-time.
+   - Logs all data to CSV for offline analysis.
+   - Displays 3D pose trajectories and live projections.
+
+3. **Session Recording**:
+   - Allows users to record specific digit-drawing sessions by pressing digit keys (0-9).
+   - Captures pose trajectories during the session for later processing.
+
+4. **2D Projection**:
+   - Projects 3D pose trails (x, y, z coordinates) onto a 2D grayscale image.
+   - Maps Z-values to stroke darkness, creating digit-like images (default: 64x64 pixels).
+   - Saves projected images as PNG files in the `digit_images/` directory.
+
+5. **Digit Classification**:
+   - Uses EasyOCR (pretrained OCR model) to classify the 2D projected images as digits 0-9.
+   - Provides real-time predictions with confidence scores and smoothed results.
+   - Supports GPU acceleration for faster inference.
+
+6. **Post-Processing Analysis**:
+   - Uses `csv_visualizer.py` to analyze recorded CSV data with various plot types (Z-axis overview, sensor analysis, pose data, 3D trajectories, statistics).
+
+This pipeline enables the classification of handwritten digits drawn via magnetometer pose trajectories, facilitating applications in human-robot interaction and assistive technology.
+
 ### Digit Classifier
 
 The project can use EasyOCR as a pretrained digit recognizer for the live 64x64 projection. This avoids collecting a custom training set and avoids training a local model.
