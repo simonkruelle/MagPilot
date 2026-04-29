@@ -22,8 +22,27 @@ import os
 from datetime import datetime
 import select
 
+PACKET_SIZE = 218
+PACKET_HEADER = 0xAA
+PACKET_TAIL = 0xBB
+POSE_LIMIT = 0.05
+
+
 class MagnetometerReader:
-    def __init__(self, plot_sensor=1):
+    def __init__(
+        self,
+        plot_sensor=1,
+        verbose=False,
+        trail_length=250,
+        image_size=64,
+        projection_extent=POSE_LIMIT,
+        z_close_mode='max',
+        z_near=None,
+        z_far=None,
+        image_output_dir='digit_images',
+        enable_classifier=True,
+        classifier_gpu=False,
+    ):
         self.serial_port = None
         self.is_running = False
         self.read_thread = None
@@ -32,6 +51,24 @@ class MagnetometerReader:
         self.csv_file = None
         self.csv_writer = None
         self.plot_sensor = plot_sensor  # Which sensor to plot (1-16)
+        self.verbose = verbose
+        self.packet_struct = struct.Struct('<54f')
+        self.packet_count = 0
+        self.bad_packet_count = 0
+        self.trail_length = trail_length
+        self.image_size = image_size
+        self.projection_extent = projection_extent
+        self.z_close_mode = z_close_mode
+        self.z_near = z_near
+        self.z_far = z_far
+        self.image_output_dir = image_output_dir
+        self.prediction_history = deque(maxlen=5)
+        self.classifier = None
+        self.classifier_gpu = classifier_gpu
+        self._classifier_frame_skip = 0
+
+        if enable_classifier:
+            self.load_classifier()
 
         # Session recording
         self.recording_sessions = []  # List of (session_name, start_time, end_time, data_points)
@@ -40,6 +77,17 @@ class MagnetometerReader:
 
         # Setup signal handler for graceful shutdown
         signal.signal(signal.SIGINT, self.signal_handler)
+
+    def load_classifier(self):
+        """Load the optional pretrained EasyOCR digit classifier."""
+        try:
+            from digit_classifier.inference import DigitClassifier
+
+            self.classifier = DigitClassifier(gpu=self.classifier_gpu)
+            print("Loaded EasyOCR digit classifier")
+        except Exception as e:
+            self.classifier = None
+            print(f"Digit classifier not loaded: {e}")
 
     def list_ports(self):
         """List all available serial ports."""
@@ -79,8 +127,9 @@ class MagnetometerReader:
                 bytesize=serial.EIGHTBITS,
                 parity=serial.PARITY_NONE,
                 stopbits=serial.STOPBITS_ONE,
-                timeout=1
+                timeout=0
             )
+            self.serial_port.reset_input_buffer()
             print(f"Opened serial port {port_name} at {baudrate} baud")
             return True
         except serial.SerialException as e:
@@ -131,26 +180,22 @@ class MagnetometerReader:
         - **microTesla (μT)**: Typical range 10 - 100 μT (Earth's field ~25-65 μT)
         - **milliGauss (mG)**: Typical range 0.1 - 1.0 mG
         """
-        print(f"DEBUG - parse_packet called with {len(data)} bytes")
-        if len(data) != 218:  # 1 header + 216 data + 1 tail
-            print(f"DEBUG - Wrong packet size: {len(data)}, expected 218")
+        if len(data) != PACKET_SIZE:  # 1 header + 216 data + 1 tail
+            if self.verbose:
+                print(f"DEBUG - Wrong packet size: {len(data)}, expected {PACKET_SIZE}")
             return None
 
-        if data[0] != 0xAA or data[-1] != 0xBB:
-            print(f"DEBUG - Wrong header/tail: header=0x{data[0]:02X} (expected 0xAA), tail=0x{data[-1]:02X} (expected 0xBB)")
+        if data[0] != PACKET_HEADER or data[-1] != PACKET_TAIL:
+            if self.verbose:
+                print(f"DEBUG - Wrong header/tail: header=0x{data[0]:02X} (expected 0xAA), tail=0x{data[-1]:02X} (expected 0xBB)")
             return None
 
         try:
-            # Try little-endian first (most common)
-            floats = struct.unpack('<54f', data[1:217])  # Skip header, include 216 bytes of float data
-        except struct.error:
-            try:
-                # Try big-endian if little-endian fails
-                floats = struct.unpack('>54f', data[1:217])
-                print("DEBUG - Used big-endian byte order")
-            except struct.error as e:
+            floats = self.packet_struct.unpack(data[1:217])  # Skip header, include 216 bytes of float data
+        except struct.error as e:
+            if self.verbose:
                 print(f"DEBUG - Failed to unpack floats: {e}")
-                return None
+            return None
 
         # Split into magnetic field data (48 floats) and pose data (6 floats)
         mag_data = floats[:48]  # 16 sensors × 3 axes
@@ -158,26 +203,42 @@ class MagnetometerReader:
 
         return mag_data, pose_data
 
-    def read_serial_data(self):
-        """Thread function to read serial data at 100 Hz."""
-        buffer = bytearray()
-        target_hz = 100
-        interval = 1.0 / target_hz
+    def print_packet_summary(self, mag_data, pose_data):
+        """Print one decoded packet. Intended for debugging, not normal real-time use."""
+        print(f"\n{'='*60}")
+        print(f"PACKET RECEIVED - Sensor {self.plot_sensor} (Highlighted)")
+        print(f"{'='*60}")
+        print("MAGNETIC FIELD DATA (Bx, By, Bz per sensor):")
+        for i in range(16):
+            bx = mag_data[i*3]
+            by = mag_data[i*3 + 1]
+            bz = mag_data[i*3 + 2]
+            marker = " <-- PLOTTING" if i+1 == self.plot_sensor else ""
+            print(f"  Sensor {i+1:2d}: Bx={bx:>10.6f}, By={by:>10.6f}, Bz={bz:>10.6f}{marker}")
 
-        print(f"Starting serial read thread at {target_hz} Hz")
+        print("\nPOSE DATA:")
+        print(f"  Position:  x={pose_data[0]:>10.6f}, y={pose_data[1]:>10.6f}, z={pose_data[2]:>10.6f}")
+        print(f"  Rotation: mx={pose_data[3]:>10.6f}, my={pose_data[4]:>10.6f}, mz={pose_data[5]:>10.6f}")
+
+    def read_serial_data(self):
+        """Thread function to read serial data as fast as packets arrive."""
+        buffer = bytearray()
+        last_status_time = time.monotonic()
+        last_status_count = 0
+
+        print("Starting serial read thread in real-time mode")
 
         while self.is_running:
-            start_time = time.time()
-
             if self.serial_port and self.serial_port.is_open:
                 try:
                     # Read available data
-                    data = self.serial_port.read(self.serial_port.in_waiting or 1)
+                    waiting = self.serial_port.in_waiting
+                    data = self.serial_port.read(waiting if waiting else PACKET_SIZE)
                     if data:
                         buffer.extend(data)
 
                         # Look for complete packets
-                        while len(buffer) >= 218:  # Minimum packet size
+                        while len(buffer) >= PACKET_SIZE:
                             # Find packet start (0xAA)
                             start_idx = buffer.find(b'\xAA')
                             if start_idx == -1:
@@ -190,11 +251,11 @@ class MagnetometerReader:
                                 del buffer[:start_idx]
 
                             # Check if we have a complete packet
-                            if len(buffer) >= 218:
+                            if len(buffer) >= PACKET_SIZE:
                                 # Check for end marker (0xBB at position 217)
-                                if buffer[217] == 0xBB:
+                                if buffer[PACKET_SIZE - 1] == PACKET_TAIL:
                                     # Extract packet
-                                    packet_data = buffer[:218]
+                                    packet_data = buffer[:PACKET_SIZE]
 
                                     # Parse the packet
                                     parsed = self.parse_packet(packet_data)
@@ -213,63 +274,51 @@ class MagnetometerReader:
                                         with self.data_lock:
                                             self.data_buffer.append(row_data)
 
-                                            # Write to CSV
-                                            if self.csv_writer:
-                                                self.csv_writer.writerow(row_data)
-
                                             # Store in current session if recording
                                             if self.current_session:
                                                 self.session_data.append(row_data)
 
-                                        # Print decoded data in a well-formatted way
-                                        print(f"\n{'='*60}")
-                                        print(f"PACKET RECEIVED - Sensor {self.plot_sensor} (Highlighted)")
-                                        print(f"{'='*60}")
+                                        # CSV writing is kept outside the plot/session lock so disk I/O
+                                        # cannot stall the UI data copy.
+                                        if self.csv_writer:
+                                            self.csv_writer.writerow(row_data)
 
-                                        # Show magnetic field data for all sensors
-                                        print(f"MAGNETIC FIELD DATA (Bx, By, Bz per sensor):")
-                                        for i in range(16):
-                                            bx = mag_data[i*3]
-                                            by = mag_data[i*3 + 1]
-                                            bz = mag_data[i*3 + 2]
-                                            marker = " <-- PLOTTING" if i+1 == self.plot_sensor else ""
-                                            print(f"  Sensor {i+1:2d}: Bx={bx:>10.6f}, By={by:>10.6f}, Bz={bz:>10.6f}{marker}")
+                                        self.packet_count += 1
 
-                                        # Show pose data
-                                        print(f"\nPOSE DATA:")
-                                        print(f"  Position:  x={pose_data[0]:>10.6f}, y={pose_data[1]:>10.6f}, z={pose_data[2]:>10.6f}")
-                                        print(f"  Rotation: mx={pose_data[3]:>10.6f}, my={pose_data[4]:>10.6f}, mz={pose_data[5]:>10.6f}")
-
-                                        # Show units reminder
-                                        print(f"\nUNITS REMINDER:")
-                                        print(f"  Magnetic field units depend on your sensor hardware.")
-                                        print(f"  Typical ranges: Tesla (0.00001-0.0001), Gauss (0.0001-0.001), μTesla (10-100)")
-                                        print(f"  Check your magnetometer datasheet for exact specifications.")
-
-                                        # Show recording status
-                                        if self.current_session:
-                                            print(f"  📹 RECORDING: {self.current_session} ({len(self.session_data)} points)")
+                                        if self.verbose:
+                                            self.print_packet_summary(mag_data, pose_data)
 
                                     else:
-                                        print(f"DEBUG - Failed to parse packet: len={len(packet_data)}, header=0x{packet_data[0]:02X}, tail=0x{packet_data[-1]:02X}")
+                                        self.bad_packet_count += 1
+                                        if self.verbose:
+                                            print(f"DEBUG - Failed to parse packet: len={len(packet_data)}, header=0x{packet_data[0]:02X}, tail=0x{packet_data[-1]:02X}")
 
                                     # Remove processed packet from buffer
-                                    del buffer[:218]
+                                    del buffer[:PACKET_SIZE]
                                 else:
                                     # End marker not found, remove start marker and continue
                                     del buffer[0]
                             else:
                                 # Not enough data for complete packet, wait for more
                                 break
+                    else:
+                        time.sleep(0.001)
 
                 except serial.SerialException as e:
                     print(f"Serial read error: {e}")
                     time.sleep(0.1)
 
-            # Maintain target frequency
-            elapsed = time.time() - start_time
-            if elapsed < interval:
-                time.sleep(interval - elapsed)
+            now = time.monotonic()
+            if now - last_status_time >= 1.0:
+                packets_since_last = self.packet_count - last_status_count
+                status = f"Read rate: {packets_since_last / (now - last_status_time):.1f} packets/s"
+                if self.current_session:
+                    status += f" | RECORDING: {self.current_session} ({len(self.session_data)} points)"
+                if self.bad_packet_count:
+                    status += f" | bad packets: {self.bad_packet_count}"
+                print(status)
+                last_status_time = now
+                last_status_count = self.packet_count
 
     def start_reading(self):
         """Start the reading thread."""
@@ -303,12 +352,8 @@ class MagnetometerReader:
 
     def handle_keypress(self, key):
         """Handle keyboard input for session controls."""
-        if key == '1':
-            self.start_session('no_magnet')
-        elif key == '2':
-            self.start_session('magnet_still')
-        elif key == '3':
-            self.start_session('magnet_moving')
+        if key in '0123456789':
+            self.start_session(f'digit_{key}')
         elif key == 's':
             self.stop_session()
         elif key == 'q':
@@ -323,8 +368,10 @@ class MagnetometerReader:
 
         self.current_session = session_name
         self.session_data = []
+        self.prediction_history.clear()
         print(f"\n🎬 STARTED RECORDING SESSION: '{session_name}'")
         print(f"Recording to main CSV file: {self.csv_file.name if self.csv_file else 'None'}")
+        print(f"Projected digit image will be saved in: {self.image_output_dir}")
 
     def stop_session(self):
         """Stop the current recording session."""
@@ -347,6 +394,10 @@ class MagnetometerReader:
 
         # Save session data to separate CSV file
         self.save_session_csv(session_name)
+        image_result = self.save_session_image(session_name)
+        if image_result:
+            _, digit_image = image_result
+            self.print_final_prediction(digit_image)
 
         self.current_session = None
         self.session_data = []
@@ -377,6 +428,138 @@ class MagnetometerReader:
         except IOError as e:
             print(f"Error saving session CSV: {e}")
 
+    def extract_pose_trail(self, rows, trail_length=None):
+        """Return pose X/Y/Z arrays from buffered CSV-style rows."""
+        if not rows:
+            return np.array([]), np.array([]), np.array([])
+
+        limit = trail_length if trail_length is not None else self.trail_length
+        rows = rows[-limit:] if limit and len(rows) > limit else rows
+
+        pose_x = np.array([row[-6] for row in rows], dtype=float)
+        pose_y = np.array([row[-5] for row in rows], dtype=float)
+        pose_z = np.array([row[-4] for row in rows], dtype=float)
+        return pose_x, pose_y, pose_z
+
+    def pose_to_digit_image(self, pose_x, pose_y, pose_z):
+        """
+        Project a 3D pose trail to a grayscale image.
+
+        X/Y select the pixel location. Z controls stroke darkness: points closer
+        to the sensor grid are darker, while untouched pixels remain white.
+        """
+        image = np.ones((self.image_size, self.image_size), dtype=float)
+        if len(pose_x) == 0:
+            return image
+
+        extent = self.projection_extent
+        if extent <= 0:
+            raise ValueError("projection_extent must be positive")
+
+        finite = np.isfinite(pose_x) & np.isfinite(pose_y) & np.isfinite(pose_z)
+        pose_x = pose_x[finite]
+        pose_y = pose_y[finite]
+        pose_z = pose_z[finite]
+        if len(pose_x) == 0:
+            return image
+
+        x_pixels = np.rint((pose_x + extent) / (2 * extent) * (self.image_size - 1)).astype(int)
+        y_pixels = np.rint((extent - pose_y) / (2 * extent) * (self.image_size - 1)).astype(int)
+
+        valid = (
+            (x_pixels >= 0) & (x_pixels < self.image_size) &
+            (y_pixels >= 0) & (y_pixels < self.image_size)
+        )
+        if not np.any(valid):
+            return image
+
+        x_pixels = x_pixels[valid]
+        y_pixels = y_pixels[valid]
+        z_values = pose_z[valid]
+
+        closeness = self.z_to_closeness(z_values)
+
+        brush_radius = max(1.25, self.image_size / 32.0)
+        brush_extent = int(np.ceil(brush_radius * 2.5))
+
+        for x, y, close in zip(x_pixels, y_pixels, closeness):
+            stroke_strength = 0.18 + 0.82 * float(np.clip(close, 0.0, 1.0))
+
+            x0 = max(0, x - brush_extent)
+            x1 = min(self.image_size, x + brush_extent + 1)
+            y0 = max(0, y - brush_extent)
+            y1 = min(self.image_size, y + brush_extent + 1)
+
+            yy, xx = np.ogrid[y0:y1, x0:x1]
+            dist_sq = (xx - x) ** 2 + (yy - y) ** 2
+            brush = np.exp(-dist_sq / (2 * brush_radius ** 2))
+            patch = 1.0 - stroke_strength * brush
+            image[y0:y1, x0:x1] = np.minimum(image[y0:y1, x0:x1], patch)
+
+        return np.clip(image, 0.0, 1.0)
+
+    @staticmethod
+    def normalize_values(values):
+        values = np.asarray(values, dtype=float)
+        value_min = np.nanmin(values)
+        value_max = np.nanmax(values)
+        if not np.isfinite(value_min) or not np.isfinite(value_max) or value_max == value_min:
+            return np.full_like(values, 0.5)
+        return (values - value_min) / (value_max - value_min)
+
+    def z_to_closeness(self, z_values):
+        """Map Z values to 0..1 closeness, where 1 creates the darkest stroke."""
+        z_values = np.asarray(z_values, dtype=float)
+
+        if self.z_near is not None and self.z_far is not None:
+            denominator = self.z_near - self.z_far
+            if denominator == 0:
+                return np.full_like(z_values, 0.5)
+            return np.clip((z_values - self.z_far) / denominator, 0.0, 1.0)
+
+        if self.z_close_mode == 'max':
+            return self.normalize_values(z_values)
+        if self.z_close_mode == 'abs-min':
+            return 1.0 - self.normalize_values(np.abs(z_values))
+        return 1.0 - self.normalize_values(z_values)
+
+    def rows_to_digit_image(self, rows, trail_length=None):
+        pose_x, pose_y, pose_z = self.extract_pose_trail(rows, trail_length=trail_length)
+        return self.pose_to_digit_image(pose_x, pose_y, pose_z)
+
+    def save_session_image(self, session_name):
+        """Save the recorded pose trail as a classifier-ready grayscale PNG."""
+        if not self.session_data:
+            return
+
+        image = self.rows_to_digit_image(self.session_data)
+        output_dir = self.image_output_dir
+        os.makedirs(output_dir, exist_ok=True)
+        filename = f"{session_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{self.image_size}px.png"
+        output_path = os.path.join(output_dir, filename)
+        plt.imsave(output_path, image, cmap='gray', vmin=0.0, vmax=1.0)
+        print(f"Projected digit image saved to: {output_path}")
+        return output_path, image
+
+    def print_final_prediction(self, digit_image):
+        """Run one final unsmoothed prediction for a completed recording."""
+        if self.classifier is None:
+            return
+
+        try:
+            result = self.classifier.predict(digit_image.astype(np.float32))
+        except Exception as e:
+            print(f"Final digit prediction failed: {e}")
+            return
+
+        probabilities = result['probabilities']
+        top_two = np.argsort(probabilities)[-2:][::-1]
+        print(
+            "Final digit prediction: "
+            f"{int(top_two[0])} ({probabilities[top_two[0]] * 100:.1f}%), "
+            f"runner-up {int(top_two[1])} ({probabilities[top_two[1]] * 100:.1f}%)"
+        )
+
     def get_data_copy(self):
         """Get a copy of the data buffer for plotting (thread-safe)."""
         with self.data_lock:
@@ -384,14 +567,19 @@ class MagnetometerReader:
 
     def plot_data(self):
         """Create real-time plot of Bx, By, Bz for the selected sensor."""
-        fig = plt.figure(figsize=(12, 8))
-        fig.suptitle(f'Real-time Magnetometer Data - Sensor {self.plot_sensor}', fontsize=14)
+        fig = plt.figure(figsize=(14, 8))
+        fig.suptitle(
+            f'Real-time Magnetometer Data - Sensor {self.plot_sensor} | '
+            f'Projection: {self.image_size}x{self.image_size}, last {self.trail_length} samples',
+            fontsize=14
+        )
 
-        # Create subplots: 3 2D plots and 1 3D plot
-        ax1 = fig.add_subplot(2, 2, 1)
-        ax2 = fig.add_subplot(2, 2, 2)
-        ax3 = fig.add_subplot(2, 2, 3)
-        ax4 = fig.add_subplot(2, 2, 4, projection='3d')
+        ax1 = fig.add_subplot(2, 3, 1)
+        ax2 = fig.add_subplot(2, 3, 2)
+        ax3 = fig.add_subplot(2, 3, 3)
+        ax4 = fig.add_subplot(2, 3, 4, projection='3d')
+        ax5 = fig.add_subplot(2, 3, 5)
+        ax6 = fig.add_subplot(2, 3, 6)
 
         # Bx plot
         ax1.set_title(f'Sensor {self.plot_sensor} - Bx')
@@ -425,23 +613,64 @@ class MagnetometerReader:
             ax4.set_box_aspect([1, 1, 1])
         except Exception:
             pass
-        ax4.set_xlim(-0.05, 0.05)
-        ax4.set_ylim(-0.05, 0.05)
-        ax4.set_zlim(-0.05, 0.05)
+        ax4.set_xlim(-self.projection_extent, self.projection_extent)
+        ax4.set_ylim(-self.projection_extent, self.projection_extent)
+        ax4.set_zlim(-POSE_LIMIT, POSE_LIMIT)
 
-        # Initialize empty 3D scatter - will be updated in animation
-        scatter_3d = ax4.scatter([], [], [], c=[], cmap='viridis', s=80, edgecolors='k', linewidths=0.5)
+        # Live 2D projection preview for digit-classifier style inference.
+        projection_image = np.ones((self.image_size, self.image_size), dtype=float)
+        image_artist = ax5.imshow(projection_image, cmap='gray', vmin=0.0, vmax=1.0, interpolation='nearest')
+        ax5.set_title('2D Digit Projection')
+        ax5.set_xticks([])
+        ax5.set_yticks([])
+
+        z_range = (
+            f"calibrated {self.z_near:.4f}->{self.z_far:.4f}"
+            if self.z_near is not None and self.z_far is not None
+            else "relative trail range"
+        )
+        ax6.set_title('EasyOCR Digit Classifier')
+        ax6.set_ylim(0.0, 1.0)
+        ax6.set_xlim(-0.5, 9.5)
+        ax6.set_xticks(range(10))
+        ax6.set_ylabel('Probability')
+        prob_bars = ax6.bar(range(10), np.zeros(10), color='#7c9cc8')
+        info_text = ax6.text(
+            0.0,
+            1.28,
+            "Prediction: --\n"
+            "Runner-up: --\n"
+            f"Z: -- ({z_range})",
+            transform=ax6.transAxes,
+            va='top',
+            fontsize=9,
+        )
+        ax6.text(
+            0.0,
+            -0.28,
+            f"X/Y projection, {self.image_size}px, trail {self.trail_length}, Z mode {self.z_close_mode}",
+            transform=ax6.transAxes,
+            va='top',
+            fontsize=8,
+        )
+        if self.classifier is None:
+            info_text.set_text(
+                "Prediction: classifier not loaded\n"
+                "Runner-up: --\n"
+                f"Z: -- ({z_range})"
+            )
 
         def init_plot():
             line_bx.set_data([], [])
             line_by.set_data([], [])
             line_bz.set_data([], [])
-            return line_bx, line_by, line_bz, scatter_3d
+            image_artist.set_data(projection_image)
+            return line_bx, line_by, line_bz, image_artist
 
         def update_plot(frame):
             data = self.get_data_copy()
             if not data:
-                return line_bx, line_by, line_bz, scatter_3d
+                return line_bx, line_by, line_bz, image_artist
 
             # Extract Bx, By, Bz for selected sensor
             sensor_idx = self.plot_sensor - 1
@@ -459,20 +688,48 @@ class MagnetometerReader:
             for ax, data_vals in [(ax1, bx_data), (ax2, by_data), (ax3, bz_data)]:
                 if data_vals:
                     ax.set_xlim(0, len(data_vals))
-                    ax.set_ylim(min(data_vals) * 1.1, max(data_vals) * 1.1)
+                    y_min = min(data_vals)
+                    y_max = max(data_vals)
+                    if y_min == y_max:
+                        pad = abs(y_min) * 0.1 or 1.0
+                        ax.set_ylim(y_min - pad, y_max + pad)
+                    else:
+                        ax.set_ylim(y_min * 1.1, y_max * 1.1)
                     ax.legend(loc='upper right')
 
-            # Use pose coordinates from each row for magnet trajectory
-            pose_x = [row[-6] for row in data]
-            pose_y = [row[-5] for row in data]
-            pose_z = [row[-4] for row in data]
+            pose_x, pose_y, pose_z = self.extract_pose_trail(data)
+            digit_image = self.pose_to_digit_image(pose_x, pose_y, pose_z)
+            image_artist.set_data(digit_image)
+            prediction_text = "Prediction: --"
+            runner_up_text = "Runner-up: --"
+            self._classifier_frame_skip += 1
+            if self.classifier is not None and self._classifier_frame_skip % 3 == 0:
+                try:
+                    result = self.classifier.predict_smoothed(
+                        digit_image.astype(np.float32),
+                        self.prediction_history,
+                    )
+                    probabilities = result['probabilities']
+                    top_two = np.argsort(probabilities)[-2:][::-1]
+                    prediction_text = f"Prediction: {int(top_two[0])} ({probabilities[top_two[0]] * 100:.1f}%)"
+                    runner_up_text = f"Runner-up:  {int(top_two[1])} ({probabilities[top_two[1]] * 100:.1f}%)"
+                    for digit, bar in enumerate(prob_bars):
+                        bar.set_height(float(probabilities[digit]))
+                        bar.set_color('#2f5f9f' if digit == int(top_two[0]) else '#7c9cc8')
+                except Exception as e:
+                    prediction_text = f"Prediction failed: {e}"
+                    runner_up_text = "Runner-up: --"
 
-            # Keep the trajectory long enough to draw letters, but still limit noise
-            trail_length = 150
-            if len(pose_x) > trail_length:
-                pose_x = pose_x[-trail_length:]
-                pose_y = pose_y[-trail_length:]
-                pose_z = pose_z[-trail_length:]
+            if len(pose_z) > 0:
+                finite_z = pose_z[np.isfinite(pose_z)]
+                if len(finite_z) > 0:
+                    info_text.set_text(
+                        f"{prediction_text}\n"
+                        f"{runner_up_text}\n"
+                        f"Z: {finite_z[-1]:.5f} [{np.min(finite_z):.5f}, {np.max(finite_z):.5f}]"
+                    )
+            else:
+                info_text.set_text(f"{prediction_text}\n{runner_up_text}\nZ: -- ({z_range})")
 
             ax4.clear()
             ax4.set_title('Magnet Trajectory from Pose X/Y/Z')
@@ -485,9 +742,9 @@ class MagnetometerReader:
                 ax4.set_box_aspect([1, 1, 1])
             except Exception:
                 pass
-            ax4.set_xlim(-0.05, 0.05)
-            ax4.set_ylim(-0.05, 0.05)
-            ax4.set_zlim(-0.05, 0.05)
+            ax4.set_xlim(-self.projection_extent, self.projection_extent)
+            ax4.set_ylim(-self.projection_extent, self.projection_extent)
+            ax4.set_zlim(-POSE_LIMIT, POSE_LIMIT)
 
             if len(pose_x) > 1:
                 colors = np.linspace(0, 1, len(pose_x))
@@ -497,7 +754,7 @@ class MagnetometerReader:
                 ax4.legend(loc='best', fontsize='small')
 
             plt.tight_layout()
-            return line_bx, line_by, line_bz, scatter_3d
+            return line_bx, line_by, line_bz, image_artist
 
         ani = FuncAnimation(fig, update_plot, init_func=init_plot, interval=100, blit=False)
         plt.show()
@@ -535,7 +792,7 @@ class MagnetometerReader:
                 return
 
             # Start CSV logging
-            if not self.start_csv_logging(csv_filename):
+            if csv_filename and not self.start_csv_logging(csv_filename):
                 return
 
             # Start reading thread
@@ -546,11 +803,10 @@ class MagnetometerReader:
             print("MAGNETOMETER DATA ACQUISITION SYSTEM")
             print("="*60)
             print("Controls:")
-            print("  1: Start recording 'no_magnet' session")
-            print("  2: Start recording 'magnet_still' session")
-            print("  3: Start recording 'magnet_moving' session")
-            print("  s: Stop current recording session")
-            print("  q: Quit program")
+            print("  0-9: Start recording that digit")
+            print("  s:   Stop current recording and save CSV + projected PNG")
+            print("  q:   Quit program")
+            print(f"Projection: X/Y plane, Z intensity, {self.image_size}x{self.image_size}px, last {self.trail_length} samples")
             print("="*60)
             print("Press Ctrl+C to stop...")
 
@@ -575,17 +831,70 @@ def main():
                        help='Serial baudrate (default: 921600)')
     parser.add_argument('--csv', '-c', type=str, default='magnetometer_data.csv',
                        help='CSV output filename (default: magnetometer_data.csv)')
+    parser.add_argument('--no-csv', action='store_true',
+                       help='Disable CSV logging for maximum live read rate')
+    parser.add_argument('--verbose', '-v', action='store_true',
+                       help='Print every decoded packet for debugging (slows real-time reading)')
+    parser.add_argument('--trail-length', type=int, default=250,
+                       help='Number of recent pose samples used for the 3D trail and 2D image (default: 250)')
+    parser.add_argument('--image-size', type=int, default=64,
+                       help='Width and height of saved/live projection images in pixels (default: 64)')
+    parser.add_argument('--image-dir', type=str, default='digit_images',
+                       help='Directory for projected digit PNGs (default: digit_images)')
+    parser.add_argument('--projection-extent', type=float, default=POSE_LIMIT,
+                       help='Half-width of the X/Y projection area in pose units (default: 0.05)')
+    parser.add_argument('--z-close-mode', choices=['min', 'max', 'abs-min'], default='max',
+                       help='How Z maps to closeness/darkness: max means larger Z is darker (default)')
+    parser.add_argument('--z-near', type=float, default=None,
+                       help='Z value for darkest stroke. Use with --z-far for fixed height calibration')
+    parser.add_argument('--z-far', type=float, default=None,
+                       help='Z value for lightest stroke. Use with --z-near for fixed height calibration')
+    parser.add_argument('--no-classifier', action='store_true',
+                       help='Skip loading the real-time EasyOCR digit classifier')
+    parser.add_argument('--classifier-gpu', action='store_true',
+                       help='Use GPU for EasyOCR if available')
 
     args = parser.parse_args()
+
+    if args.trail_length <= 0:
+        parser.error("--trail-length must be positive")
+    if args.image_size <= 0:
+        parser.error("--image-size must be positive")
+    if args.projection_extent <= 0:
+        parser.error("--projection-extent must be positive")
+    if (args.z_near is None) != (args.z_far is None):
+        parser.error("--z-near and --z-far must be provided together")
+    if args.z_near is not None and args.z_near == args.z_far:
+        parser.error("--z-near and --z-far must be different")
 
     print(f"Magnetometer Data Reader")
     print(f"Plotting Sensor: {args.sensor}")
     print(f"Baudrate: {args.baudrate}")
-    print(f"CSV Output: {args.csv}")
+    print(f"CSV Output: {'disabled' if args.no_csv else args.csv}")
+    print(f"Verbose Packet Output: {args.verbose}")
+    print(f"Projection Image: {args.image_size}x{args.image_size}px, trail={args.trail_length}, dir={args.image_dir}")
+    print(f"Projection Extent: +/-{args.projection_extent}, Z close mode: {args.z_close_mode}")
+    if args.z_near is not None:
+        print(f"Z Calibration: near={args.z_near}, far={args.z_far}")
+    else:
+        print("Z Calibration: relative per trail")
+    print(f"Digit Classifier: {'disabled' if args.no_classifier else 'EasyOCR'}")
     print("-" * 40)
 
-    reader = MagnetometerReader(plot_sensor=args.sensor)
-    reader.run(csv_filename=args.csv, baudrate=args.baudrate)
+    reader = MagnetometerReader(
+        plot_sensor=args.sensor,
+        verbose=args.verbose,
+        trail_length=args.trail_length,
+        image_size=args.image_size,
+        projection_extent=args.projection_extent,
+        z_close_mode=args.z_close_mode,
+        z_near=args.z_near,
+        z_far=args.z_far,
+        image_output_dir=args.image_dir,
+        enable_classifier=not args.no_classifier,
+        classifier_gpu=args.classifier_gpu,
+    )
+    reader.run(csv_filename=None if args.no_csv else args.csv, baudrate=args.baudrate)
 
 
 if __name__ == "__main__":

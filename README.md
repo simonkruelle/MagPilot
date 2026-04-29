@@ -503,18 +503,23 @@ This project includes a Python program for reading magnetometer data from a seri
 - `--sensor, -s`: Sensor number to plot (1-16, default: 1)
 - `--baudrate, -b`: Serial baudrate (default: 921600)
 - `--csv, -c`: CSV output filename (default: magnetometer_data.csv)
+- `--no-csv`: Disable CSV logging for maximum live read rate
+- `--trail-length`: Number of recent pose samples used for the 3D trail and 2D digit image (default: 250)
+- `--image-size`: Projection image size in pixels (default: 64)
+- `--image-dir`: Directory for projected digit PNGs (default: digit_images)
+- `--z-close-mode`: How Z maps to stroke darkness; `max` means larger Z is darker (default)
+- `--no-classifier`: Run without loading the real-time EasyOCR digit classifier
+- `--classifier-gpu`: Use GPU for EasyOCR if available
 
 #### Session Recording Controls
 
-The program supports recording separate data sessions for different experimental conditions:
+The program supports recording separate digit drawing sessions:
 
-- **1**: Start recording "no_magnet" session
-- **2**: Start recording "magnet_still" session  
-- **3**: Start recording "magnet_moving" session
-- **s**: Stop current recording session
+- **0-9**: Start recording that digit
+- **s**: Stop current recording session and save CSV + projected PNG
 - **q**: Quit program
 
-Each session creates a separate CSV file with timestamp and session name.
+Each session creates a separate CSV file and a 64x64 grayscale PNG in `digit_images/`.
 
 #### Examples
 
@@ -532,18 +537,46 @@ python magnetometer_reader.py
 ### Session Recording Workflow
 
 1. Start the program normally
-2. Press **1** to record baseline data (no magnet)
+2. Press the digit key you want to draw, e.g. **5**
 3. Press **s** to stop recording
-4. Press **2** to record data with magnet held still
-5. Press **s** to stop recording
-6. Press **3** to record data while moving the magnet
-7. Press **s** to stop recording
-8. Press **q** to quit
+4. Repeat for more samples
+5. Press **q** to quit
 
-This creates three separate CSV files for analysis:
-- `no_magnet_YYYYMMDD_HHMMSS.csv`
-- `magnet_still_YYYYMMDD_HHMMSS.csv`
-- `magnet_moving_YYYYMMDD_HHMMSS.csv`
+This creates files such as:
+- `digit_5_YYYYMMDD_HHMMSS.csv`
+- `digit_images/digit_5_YYYYMMDD_HHMMSS_64px.png`
+
+### Digit Classifier
+
+The project can use EasyOCR as a pretrained digit recognizer for the live 64x64 projection. This avoids collecting a custom training set and avoids training a local model.
+
+Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+The first EasyOCR run may download pretrained OCR weights. After that, inference uses the cached model.
+
+Run the magnetometer reader with real-time OCR classification:
+
+```bash
+python magnetometer_reader.py --no-csv
+```
+
+The live classifier panel shows the top prediction, runner-up, and a simple confidence bar chart for digits 0-9. The projected magnetometer image has a white background and dark strokes; the EasyOCR wrapper upsamples and autocontrasts the image before recognition.
+
+To skip classification:
+
+```bash
+python magnetometer_reader.py --no-classifier
+```
+
+To try GPU acceleration if available:
+
+```bash
+python magnetometer_reader.py --classifier-gpu
+```
 
 ### CSV Data Visualization
 

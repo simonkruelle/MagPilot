@@ -26,6 +26,8 @@ Thumbs.db
 *.csv
 magnetometer_data.csv
 test_output.csv
+data/
+digit_images/
 
 # Logs
 *.log
