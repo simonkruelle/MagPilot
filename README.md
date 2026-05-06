@@ -504,18 +504,20 @@ This project includes a Python program for reading magnetometer data from a seri
 - `--baudrate, -b`: Serial baudrate (default: 921600)
 - `--csv, -c`: CSV output filename (default: magnetometer_data.csv)
 - `--no-csv`: Disable CSV logging for maximum live read rate
-- `--trail-length`: Number of recent pose samples used for the 3D trail and 2D digit image (default: 250)
+- `--trail-length`: Number of recent pose samples used for the 3D trail and 2D character image (default: 250)
 - `--image-size`: Projection image size in pixels (default: 64)
-- `--image-dir`: Directory for projected digit PNGs (default: digit_images)
+- `--image-dir`: Directory for projected character PNGs (default: digit_images)
 - `--z-close-mode`: How Z maps to stroke darkness; `max` means larger Z is darker (default)
-- `--no-classifier`: Run without loading the real-time EasyOCR digit classifier
+- `--no-classifier`: Run without loading the real-time EasyOCR character classifier
 - `--classifier-gpu`: Use GPU for EasyOCR if available
+- `--classifier-labels`: Character set for EasyOCR recognition: `alphanumeric`, `digits`, or `letters` (default: alphanumeric)
 
 #### Session Recording Controls
 
-The program supports recording separate digit drawing sessions:
+The program supports recording separate character drawing sessions:
 
 - **0-9**: Start recording that digit
+- **A-Z**: Start recording that letter (lowercase **s** and **q** are reserved for controls; uppercase **S** and **Q** record letters)
 - **s**: Stop current recording session and save CSV + projected PNG
 - **q**: Quit program
 
@@ -537,7 +539,7 @@ python magnetometer_reader.py
 ### Session Recording Workflow
 
 1. Start the program normally
-2. Press the digit key you want to draw, e.g. **5**
+2. Press the digit or letter key you want to draw, e.g. **5** or **A**
 3. Press **s** to stop recording
 4. Repeat for more samples
 5. Press **q** to quit
@@ -545,10 +547,12 @@ python magnetometer_reader.py
 This creates files such as:
 - `digit_5_YYYYMMDD_HHMMSS.csv`
 - `digit_images/digit_5_YYYYMMDD_HHMMSS_64px.png`
+- `letter_A_YYYYMMDD_HHMMSS.csv`
+- `digit_images/letter_A_YYYYMMDD_HHMMSS_64px.png`
 
 ## Data Processing Pipeline
 
-The project implements a complete pipeline for processing magnetometer data and classifying 2D magnet trajectories as digits. The pipeline consists of the following stages:
+The project implements a complete pipeline for processing magnetometer data and classifying 2D magnet trajectories as characters. The pipeline consists of the following stages:
 
 1. **Data Acquisition**:
    - Reads serial data from the magnetometer hardware at high baudrates (default: 921600).
@@ -561,27 +565,27 @@ The project implements a complete pipeline for processing magnetometer data and 
    - Displays 3D pose trajectories and live projections.
 
 3. **Session Recording**:
-   - Allows users to record specific digit-drawing sessions by pressing digit keys (0-9).
+   - Allows users to record specific character-drawing sessions by pressing digit keys (0-9) or letter keys (A-Z).
    - Captures pose trajectories during the session for later processing.
 
 4. **2D Projection**:
    - Projects 3D pose trails (x, y, z coordinates) onto a 2D grayscale image.
-   - Maps Z-values to stroke darkness, creating digit-like images (default: 64x64 pixels).
+   - Maps Z-values to stroke darkness, creating OCR-ready character images (default: 64x64 pixels).
    - Saves projected images as PNG files in the `digit_images/` directory.
 
-5. **Digit Classification**:
-   - Uses EasyOCR (pretrained OCR model) to classify the 2D projected images as digits 0-9.
+5. **Character Classification**:
+   - Uses EasyOCR (pretrained OCR model) to classify the 2D projected images as digits 0-9 and letters A-Z.
    - Provides real-time predictions with confidence scores and smoothed results.
    - Supports GPU acceleration for faster inference.
 
 6. **Post-Processing Analysis**:
    - Uses `csv_visualizer.py` to analyze recorded CSV data with various plot types (Z-axis overview, sensor analysis, pose data, 3D trajectories, statistics).
 
-This pipeline enables the classification of handwritten digits drawn via magnetometer pose trajectories, facilitating applications in human-robot interaction and assistive technology.
+This pipeline enables the classification of handwritten characters drawn via magnetometer pose trajectories, facilitating applications in human-robot interaction and assistive technology.
 
-### Digit Classifier
+### Character Classifier
 
-The project can use EasyOCR as a pretrained digit recognizer for the live 64x64 projection. This avoids collecting a custom training set and avoids training a local model.
+The project can use EasyOCR as a pretrained character recognizer for the live 64x64 projection. This avoids collecting a custom training set and avoids training a local model.
 
 Install dependencies:
 
@@ -597,7 +601,7 @@ Run the magnetometer reader with real-time OCR classification:
 python magnetometer_reader.py --no-csv
 ```
 
-The live classifier panel shows the top prediction, runner-up, and a simple confidence bar chart for digits 0-9. The projected magnetometer image has a white background and dark strokes; the EasyOCR wrapper upsamples and autocontrasts the image before recognition.
+The live classifier panel shows the top prediction, runner-up, and a top-character confidence chart. By default the classifier accepts digits 0-9 and letters A-Z; use `--classifier-labels digits` or `--classifier-labels letters` to narrow the recognition set. The projected magnetometer image has a white background and dark strokes; the EasyOCR wrapper upsamples and autocontrasts the image before recognition.
 
 To skip classification:
 

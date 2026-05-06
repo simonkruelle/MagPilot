@@ -26,6 +26,25 @@ PACKET_SIZE = 218
 PACKET_HEADER = 0xAA
 PACKET_TAIL = 0xBB
 POSE_LIMIT = 0.05
+DEFAULT_CLASSIFIER_LABELS = tuple('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ')
+CLASSIFIER_LABEL_PRESETS = {
+    'digits': tuple('0123456789'),
+    'letters': tuple('ABCDEFGHIJKLMNOPQRSTUVWXYZ'),
+    'alphanumeric': DEFAULT_CLASSIFIER_LABELS,
+}
+
+
+def top_label_indices(scores, count):
+    """Return label indices sorted by descending score, keeping label order for ties."""
+    ranked = list(range(len(scores)))
+    ranked.sort(key=lambda index: (-float(scores[index]), index))
+    return ranked[:count]
+
+
+def display_labels_for(labels):
+    if isinstance(labels, str):
+        return CLASSIFIER_LABEL_PRESETS.get(labels, tuple(labels.upper()))
+    return tuple(labels)
 
 
 class MagnetometerReader:
@@ -42,6 +61,7 @@ class MagnetometerReader:
         image_output_dir='digit_images',
         enable_classifier=True,
         classifier_gpu=False,
+        classifier_labels='alphanumeric',
     ):
         self.serial_port = None
         self.is_running = False
@@ -65,7 +85,10 @@ class MagnetometerReader:
         self.prediction_history = deque(maxlen=5)
         self.classifier = None
         self.classifier_gpu = classifier_gpu
+        self.classifier_labels = classifier_labels
         self._classifier_frame_skip = 0
+        self.latest_prediction_text = "Prediction: --"
+        self.latest_runner_up_text = "Runner-up: --"
 
         if enable_classifier:
             self.load_classifier()
@@ -79,15 +102,16 @@ class MagnetometerReader:
         signal.signal(signal.SIGINT, self.signal_handler)
 
     def load_classifier(self):
-        """Load the optional pretrained EasyOCR digit classifier."""
+        """Load the optional pretrained EasyOCR character classifier."""
         try:
             from digit_classifier.inference import DigitClassifier
 
-            self.classifier = DigitClassifier(gpu=self.classifier_gpu)
-            print("Loaded EasyOCR digit classifier")
+            self.classifier = DigitClassifier(gpu=self.classifier_gpu, labels=self.classifier_labels)
+            self.classifier_labels = self.classifier.labels
+            print(f"Loaded EasyOCR character classifier ({''.join(self.classifier.labels)})")
         except Exception as e:
             self.classifier = None
-            print(f"Digit classifier not loaded: {e}")
+            print(f"Character classifier not loaded: {e}")
 
     def list_ports(self):
         """List all available serial ports."""
@@ -345,7 +369,7 @@ class MagnetometerReader:
             # Check if there's input available
             if select.select([sys.stdin], [], [], 0.1)[0]:
                 try:
-                    key = sys.stdin.read(1).strip().lower()
+                    key = sys.stdin.read(1).strip()
                     self.handle_keypress(key)
                 except:
                     pass
@@ -359,6 +383,8 @@ class MagnetometerReader:
         elif key == 'q':
             print("Quitting...")
             self.stop()
+        elif key.isalpha() and len(key) == 1:
+            self.start_session(f'letter_{key.upper()}')
 
     def start_session(self, session_name):
         """Start recording a new session."""
@@ -369,9 +395,11 @@ class MagnetometerReader:
         self.current_session = session_name
         self.session_data = []
         self.prediction_history.clear()
+        self.latest_prediction_text = "Prediction: classifier not loaded" if self.classifier is None else "Prediction: --"
+        self.latest_runner_up_text = "Runner-up: --"
         print(f"\n🎬 STARTED RECORDING SESSION: '{session_name}'")
         print(f"Recording to main CSV file: {self.csv_file.name if self.csv_file else 'None'}")
-        print(f"Projected digit image will be saved in: {self.image_output_dir}")
+        print(f"Projected character image will be saved in: {self.image_output_dir}")
 
     def stop_session(self):
         """Stop the current recording session."""
@@ -396,8 +424,8 @@ class MagnetometerReader:
         self.save_session_csv(session_name)
         image_result = self.save_session_image(session_name)
         if image_result:
-            _, digit_image = image_result
-            self.print_final_prediction(digit_image)
+            _, character_image = image_result
+            self.print_final_prediction(character_image)
 
         self.current_session = None
         self.session_data = []
@@ -538,26 +566,35 @@ class MagnetometerReader:
         filename = f"{session_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{self.image_size}px.png"
         output_path = os.path.join(output_dir, filename)
         plt.imsave(output_path, image, cmap='gray', vmin=0.0, vmax=1.0)
-        print(f"Projected digit image saved to: {output_path}")
+        print(f"Projected character image saved to: {output_path}")
         return output_path, image
 
-    def print_final_prediction(self, digit_image):
+    def print_final_prediction(self, character_image):
         """Run one final unsmoothed prediction for a completed recording."""
         if self.classifier is None:
             return
 
         try:
-            result = self.classifier.predict(digit_image.astype(np.float32))
+            result = self.classifier.predict(character_image.astype(np.float32))
         except Exception as e:
-            print(f"Final digit prediction failed: {e}")
+            print(f"Final character prediction failed: {e}")
             return
 
         probabilities = result['probabilities']
-        top_two = np.argsort(probabilities)[-2:][::-1]
+        labels = result.get('labels', DEFAULT_CLASSIFIER_LABELS)
+        top_two = top_label_indices(probabilities, 2)
+        best_index = top_two[0]
+        if probabilities[best_index] <= 0.0:
+            print("Final character prediction: -- (0.0%)")
+            return
+
+        runner_text = "--"
+        if len(top_two) > 1 and probabilities[top_two[1]] > 0.0:
+            runner_text = f"{labels[top_two[1]]} ({probabilities[top_two[1]] * 100:.1f}%)"
         print(
-            "Final digit prediction: "
-            f"{int(top_two[0])} ({probabilities[top_two[0]] * 100:.1f}%), "
-            f"runner-up {int(top_two[1])} ({probabilities[top_two[1]] * 100:.1f}%)"
+            "Final character prediction: "
+            f"{labels[best_index]} ({probabilities[best_index] * 100:.1f}%), "
+            f"runner-up {runner_text}"
         )
 
     def get_data_copy(self):
@@ -617,10 +654,10 @@ class MagnetometerReader:
         ax4.set_ylim(-self.projection_extent, self.projection_extent)
         ax4.set_zlim(-POSE_LIMIT, POSE_LIMIT)
 
-        # Live 2D projection preview for digit-classifier style inference.
+        # Live 2D projection preview for character-classifier style inference.
         projection_image = np.ones((self.image_size, self.image_size), dtype=float)
         image_artist = ax5.imshow(projection_image, cmap='gray', vmin=0.0, vmax=1.0, interpolation='nearest')
-        ax5.set_title('2D Digit Projection')
+        ax5.set_title('2D Character Projection')
         ax5.set_xticks([])
         ax5.set_yticks([])
 
@@ -629,12 +666,18 @@ class MagnetometerReader:
             if self.z_near is not None and self.z_far is not None
             else "relative trail range"
         )
-        ax6.set_title('EasyOCR Digit Classifier')
-        ax6.set_ylim(0.0, 1.0)
-        ax6.set_xlim(-0.5, 9.5)
-        ax6.set_xticks(range(10))
-        ax6.set_ylabel('Probability')
-        prob_bars = ax6.bar(range(10), np.zeros(10), color='#7c9cc8')
+        classifier_labels = display_labels_for(self.classifier_labels)
+        display_count = min(12, len(classifier_labels))
+        display_indices = list(range(display_count))
+        y_positions = np.arange(display_count)
+        ax6.set_title('EasyOCR Character Classifier')
+        ax6.set_xlim(0.0, 1.0)
+        ax6.set_ylim(-0.5, display_count - 0.5)
+        ax6.set_yticks(y_positions)
+        ax6.set_yticklabels([classifier_labels[index] for index in display_indices])
+        ax6.invert_yaxis()
+        ax6.set_xlabel('Confidence')
+        prob_bars = ax6.barh(y_positions, np.zeros(display_count), color='#7c9cc8')
         info_text = ax6.text(
             0.0,
             1.28,
@@ -654,9 +697,10 @@ class MagnetometerReader:
             fontsize=8,
         )
         if self.classifier is None:
+            self.latest_prediction_text = "Prediction: classifier not loaded"
             info_text.set_text(
-                "Prediction: classifier not loaded\n"
-                "Runner-up: --\n"
+                f"{self.latest_prediction_text}\n"
+                f"{self.latest_runner_up_text}\n"
                 f"Z: -- ({z_range})"
             )
 
@@ -700,8 +744,8 @@ class MagnetometerReader:
             pose_x, pose_y, pose_z = self.extract_pose_trail(data)
             digit_image = self.pose_to_digit_image(pose_x, pose_y, pose_z)
             image_artist.set_data(digit_image)
-            prediction_text = "Prediction: --"
-            runner_up_text = "Runner-up: --"
+            prediction_text = self.latest_prediction_text
+            runner_up_text = self.latest_runner_up_text
             self._classifier_frame_skip += 1
             if self.classifier is not None and self._classifier_frame_skip % 3 == 0:
                 try:
@@ -710,15 +754,31 @@ class MagnetometerReader:
                         self.prediction_history,
                     )
                     probabilities = result['probabilities']
-                    top_two = np.argsort(probabilities)[-2:][::-1]
-                    prediction_text = f"Prediction: {int(top_two[0])} ({probabilities[top_two[0]] * 100:.1f}%)"
-                    runner_up_text = f"Runner-up:  {int(top_two[1])} ({probabilities[top_two[1]] * 100:.1f}%)"
-                    for digit, bar in enumerate(prob_bars):
-                        bar.set_height(float(probabilities[digit]))
-                        bar.set_color('#2f5f9f' if digit == int(top_two[0]) else '#7c9cc8')
+                    result_labels = result.get('labels', classifier_labels)
+                    top_two = top_label_indices(probabilities, 2)
+                    display_indices = top_label_indices(probabilities, display_count)
+
+                    if probabilities[top_two[0]] > 0.0:
+                        prediction_text = (
+                            f"Prediction: {result_labels[top_two[0]]} "
+                            f"({probabilities[top_two[0]] * 100:.1f}%)"
+                        )
+                    if len(top_two) > 1 and probabilities[top_two[1]] > 0.0:
+                        runner_up_text = (
+                            f"Runner-up:  {result_labels[top_two[1]]} "
+                            f"({probabilities[top_two[1]] * 100:.1f}%)"
+                        )
+
+                    ax6.set_yticklabels([result_labels[index] for index in display_indices])
+                    for bar, index in zip(prob_bars, display_indices):
+                        bar.set_width(float(probabilities[index]))
+                        bar.set_color('#2f5f9f' if index == top_two[0] and probabilities[index] > 0.0 else '#7c9cc8')
                 except Exception as e:
                     prediction_text = f"Prediction failed: {e}"
                     runner_up_text = "Runner-up: --"
+
+                self.latest_prediction_text = prediction_text
+                self.latest_runner_up_text = runner_up_text
 
             if len(pose_z) > 0:
                 finite_z = pose_z[np.isfinite(pose_z)]
@@ -804,6 +864,7 @@ class MagnetometerReader:
             print("="*60)
             print("Controls:")
             print("  0-9: Start recording that digit")
+            print("  A-Z: Start recording that letter (lowercase s/q are reserved)")
             print("  s:   Stop current recording and save CSV + projected PNG")
             print("  q:   Quit program")
             print(f"Projection: X/Y plane, Z intensity, {self.image_size}x{self.image_size}px, last {self.trail_length} samples")
@@ -840,7 +901,7 @@ def main():
     parser.add_argument('--image-size', type=int, default=64,
                        help='Width and height of saved/live projection images in pixels (default: 64)')
     parser.add_argument('--image-dir', type=str, default='digit_images',
-                       help='Directory for projected digit PNGs (default: digit_images)')
+                       help='Directory for projected character PNGs (default: digit_images)')
     parser.add_argument('--projection-extent', type=float, default=POSE_LIMIT,
                        help='Half-width of the X/Y projection area in pose units (default: 0.05)')
     parser.add_argument('--z-close-mode', choices=['min', 'max', 'abs-min'], default='max',
@@ -850,9 +911,11 @@ def main():
     parser.add_argument('--z-far', type=float, default=None,
                        help='Z value for lightest stroke. Use with --z-near for fixed height calibration')
     parser.add_argument('--no-classifier', action='store_true',
-                       help='Skip loading the real-time EasyOCR digit classifier')
+                       help='Skip loading the real-time EasyOCR character classifier')
     parser.add_argument('--classifier-gpu', action='store_true',
                        help='Use GPU for EasyOCR if available')
+    parser.add_argument('--classifier-labels', choices=['digits', 'letters', 'alphanumeric'], default='alphanumeric',
+                       help='Character set for EasyOCR recognition (default: alphanumeric)')
 
     args = parser.parse_args()
 
@@ -878,7 +941,7 @@ def main():
         print(f"Z Calibration: near={args.z_near}, far={args.z_far}")
     else:
         print("Z Calibration: relative per trail")
-    print(f"Digit Classifier: {'disabled' if args.no_classifier else 'EasyOCR'}")
+    print(f"Character Classifier: {'disabled' if args.no_classifier else 'EasyOCR'} ({args.classifier_labels})")
     print("-" * 40)
 
     reader = MagnetometerReader(
@@ -893,6 +956,7 @@ def main():
         image_output_dir=args.image_dir,
         enable_classifier=not args.no_classifier,
         classifier_gpu=args.classifier_gpu,
+        classifier_labels=args.classifier_labels,
     )
     reader.run(csv_filename=None if args.no_csv else args.csv, baudrate=args.baudrate)
 

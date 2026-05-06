@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pretrained EasyOCR inference for magnetometer digit projection images."""
+"""Pretrained EasyOCR inference for magnetometer character projection images."""
 
 from collections import deque
 
@@ -7,8 +7,15 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
+LABEL_PRESETS = {
+    'digits': '0123456789',
+    'letters': 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+    'alphanumeric': '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+}
+
+
 class DigitClassifier:
-    def __init__(self, languages=None, gpu=False, upscale=4):
+    def __init__(self, languages=None, gpu=False, upscale=4, labels='alphanumeric'):
         try:
             import easyocr
         except ImportError as exc:
@@ -20,6 +27,9 @@ class DigitClassifier:
         self.languages = languages or ['en']
         self.gpu = gpu
         self.upscale = upscale
+        self.labels = self._resolve_labels(labels)
+        self.allowlist = ''.join(self.labels)
+        self.label_to_index = {label: index for index, label in enumerate(self.labels)}
         self.reader = easyocr.Reader(self.languages, gpu=self.gpu, verbose=False)
 
     def predict(self, image: np.ndarray) -> dict:
@@ -29,19 +39,20 @@ class DigitClassifier:
             ocr_image,
             horizontal_list=[[0, width, 0, height]],
             free_list=[],
-            allowlist='0123456789',
+            allowlist=self.allowlist,
             detail=1,
             paragraph=False,
             batch_size=1,
             decoder='greedy',
         )
 
-        label, confidence = self._best_digit(results)
-        probabilities = self._probabilities(label, confidence)
+        probabilities = self._scores_from_results(results)
+        label, confidence = self._best_label(probabilities)
         return {
             'label': label,
             'confidence': float(confidence),
             'probabilities': probabilities,
+            'labels': self.labels,
             'raw_results': results,
         }
 
@@ -58,12 +69,12 @@ class DigitClassifier:
             recent = history
 
         smoothed = np.mean(np.stack(recent, axis=0), axis=0)
-        label = int(np.argmax(smoothed))
-        confidence = float(smoothed[label])
+        label, confidence = self._best_label(smoothed)
         return {
             'label': label,
             'confidence': confidence,
             'probabilities': smoothed,
+            'labels': self.labels,
             'raw_results': result.get('raw_results', []),
         }
 
@@ -87,26 +98,42 @@ class DigitClassifier:
         return np.asarray(pil_image)
 
     @staticmethod
-    def _best_digit(results):
-        best_digit = None
-        best_confidence = 0.0
+    def _resolve_labels(labels):
+        if labels is None:
+            labels = 'alphanumeric'
+        if isinstance(labels, str):
+            labels = LABEL_PRESETS.get(labels, labels)
+
+        resolved = []
+        for label in labels:
+            label = str(label).strip().upper()
+            if len(label) != 1:
+                raise ValueError(f"Classifier labels must be single characters, got {label!r}")
+            if label and label not in resolved:
+                resolved.append(label)
+
+        if not resolved:
+            raise ValueError("Classifier must have at least one label")
+        return tuple(resolved)
+
+    def _scores_from_results(self, results):
+        scores = np.zeros(len(self.labels), dtype=np.float32)
 
         for _, text, confidence in results:
-            digits = [char for char in str(text) if char.isdigit()]
-            if not digits:
-                continue
-            confidence = float(confidence)
-            if confidence > best_confidence:
-                best_digit = int(digits[0])
-                best_confidence = confidence
+            confidence = float(np.clip(confidence, 0.0, 1.0))
+            for char in str(text).upper():
+                index = self.label_to_index.get(char)
+                if index is not None:
+                    scores[index] = max(scores[index], confidence)
 
-        if best_digit is None:
-            return 0, 0.0
-        return best_digit, best_confidence
+        return scores
 
-    @staticmethod
-    def _probabilities(label, confidence):
-        confidence = float(np.clip(confidence, 0.0, 1.0))
-        probabilities = np.full(10, (1.0 - confidence) / 9.0, dtype=np.float32)
-        probabilities[int(label)] = confidence
-        return probabilities
+    def _best_label(self, scores):
+        if len(scores) == 0:
+            return None, 0.0
+
+        index = int(np.argmax(scores))
+        confidence = float(scores[index])
+        if confidence <= 0.0:
+            return None, 0.0
+        return self.labels[index], confidence

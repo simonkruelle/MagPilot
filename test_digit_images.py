@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run EasyOCR digit inference over saved digit_images/*.png samples."""
+"""Run EasyOCR character inference over saved projection PNG samples."""
 
 import argparse
 import os
@@ -11,7 +11,7 @@ from PIL import Image
 from digit_classifier.inference import DigitClassifier
 
 
-LABEL_RE = re.compile(r"digit_(\d)")
+LABEL_RE = re.compile(r"(?:digit_(\d)|letter_([A-Za-z]))")
 
 
 def load_grayscale(path):
@@ -21,18 +21,26 @@ def load_grayscale(path):
 
 def expected_label(path):
     match = LABEL_RE.search(os.path.basename(path))
-    return int(match.group(1)) if match else None
+    if not match:
+        return None
+    return (match.group(1) or match.group(2)).upper()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Batch-test EasyOCR on saved digit PNGs.")
+    parser = argparse.ArgumentParser(description="Batch-test EasyOCR on saved projection PNGs.")
     parser.add_argument("image_dir", nargs="?", default="digit_images")
     parser.add_argument("--gpu", action="store_true", help="Use EasyOCR GPU mode if available")
+    parser.add_argument(
+        "--labels",
+        choices=["digits", "letters", "alphanumeric"],
+        default="alphanumeric",
+        help="Character set for EasyOCR recognition (default: alphanumeric)",
+    )
     args = parser.parse_args()
 
     if not os.path.isdir(args.image_dir):
         print(f"No image directory found at {args.image_dir}")
-        print("Collect a digit first with magnetometer_reader.py, or pass a different directory.")
+        print("Collect a character first with magnetometer_reader.py, or pass a different directory.")
         return
 
     paths = [
@@ -44,7 +52,7 @@ def main():
         print(f"No PNG files found in {args.image_dir}")
         return
 
-    classifier = DigitClassifier(gpu=args.gpu)
+    classifier = DigitClassifier(gpu=args.gpu, labels=args.labels)
 
     correct = 0
     labeled = 0
