@@ -1,0 +1,1 @@
+"""Reusable COLMAG application components."""

@@ -4,13 +4,18 @@ Magnetometer Data Reader for Collaborative Robotics Seminar
 Reads serial data from magnetometer sensor and processes it.
 """
 
-import serial
-import serial.tools.list_ports
 import threading
 import time
 import struct
 import csv
+import os
+import json
+
+os.environ.setdefault('XDG_CACHE_HOME', '/private/tmp/colmag-cache')
+os.environ.setdefault('MPLCONFIGDIR', '/private/tmp/colmag-matplotlib-cache')
+
 import matplotlib.pyplot as plt
+from matplotlib import patches
 from matplotlib.animation import FuncAnimation
 from mpl_toolkits.mplot3d import Axes3D
 import numpy as np
@@ -18,9 +23,21 @@ import signal
 import sys
 from collections import deque
 import argparse
-import os
 from datetime import datetime
 import select
+
+from colmag.interaction import AppController, VirtualJoystick
+
+try:
+    import serial
+    import serial.tools.list_ports
+except ImportError as exc:
+    serial = None
+    SERIAL_IMPORT_ERROR = exc
+else:
+    SERIAL_IMPORT_ERROR = None
+
+SERIAL_EXCEPTION = serial.SerialException if serial is not None else Exception
 
 PACKET_SIZE = 218
 PACKET_HEADER = 0xAA
@@ -62,6 +79,19 @@ class MagnetometerReader:
         enable_classifier=True,
         classifier_gpu=False,
         classifier_labels='alphanumeric',
+        lazy_classifier=True,
+        classifier_cpu_threads=1,
+        enable_writing_filter=True,
+        writing_min_velocity=0.002,
+        writing_max_velocity=None,
+        writing_min_closeness=None,
+        joystick_dwell_seconds=2.0,
+        letter_labels='letters',
+        digit_labels='digits',
+        classifier_interval=0.75,
+        classifier_mode='on-idle',
+        classifier_idle_seconds=0.8,
+        classifier_min_ink_samples=8,
     ):
         self.serial_port = None
         self.is_running = False
@@ -84,14 +114,53 @@ class MagnetometerReader:
         self.image_output_dir = image_output_dir
         self.prediction_history = deque(maxlen=5)
         self.classifier = None
+        self.enable_classifier = enable_classifier
         self.classifier_gpu = classifier_gpu
         self.classifier_labels = classifier_labels
+        self.classifier_requested_labels = classifier_labels
+        self.lazy_classifier = lazy_classifier
+        self.classifier_cpu_threads = classifier_cpu_threads
+        self.classifier_load_error = None
+        self.classifier_loading = False
+        self.classifier_load_thread = None
         self._classifier_frame_skip = 0
+        self.classifier_interval = classifier_interval
+        self.classifier_mode = classifier_mode
+        self.classifier_idle_seconds = classifier_idle_seconds
+        self.classifier_min_ink_samples = classifier_min_ink_samples
+        self.classifier_thread = None
+        self.classifier_stop_event = threading.Event()
+        self.classifier_input_event = threading.Event()
+        self.classifier_state_lock = threading.Lock()
+        self.classifier_inference_lock = threading.Lock()
+        self.classifier_pending_image = None
+        self.classifier_latest_result = None
+        self.classifier_latest_error = None
+        self.classifier_status_text = "OCR idle"
+        self.classifier_last_submit_time = 0.0
+        self.classifier_last_writing_time = 0.0
+        self.classifier_waiting_for_pause = False
+        self.classifier_last_submitted_ink_count = -1
+        self.classification_started_at = None
         self.latest_prediction_text = "Prediction: --"
         self.latest_runner_up_text = "Runner-up: --"
+        self.enable_writing_filter = enable_writing_filter
+        self.writing_min_velocity = writing_min_velocity
+        self.writing_max_velocity = writing_max_velocity
+        self.writing_min_closeness = writing_min_closeness
+        self.joystick = VirtualJoystick.default(self.projection_extent)
+        self.app_controller = AppController(
+            self.joystick,
+            dwell_seconds=joystick_dwell_seconds,
+            letter_labels=letter_labels,
+            digit_labels=digit_labels,
+        )
+        self.latest_interface_text = "Mode: menu | Button: -- | Last: --"
 
-        if enable_classifier:
+        if enable_classifier and not lazy_classifier:
             self.load_classifier()
+        elif enable_classifier:
+            self.latest_prediction_text = "Prediction: classifier ready on first use"
 
         # Session recording
         self.recording_sessions = []  # List of (session_name, start_time, end_time, data_points)
@@ -106,15 +175,200 @@ class MagnetometerReader:
         try:
             from digit_classifier.inference import DigitClassifier
 
-            self.classifier = DigitClassifier(gpu=self.classifier_gpu, labels=self.classifier_labels)
+            self.classifier = DigitClassifier(
+                gpu=self.classifier_gpu,
+                labels=self.classifier_requested_labels,
+                cpu_threads=self.classifier_cpu_threads,
+            )
             self.classifier_labels = self.classifier.labels
+            self.classifier_requested_labels = self.classifier.labels
+            self.classifier_load_error = None
+            self.classifier_loading = False
             print(f"Loaded EasyOCR character classifier ({''.join(self.classifier.labels)})")
+            self.start_classifier_worker()
         except Exception as e:
             self.classifier = None
+            self.classifier_load_error = e
+            self.classifier_loading = False
             print(f"Character classifier not loaded: {e}")
+
+    def ensure_classifier_loading(self):
+        """Kick off lazy EasyOCR loading without blocking the UI."""
+        if not self.enable_classifier or self.classifier is not None or self.classifier_loading:
+            return
+
+        self.classifier_loading = True
+        with self.classifier_state_lock:
+            self.classifier_status_text = "OCR loading"
+        self.classifier_load_thread = threading.Thread(target=self.load_classifier, daemon=True)
+        self.classifier_load_thread.start()
+
+    def start_classifier_worker(self):
+        """Start the background EasyOCR worker used by the live UI."""
+        if self.classifier is None:
+            return
+        if self.classifier_thread and self.classifier_thread.is_alive():
+            return
+
+        self.classifier_stop_event.clear()
+        self.classifier_thread = threading.Thread(target=self.classifier_loop, daemon=True)
+        self.classifier_thread.start()
+
+    def classifier_loop(self):
+        """Run OCR off the Matplotlib update path so the UI stays responsive."""
+        current_labels = tuple(self.classifier.labels)
+        history = deque(maxlen=5)
+
+        while not self.classifier_stop_event.is_set():
+            self.classifier_input_event.wait(timeout=0.1)
+            if self.classifier_stop_event.is_set():
+                break
+
+            with self.classifier_state_lock:
+                image = self.classifier_pending_image
+                labels = self.classifier_requested_labels
+                self.classifier_pending_image = None
+                if image is None:
+                    self.classifier_input_event.clear()
+                    continue
+                self.classifier_status_text = "OCR running"
+                if self.classifier_pending_image is None:
+                    self.classifier_input_event.clear()
+
+            try:
+                started_at = time.monotonic()
+                with self.classifier_inference_lock:
+                    resolved_labels = self.classifier._resolve_labels(labels)
+                    if resolved_labels != current_labels:
+                        self.classifier.set_labels(labels)
+                        current_labels = tuple(self.classifier.labels)
+                        history.clear()
+                        with self.classifier_state_lock:
+                            self.classifier_labels = self.classifier.labels
+                        print(f"Classifier labels switched to: {''.join(self.classifier.labels)}")
+
+                    result = self.classifier.predict_smoothed(image, history)
+                elapsed = time.monotonic() - started_at
+                with self.classifier_state_lock:
+                    self.classifier_latest_result = result
+                    self.classifier_latest_error = None
+                    self.classifier_status_text = f"OCR {elapsed:.2f}s"
+            except Exception as e:
+                with self.classifier_state_lock:
+                    self.classifier_latest_error = e
+                    self.classifier_status_text = "OCR failed"
+
+    def submit_classifier_image(self, image, force=False):
+        """Queue the newest image for background OCR, throttled by interval."""
+        if self.classifier is None and not self.enable_classifier:
+            return
+
+        now = time.monotonic()
+        if not force and now - self.classifier_last_submit_time < self.classifier_interval:
+            return
+
+        self.classifier_last_submit_time = now
+        with self.classifier_state_lock:
+            self.classifier_pending_image = np.asarray(image, dtype=np.float32).copy()
+            if self.classifier is None:
+                self.classifier_status_text = "OCR loading"
+            elif self.classifier_status_text != "OCR running":
+                self.classifier_status_text = "OCR queued"
+            self.classifier_input_event.set()
+
+        if self.classifier is None:
+            self.ensure_classifier_loading()
+
+    def reset_live_classification_session(self):
+        """Forget pending live OCR trigger state after mode/label changes."""
+        self.classifier_last_writing_time = 0.0
+        self.classifier_waiting_for_pause = False
+        self.classifier_last_submitted_ink_count = -1
+        self.classifier_last_submit_time = 0.0
+        self.classification_started_at = None
+
+    def mark_classification_start(self, timestamp):
+        """Start a fresh writing capture window for the active OCR mode."""
+        try:
+            self.classification_started_at = datetime.fromisoformat(str(timestamp))
+        except (TypeError, ValueError):
+            self.classification_started_at = None
+        self.classifier_last_submitted_ink_count = -1
+        self.classifier_waiting_for_pause = False
+
+    def classification_sample_mask(self, rows):
+        """Return which rows are part of the current writing capture window."""
+        if self.classification_started_at is None:
+            return np.ones(len(rows), dtype=bool)
+
+        mask = []
+        for row in rows:
+            try:
+                timestamp = datetime.fromisoformat(str(row[0]))
+            except (TypeError, ValueError):
+                mask.append(True)
+            else:
+                mask.append(timestamp >= self.classification_started_at)
+        return np.asarray(mask, dtype=bool)
+
+    def get_classifier_state(self):
+        """Return the latest background OCR output for the UI thread."""
+        with self.classifier_state_lock:
+            return (
+                self.classifier_latest_result,
+                self.classifier_latest_error,
+                self.classifier_status_text,
+            )
+
+    def set_classifier_labels(self, labels):
+        """Switch the OCR allowlist without reloading EasyOCR weights."""
+        self.classifier_labels = labels
+        self.classifier_requested_labels = labels
+        self.prediction_history.clear()
+        self.reset_live_classification_session()
+
+        if self.classifier is not None:
+            with self.classifier_state_lock:
+                self.classifier_requested_labels = labels
+                self.classifier_latest_result = None
+                self.classifier_latest_error = None
+                self.classifier_status_text = "OCR labels queued"
+            self.latest_prediction_text = "Prediction: --"
+            self.latest_runner_up_text = "Runner-up: --"
+            print(f"Classifier labels scheduled: {''.join(display_labels_for(labels))}")
+        else:
+            if self.enable_classifier:
+                self.latest_prediction_text = "Prediction: classifier failed to load"
+                if self.classifier_load_error:
+                    print(f"Classifier labels queued for next load: {labels}")
+                    print(f"Classifier load error was: {self.classifier_load_error}")
+                else:
+                    print(f"Classifier labels queued for next load: {labels}")
+            else:
+                self.latest_prediction_text = "Prediction: classifier disabled"
+                print(
+                    f"Classifier labels queued for next load: {labels}. "
+                    "Run without --no-classifier to show OCR predictions."
+                )
+
+    def handle_interface_event(self, event):
+        """Apply a virtual joystick event to the live app state."""
+        if event.classifier_labels is not None:
+            self.set_classifier_labels(event.classifier_labels)
+        if event.command:
+            print(f"Virtual joystick: {event.button.name} -> {event.command}")
 
     def list_ports(self):
         """List all available serial ports."""
+        if serial is None:
+            print(
+                "pyserial is not installed. Install dependencies with "
+                "`pip install -r requirements.txt`."
+            )
+            if self.verbose:
+                print(f"Import error: {SERIAL_IMPORT_ERROR}")
+            return None
+
         ports = serial.tools.list_ports.comports()
         if not ports:
             print("No serial ports found!")
@@ -144,6 +398,13 @@ class MagnetometerReader:
 
     def open_port(self, port_name, baudrate=921600):
         """Open the serial port."""
+        if serial is None:
+            print(
+                "Cannot open serial port because pyserial is not installed. "
+                "Install dependencies with `pip install -r requirements.txt`."
+            )
+            return False
+
         try:
             self.serial_port = serial.Serial(
                 port=port_name,
@@ -156,7 +417,7 @@ class MagnetometerReader:
             self.serial_port.reset_input_buffer()
             print(f"Opened serial port {port_name} at {baudrate} baud")
             return True
-        except serial.SerialException as e:
+        except SERIAL_EXCEPTION as e:
             print(f"Error opening serial port: {e}")
             return False
 
@@ -328,7 +589,7 @@ class MagnetometerReader:
                     else:
                         time.sleep(0.001)
 
-                except serial.SerialException as e:
+                except SERIAL_EXCEPTION as e:
                     print(f"Serial read error: {e}")
                     time.sleep(0.1)
 
@@ -395,7 +656,12 @@ class MagnetometerReader:
         self.current_session = session_name
         self.session_data = []
         self.prediction_history.clear()
-        self.latest_prediction_text = "Prediction: classifier not loaded" if self.classifier is None else "Prediction: --"
+        if self.classifier is not None:
+            self.latest_prediction_text = "Prediction: --"
+        elif self.enable_classifier:
+            self.latest_prediction_text = "Prediction: classifier failed to load"
+        else:
+            self.latest_prediction_text = "Prediction: classifier disabled"
         self.latest_runner_up_text = "Runner-up: --"
         print(f"\n🎬 STARTED RECORDING SESSION: '{session_name}'")
         print(f"Recording to main CSV file: {self.csv_file.name if self.csv_file else 'None'}")
@@ -456,10 +722,13 @@ class MagnetometerReader:
         except IOError as e:
             print(f"Error saving session CSV: {e}")
 
-    def extract_pose_trail(self, rows, trail_length=None):
+    def extract_pose_trail(self, rows, trail_length=None, include_timestamps=False):
         """Return pose X/Y/Z arrays from buffered CSV-style rows."""
         if not rows:
-            return np.array([]), np.array([]), np.array([])
+            empty = np.array([])
+            if include_timestamps:
+                return empty, empty, empty, empty
+            return empty, empty, empty
 
         limit = trail_length if trail_length is not None else self.trail_length
         rows = rows[-limit:] if limit and len(rows) > limit else rows
@@ -467,9 +736,81 @@ class MagnetometerReader:
         pose_x = np.array([row[-6] for row in rows], dtype=float)
         pose_y = np.array([row[-5] for row in rows], dtype=float)
         pose_z = np.array([row[-4] for row in rows], dtype=float)
+        if include_timestamps:
+            return pose_x, pose_y, pose_z, self.rows_to_seconds(rows)
         return pose_x, pose_y, pose_z
 
-    def pose_to_digit_image(self, pose_x, pose_y, pose_z):
+    @staticmethod
+    def rows_to_seconds(rows):
+        """Return seconds from the first row timestamp, falling back to sample index."""
+        if not rows:
+            return np.array([])
+
+        try:
+            parsed = [datetime.fromisoformat(str(row[0])) for row in rows]
+        except (TypeError, ValueError):
+            return np.arange(len(rows), dtype=float)
+
+        start = parsed[0]
+        return np.array([(timestamp - start).total_seconds() for timestamp in parsed], dtype=float)
+
+    @staticmethod
+    def pose_xy_speed(pose_x, pose_y, timestamps=None):
+        """Estimate per-sample XY speed from neighboring pose samples."""
+        pose_x = np.asarray(pose_x, dtype=float)
+        pose_y = np.asarray(pose_y, dtype=float)
+        speed = np.zeros(len(pose_x), dtype=float)
+        if len(pose_x) < 2:
+            return speed
+
+        if timestamps is None or len(timestamps) != len(pose_x):
+            dt = np.ones(len(pose_x) - 1, dtype=float)
+        else:
+            dt = np.diff(np.asarray(timestamps, dtype=float))
+            valid_dt = np.isfinite(dt) & (dt > 1e-6)
+            fallback_dt = float(np.median(dt[valid_dt])) if np.any(valid_dt) else 1.0
+            dt = np.where(valid_dt, dt, fallback_dt)
+
+        distances = np.hypot(np.diff(pose_x), np.diff(pose_y))
+        segment_speed = np.divide(distances, dt, out=np.zeros_like(distances), where=dt > 0.0)
+        speed[:-1] = np.maximum(speed[:-1], segment_speed)
+        speed[1:] = np.maximum(speed[1:], segment_speed)
+        return speed
+
+    def writing_sample_mask(self, pose_x, pose_y, pose_z, timestamps=None):
+        """
+        Identify samples that should become ink in the OCR image.
+
+        A sample counts as writing when the magnet moves in a controlled XY
+        velocity band. This rejects dots caused by holding the magnet still.
+        An optional Z/closeness gate can still be enabled for board experiments,
+        but air-writing keeps it off by default.
+        """
+        pose_x = np.asarray(pose_x, dtype=float)
+        pose_y = np.asarray(pose_y, dtype=float)
+        pose_z = np.asarray(pose_z, dtype=float)
+        finite = np.isfinite(pose_x) & np.isfinite(pose_y) & np.isfinite(pose_z)
+
+        speed = self.pose_xy_speed(pose_x, pose_y, timestamps)
+        closeness = np.zeros(len(pose_z), dtype=float)
+        if np.any(finite):
+            closeness[finite] = self.z_to_closeness(pose_z[finite])
+
+        if not self.enable_writing_filter:
+            return finite, speed, closeness
+
+        moving = speed >= self.writing_min_velocity
+        if self.writing_max_velocity is not None:
+            moving &= speed <= self.writing_max_velocity
+
+        if self.writing_min_closeness is None:
+            close = np.ones(len(pose_z), dtype=bool)
+        else:
+            close = closeness >= self.writing_min_closeness
+
+        return finite & moving & close, speed, closeness
+
+    def pose_to_digit_image(self, pose_x, pose_y, pose_z, sample_mask=None):
         """
         Project a 3D pose trail to a grayscale image.
 
@@ -485,6 +826,12 @@ class MagnetometerReader:
             raise ValueError("projection_extent must be positive")
 
         finite = np.isfinite(pose_x) & np.isfinite(pose_y) & np.isfinite(pose_z)
+        if sample_mask is not None:
+            sample_mask = np.asarray(sample_mask, dtype=bool)
+            if len(sample_mask) != len(pose_x):
+                raise ValueError("sample_mask must have the same length as the pose arrays")
+            finite &= sample_mask
+
         pose_x = pose_x[finite]
         pose_y = pose_y[finite]
         pose_z = pose_z[finite]
@@ -552,8 +899,13 @@ class MagnetometerReader:
         return 1.0 - self.normalize_values(z_values)
 
     def rows_to_digit_image(self, rows, trail_length=None):
-        pose_x, pose_y, pose_z = self.extract_pose_trail(rows, trail_length=trail_length)
-        return self.pose_to_digit_image(pose_x, pose_y, pose_z)
+        pose_x, pose_y, pose_z, timestamps = self.extract_pose_trail(
+            rows,
+            trail_length=trail_length,
+            include_timestamps=True,
+        )
+        writing_mask, _, _ = self.writing_sample_mask(pose_x, pose_y, pose_z, timestamps)
+        return self.pose_to_digit_image(pose_x, pose_y, pose_z, sample_mask=writing_mask)
 
     def save_session_image(self, session_name):
         """Save the recorded pose trail as a classifier-ready grayscale PNG."""
@@ -567,7 +919,37 @@ class MagnetometerReader:
         output_path = os.path.join(output_dir, filename)
         plt.imsave(output_path, image, cmap='gray', vmin=0.0, vmax=1.0)
         print(f"Projected character image saved to: {output_path}")
+        self.save_session_metadata(session_name, output_path)
         return output_path, image
+
+    def save_session_metadata(self, session_name, image_path):
+        """Save a sidecar file describing how the session image was generated."""
+        metadata = {
+            'session_name': session_name,
+            'created_at': datetime.now().isoformat(),
+            'image_path': image_path,
+            'sample_count': len(self.session_data),
+            'image_size': self.image_size,
+            'trail_length': self.trail_length,
+            'projection_extent': self.projection_extent,
+            'z_close_mode': self.z_close_mode,
+            'z_near': self.z_near,
+            'z_far': self.z_far,
+            'classifier_labels': ''.join(display_labels_for(self.classifier_labels)),
+            'writing_filter': {
+                'enabled': self.enable_writing_filter,
+                'min_velocity': self.writing_min_velocity,
+                'max_velocity': self.writing_max_velocity,
+                'min_closeness': self.writing_min_closeness,
+            },
+        }
+        metadata_path = os.path.splitext(image_path)[0] + '.json'
+        try:
+            with open(metadata_path, 'w', encoding='utf-8') as f:
+                json.dump(metadata, f, indent=2)
+            print(f"Session metadata saved to: {metadata_path}")
+        except IOError as e:
+            print(f"Error saving session metadata: {e}")
 
     def print_final_prediction(self, character_image):
         """Run one final unsmoothed prediction for a completed recording."""
@@ -575,7 +957,8 @@ class MagnetometerReader:
             return
 
         try:
-            result = self.classifier.predict(character_image.astype(np.float32))
+            with self.classifier_inference_lock:
+                result = self.classifier.predict(character_image.astype(np.float32))
         except Exception as e:
             print(f"Final character prediction failed: {e}")
             return
@@ -602,6 +985,77 @@ class MagnetometerReader:
         with self.data_lock:
             return list(self.data_buffer)
 
+    def setup_joystick_artists(self, ax):
+        """Draw the virtual joystick layer on the projection axis."""
+        ax.set_xlim(-self.projection_extent, self.projection_extent)
+        ax.set_ylim(-self.projection_extent, self.projection_extent)
+        ax.set_aspect('equal', adjustable='box')
+        ax.set_xlabel('')
+        ax.set_ylabel('')
+
+        button_artists = {}
+        for button in self.joystick.buttons:
+            circle = patches.Circle(
+                (button.x, button.y),
+                button.radius,
+                facecolor='#f5f5f5',
+                edgecolor='#222222',
+                linewidth=1.8,
+                alpha=0.82,
+                zorder=4,
+            )
+            ax.add_patch(circle)
+            ax.text(
+                button.x,
+                button.y,
+                button.name,
+                ha='center',
+                va='center',
+                fontsize=11,
+                weight='bold',
+                zorder=5,
+            )
+            button_artists[button.name] = circle
+
+        cursor_artist = ax.scatter(
+            [],
+            [],
+            c='#d62728',
+            edgecolors='#111111',
+            linewidths=0.8,
+            s=90,
+            zorder=6,
+        )
+        interface_text = ax.text(
+            0.0,
+            -0.16,
+            self.latest_interface_text,
+            transform=ax.transAxes,
+            va='top',
+            ha='left',
+            fontsize=8,
+        )
+        return button_artists, cursor_artist, interface_text
+
+    def update_joystick_artists(self, button_artists):
+        active_button = self.app_controller.active_button
+        last_button = self.app_controller.last_event.button.name if self.app_controller.last_event else None
+
+        for button in self.joystick.buttons:
+            artist = button_artists[button.name]
+            facecolor = '#f5f5f5'
+            if button.action == 'mode:letters' and self.app_controller.mode.value == 'letters':
+                facecolor = '#d8ecff'
+            elif button.action == 'mode:digits' and self.app_controller.mode.value == 'digits':
+                facecolor = '#d8ecff'
+            elif button.action.startswith('robot:') and button.name == last_button:
+                facecolor = '#d8f3dc'
+
+            if button.name == active_button:
+                facecolor = '#ffd166'
+
+            artist.set_facecolor(facecolor)
+
     def plot_data(self):
         """Create real-time plot of Bx, By, Bz for the selected sensor."""
         fig = plt.figure(figsize=(14, 8))
@@ -624,6 +1078,7 @@ class MagnetometerReader:
         ax1.set_ylabel('Magnetic Field')
         ax1.grid(True)
         line_bx, = ax1.plot([], [], 'b-', label='Bx', linewidth=2)
+        ax1.legend(loc='upper right')
 
         # By plot
         ax2.set_title(f'Sensor {self.plot_sensor} - By')
@@ -631,6 +1086,7 @@ class MagnetometerReader:
         ax2.set_ylabel('Magnetic Field')
         ax2.grid(True)
         line_by, = ax2.plot([], [], 'g-', label='By', linewidth=2)
+        ax2.legend(loc='upper right')
 
         # Bz plot
         ax3.set_title(f'Sensor {self.plot_sensor} - Bz')
@@ -638,6 +1094,7 @@ class MagnetometerReader:
         ax3.set_ylabel('Magnetic Field')
         ax3.grid(True)
         line_bz, = ax3.plot([], [], 'r-', label='Bz', linewidth=2)
+        ax3.legend(loc='upper right')
 
         # 3D magnet trajectory plot from pose coordinates
         ax4.set_title('Magnet Trajectory from Pose X/Y/Z')
@@ -654,12 +1111,30 @@ class MagnetometerReader:
         ax4.set_ylim(-self.projection_extent, self.projection_extent)
         ax4.set_zlim(-POSE_LIMIT, POSE_LIMIT)
 
+        # Pre-create persistent 3D artists (avoids expensive clear+redraw every frame)
+        hover_scatter = ax4.scatter([], [], [], c='#bbbbbb', s=60, alpha=0.35, label='Hover/lift')
+        writing_scatter = ax4.scatter([], [], [], c=[], cmap='plasma', s=150, edgecolors='k', linewidths=0.6, label='Writing')
+        trajectory_line, = ax4.plot([], [], [], color='#333333', alpha=0.45, linewidth=1.2)
+        current_pos_scatter = ax4.scatter([], [], [], c='red', s=120, label='Current position')
+        ax4.legend(loc='best', fontsize='small')
+
         # Live 2D projection preview for character-classifier style inference.
         projection_image = np.ones((self.image_size, self.image_size), dtype=float)
-        image_artist = ax5.imshow(projection_image, cmap='gray', vmin=0.0, vmax=1.0, interpolation='nearest')
-        ax5.set_title('2D Character Projection')
+        image_artist = ax5.imshow(
+            projection_image,
+            cmap='gray',
+            vmin=0.0,
+            vmax=1.0,
+            interpolation='nearest',
+            extent=(-self.projection_extent, self.projection_extent, -self.projection_extent, self.projection_extent),
+            origin='upper',
+            alpha=0.58,
+            zorder=1,
+        )
+        ax5.set_title('Virtual Joystick + Writing Surface')
         ax5.set_xticks([])
         ax5.set_yticks([])
+        button_artists, cursor_artist, interface_text = self.setup_joystick_artists(ax5)
 
         z_range = (
             f"calibrated {self.z_near:.4f}->{self.z_far:.4f}"
@@ -696,25 +1171,47 @@ class MagnetometerReader:
             va='top',
             fontsize=8,
         )
-        if self.classifier is None:
-            self.latest_prediction_text = "Prediction: classifier not loaded"
+        if self.classifier is None and self.enable_classifier and self.classifier_loading:
+            self.latest_prediction_text = "Prediction: classifier loading"
+        elif self.classifier is None:
+            if self.enable_classifier:
+                if self.classifier_load_error:
+                    self.latest_prediction_text = "Prediction: classifier failed to load"
+                else:
+                    self.latest_prediction_text = "Prediction: classifier ready on first use"
+            else:
+                self.latest_prediction_text = "Prediction: classifier disabled"
             info_text.set_text(
                 f"{self.latest_prediction_text}\n"
                 f"{self.latest_runner_up_text}\n"
                 f"Z: -- ({z_range})"
             )
 
+        # tight_layout once at init, not per-frame
+        plt.tight_layout()
+
         def init_plot():
             line_bx.set_data([], [])
             line_by.set_data([], [])
             line_bz.set_data([], [])
             image_artist.set_data(projection_image)
-            return line_bx, line_by, line_bz, image_artist
+            cursor_artist.set_offsets(np.empty((0, 2)))
+            # 3D artists start empty
+            hover_scatter._offsets3d = (np.array([]), np.array([]), np.array([]))
+            writing_scatter._offsets3d = (np.array([]), np.array([]), np.array([]))
+            trajectory_line.set_data([], [])
+            trajectory_line.set_3d_properties([])
+            current_pos_scatter._offsets3d = (np.array([]), np.array([]), np.array([]))
+            return (line_bx, line_by, line_bz, image_artist, cursor_artist,
+                    hover_scatter, writing_scatter, trajectory_line, current_pos_scatter,
+                    interface_text, info_text)
 
         def update_plot(frame):
             data = self.get_data_copy()
             if not data:
-                return line_bx, line_by, line_bz, image_artist
+                return (line_bx, line_by, line_bz, image_artist, cursor_artist,
+                        hover_scatter, writing_scatter, trajectory_line, current_pos_scatter,
+                        interface_text, info_text)
 
             # Extract Bx, By, Bz for selected sensor
             sensor_idx = self.plot_sensor - 1
@@ -728,7 +1225,7 @@ class MagnetometerReader:
             line_by.set_data(x_vals, by_data)
             line_bz.set_data(x_vals, bz_data)
 
-            # Update axis limits
+            # Update axis limits (legends are set once at init)
             for ax, data_vals in [(ax1, bx_data), (ax2, by_data), (ax3, bz_data)]:
                 if data_vals:
                     ax.set_xlim(0, len(data_vals))
@@ -739,46 +1236,150 @@ class MagnetometerReader:
                         ax.set_ylim(y_min - pad, y_max + pad)
                     else:
                         ax.set_ylim(y_min * 1.1, y_max * 1.1)
-                    ax.legend(loc='upper right')
 
-            pose_x, pose_y, pose_z = self.extract_pose_trail(data)
-            digit_image = self.pose_to_digit_image(pose_x, pose_y, pose_z)
+            pose_x, pose_y, pose_z, timestamps = self.extract_pose_trail(data, include_timestamps=True)
+            writing_mask, _, _ = self.writing_sample_mask(
+                pose_x,
+                pose_y,
+                pose_z,
+                timestamps,
+            )
+            capture_mask = self.classification_sample_mask(data)
+            ocr_mask = writing_mask & capture_mask
+            ink_count = int(np.count_nonzero(ocr_mask))
+            digit_image = self.pose_to_digit_image(
+                pose_x,
+                pose_y,
+                pose_z,
+                sample_mask=ocr_mask,
+            )
             image_artist.set_data(digit_image)
+            if len(pose_x) > 0 and np.isfinite(pose_x[-1]) and np.isfinite(pose_y[-1]):
+                cursor_artist.set_offsets([[pose_x[-1], pose_y[-1]]])
+                interface_event = self.app_controller.update_cursor(
+                    pose_x[-1],
+                    pose_y[-1],
+                    time.monotonic(),
+                )
+                if interface_event is not None:
+                    self.handle_interface_event(interface_event)
+                    if interface_event.classifier_labels is not None and data:
+                        self.mark_classification_start(data[-1][0])
+            else:
+                cursor_artist.set_offsets(np.empty((0, 2)))
+
+            self.update_joystick_artists(button_artists)
+            dwell_text = (
+                f"{self.app_controller.active_button} "
+                f"{self.app_controller.dwell_progress * 100:.0f}%"
+                if self.app_controller.active_button
+                else "--"
+            )
+            labels_text = ''.join(display_labels_for(self.classifier_labels))
+            if len(labels_text) > 12:
+                labels_text = labels_text[:12] + "..."
+            last_text = self.app_controller.last_command or (
+                self.app_controller.last_event.command if self.app_controller.last_event else '--'
+            )
+            self.latest_interface_text = (
+                f"Mode: {self.app_controller.mode.value} | "
+                f"Button: {dwell_text} | "
+                f"Labels: {labels_text} | "
+                f"Last: {last_text}"
+            )
+            interface_text.set_text(self.latest_interface_text)
+
             prediction_text = self.latest_prediction_text
             runner_up_text = self.latest_runner_up_text
-            self._classifier_frame_skip += 1
-            if self.classifier is not None and self._classifier_frame_skip % 3 == 0:
-                try:
-                    result = self.classifier.predict_smoothed(
-                        digit_image.astype(np.float32),
-                        self.prediction_history,
+            now = time.monotonic()
+            is_writing_now = bool(len(ocr_mask) > 0 and ocr_mask[-1])
+            can_classify = (
+                self.enable_classifier
+                and self.app_controller.mode.value in ('letters', 'digits')
+                and ink_count >= self.classifier_min_ink_samples
+            )
+            if can_classify:
+                if self.classifier_mode == 'continuous':
+                    self.submit_classifier_image(digit_image)
+                else:
+                    if is_writing_now:
+                        self.classifier_last_writing_time = now
+                        self.classifier_waiting_for_pause = True
+                    elif (
+                        self.classifier_waiting_for_pause
+                        and now - self.classifier_last_writing_time >= self.classifier_idle_seconds
+                        and ink_count != self.classifier_last_submitted_ink_count
+                    ):
+                        self.submit_classifier_image(digit_image, force=True)
+                        self.classifier_last_submitted_ink_count = ink_count
+                        self.classifier_waiting_for_pause = False
+
+            result, classifier_error, classifier_status = self.get_classifier_state()
+            if classifier_error is not None:
+                prediction_text = f"Prediction failed: {classifier_error}"
+                runner_up_text = "Runner-up: --"
+            elif result is not None:
+                probabilities = result['probabilities']
+                result_labels = result.get('labels', classifier_labels)
+                top_two = top_label_indices(probabilities, 2)
+                active_display_count = min(display_count, len(result_labels))
+                display_indices = top_label_indices(probabilities, active_display_count)
+
+                if probabilities[top_two[0]] > 0.0:
+                    prediction_text = (
+                        f"Prediction: {result_labels[top_two[0]]} "
+                        f"({probabilities[top_two[0]] * 100:.1f}%)"
                     )
-                    probabilities = result['probabilities']
-                    result_labels = result.get('labels', classifier_labels)
-                    top_two = top_label_indices(probabilities, 2)
-                    display_indices = top_label_indices(probabilities, display_count)
-
-                    if probabilities[top_two[0]] > 0.0:
-                        prediction_text = (
-                            f"Prediction: {result_labels[top_two[0]]} "
-                            f"({probabilities[top_two[0]] * 100:.1f}%)"
-                        )
-                    if len(top_two) > 1 and probabilities[top_two[1]] > 0.0:
-                        runner_up_text = (
-                            f"Runner-up:  {result_labels[top_two[1]]} "
-                            f"({probabilities[top_two[1]] * 100:.1f}%)"
-                        )
-
-                    ax6.set_yticklabels([result_labels[index] for index in display_indices])
-                    for bar, index in zip(prob_bars, display_indices):
-                        bar.set_width(float(probabilities[index]))
-                        bar.set_color('#2f5f9f' if index == top_two[0] and probabilities[index] > 0.0 else '#7c9cc8')
-                except Exception as e:
-                    prediction_text = f"Prediction failed: {e}"
+                else:
+                    prediction_text = f"Prediction: -- ({classifier_status})"
+                if len(top_two) > 1 and probabilities[top_two[1]] > 0.0:
+                    runner_up_text = (
+                        f"Runner-up:  {result_labels[top_two[1]]} "
+                        f"({probabilities[top_two[1]] * 100:.1f}%)"
+                    )
+                else:
                     runner_up_text = "Runner-up: --"
 
-                self.latest_prediction_text = prediction_text
-                self.latest_runner_up_text = runner_up_text
+                # Only update tick labels when they actually change (Fix 4)
+                if result_labels != classifier_labels:
+                    axis_labels = [result_labels[index] for index in display_indices]
+                    axis_labels.extend([''] * (display_count - len(axis_labels)))
+                    ax6.set_yticklabels(axis_labels)
+
+                for bar in prob_bars:
+                    bar.set_width(0.0)
+                    bar.set_color('#7c9cc8')
+                for bar, index in zip(prob_bars, display_indices):
+                    bar.set_width(float(probabilities[index]))
+                    bar.set_color('#2f5f9f' if index == top_two[0] and probabilities[index] > 0.0 else '#7c9cc8')
+
+            if self.classifier is not None and self.app_controller.mode.value not in ('letters', 'digits'):
+                prediction_text = f"Prediction: paused ({self.app_controller.mode.value} mode)"
+                runner_up_text = "Runner-up: --"
+            elif self.enable_classifier and self.classifier is None and self.classifier_loading:
+                prediction_text = "Prediction: classifier loading"
+                runner_up_text = "Runner-up: --"
+            elif self.enable_classifier and self.classifier is None and self.classifier_load_error is not None:
+                prediction_text = "Prediction: classifier failed to load"
+                runner_up_text = "Runner-up: --"
+            elif (
+                self.enable_classifier
+                and self.app_controller.mode.value in ('letters', 'digits')
+                and ink_count < self.classifier_min_ink_samples
+            ):
+                prediction_text = "Prediction: waiting for writing"
+                runner_up_text = "Runner-up: --"
+            elif (
+                self.enable_classifier
+                and self.classifier_mode == 'on-idle'
+                and self.app_controller.mode.value in ('letters', 'digits')
+                and self.classifier_waiting_for_pause
+            ):
+                remaining = max(0.0, self.classifier_idle_seconds - (now - self.classifier_last_writing_time))
+                prediction_text = f"Prediction: waiting for pause ({remaining:.1f}s)"
+
+            self.latest_prediction_text = prediction_text
+            self.latest_runner_up_text = runner_up_text
 
             if len(pose_z) > 0:
                 finite_z = pose_z[np.isfinite(pose_z)]
@@ -786,37 +1387,66 @@ class MagnetometerReader:
                     info_text.set_text(
                         f"{prediction_text}\n"
                         f"{runner_up_text}\n"
+                        f"Ink: {ink_count}/{len(pose_z)} | "
                         f"Z: {finite_z[-1]:.5f} [{np.min(finite_z):.5f}, {np.max(finite_z):.5f}]"
                     )
             else:
-                info_text.set_text(f"{prediction_text}\n{runner_up_text}\nZ: -- ({z_range})")
+                info_text.set_text(
+                    f"{prediction_text}\n"
+                    f"{runner_up_text}\n"
+                    f"Ink: {ink_count}/{len(pose_z)} | Z: -- ({z_range})"
+                )
 
-            ax4.clear()
-            ax4.set_title('Magnet Trajectory from Pose X/Y/Z')
-            ax4.set_xlabel('X')
-            ax4.set_ylabel('Y')
-            ax4.set_zlabel('Z')
-            ax4.grid(True)
-            ax4.view_init(elev=30, azim=135)
-            try:
-                ax4.set_box_aspect([1, 1, 1])
-            except Exception:
-                pass
-            ax4.set_xlim(-self.projection_extent, self.projection_extent)
-            ax4.set_ylim(-self.projection_extent, self.projection_extent)
-            ax4.set_zlim(-POSE_LIMIT, POSE_LIMIT)
-
+            # Update persistent 3D artists in-place instead of clear+redraw (Fix 1)
             if len(pose_x) > 1:
                 colors = np.linspace(0, 1, len(pose_x))
-                scatter_3d = ax4.scatter(pose_x, pose_y, pose_z, c=colors, cmap='plasma', s=150, edgecolors='k', linewidths=0.6)
-                ax4.plot(pose_x, pose_y, pose_z, color='#333333', alpha=0.65, linewidth=1.5)
-                ax4.scatter(pose_x[-1:], pose_y[-1:], pose_z[-1:], c='red', s=120, label='Current position')
-                ax4.legend(loc='best', fontsize='small')
+                hover_mask = ~writing_mask
 
-            plt.tight_layout()
-            return line_bx, line_by, line_bz, image_artist
+                if np.any(hover_mask):
+                    hover_scatter._offsets3d = (
+                        pose_x[hover_mask], pose_y[hover_mask], pose_z[hover_mask]
+                    )
+                    hover_scatter.set_visible(True)
+                else:
+                    hover_scatter.set_visible(False)
 
-        ani = FuncAnimation(fig, update_plot, init_func=init_plot, interval=100, blit=False)
+                if np.any(writing_mask):
+                    writing_scatter._offsets3d = (
+                        pose_x[writing_mask], pose_y[writing_mask], pose_z[writing_mask]
+                    )
+                    writing_scatter.set_array(colors[writing_mask])
+                    writing_scatter.set_visible(True)
+                else:
+                    writing_scatter.set_visible(False)
+
+                trajectory_line.set_data(pose_x, pose_y)
+                trajectory_line.set_3d_properties(pose_z)
+
+                current_pos_scatter._offsets3d = (
+                    pose_x[-1:], pose_y[-1:], pose_z[-1:]
+                )
+                current_pos_scatter.set_visible(True)
+            else:
+                hover_scatter.set_visible(False)
+                writing_scatter.set_visible(False)
+                trajectory_line.set_data([], [])
+                trajectory_line.set_3d_properties([])
+                current_pos_scatter.set_visible(False)
+
+            # tight_layout removed from per-frame path (Fix 2)
+            # Legend calls removed from per-frame path (Fix 3)
+            return (line_bx, line_by, line_bz, image_artist, cursor_artist,
+                    hover_scatter, writing_scatter, trajectory_line, current_pos_scatter,
+                    interface_text, info_text)
+
+        ani = FuncAnimation(
+            fig,
+            update_plot,
+            init_func=init_plot,
+            interval=100,
+            blit=True,   # Only redraw changed artists (Fix 5)
+            cache_frame_data=False,
+        )
         plt.show()
 
     def signal_handler(self, signum, frame):
@@ -830,6 +1460,14 @@ class MagnetometerReader:
 
         if self.read_thread and self.read_thread.is_alive():
             self.read_thread.join(timeout=2)
+
+        self.classifier_stop_event.set()
+        self.classifier_input_event.set()
+        if self.classifier_thread and self.classifier_thread.is_alive():
+            self.classifier_thread.join(timeout=2)
+
+        if self.classifier_load_thread and self.classifier_load_thread.is_alive():
+            self.classifier_load_thread.join(timeout=2)
 
         if self.serial_port and self.serial_port.is_open:
             self.serial_port.close()
@@ -868,6 +1506,21 @@ class MagnetometerReader:
             print("  s:   Stop current recording and save CSV + projected PNG")
             print("  q:   Quit program")
             print(f"Projection: X/Y plane, Z intensity, {self.image_size}x{self.image_size}px, last {self.trail_length} samples")
+            if self.enable_writing_filter:
+                velocity_range = f"velocity>={self.writing_min_velocity}"
+                if self.writing_max_velocity is not None:
+                    velocity_range += f" and <= {self.writing_max_velocity}"
+                z_gate = (
+                    f", closeness>={self.writing_min_closeness}"
+                    if self.writing_min_closeness is not None
+                    else ", Z gate off"
+                )
+                print(
+                    "Writing filter: "
+                    f"{velocity_range}{z_gate}"
+                )
+            else:
+                print("Writing filter: disabled")
             print("="*60)
             print("Press Ctrl+C to stop...")
 
@@ -914,8 +1567,34 @@ def main():
                        help='Skip loading the real-time EasyOCR character classifier')
     parser.add_argument('--classifier-gpu', action='store_true',
                        help='Use GPU for EasyOCR if available')
-    parser.add_argument('--classifier-labels', choices=['digits', 'letters', 'alphanumeric'], default='alphanumeric',
-                       help='Character set for EasyOCR recognition (default: alphanumeric)')
+    parser.add_argument('--classifier-labels', default='alphanumeric',
+                       help='EasyOCR label set: digits, letters, alphanumeric, or a custom subset such as ABCX0123 (default: alphanumeric)')
+    parser.add_argument('--load-classifier-at-start', action='store_true',
+                       help='Load EasyOCR during startup instead of lazily on the first completed drawing')
+    parser.add_argument('--classifier-cpu-threads', type=int, default=1,
+                       help='CPU threads used by torch/OpenCV inside EasyOCR; 1 keeps the UI responsive (default: 1)')
+    parser.add_argument('--classifier-interval', type=float, default=0.75,
+                       help='Minimum seconds between background OCR requests (default: 0.75)')
+    parser.add_argument('--classifier-mode', choices=['on-idle', 'continuous'], default='on-idle',
+                       help='When to run live OCR: after a writing pause or continuously at --classifier-interval (default: on-idle)')
+    parser.add_argument('--classifier-idle-seconds', type=float, default=0.8,
+                       help='Writing pause duration before OCR runs in on-idle mode (default: 0.8)')
+    parser.add_argument('--classifier-min-ink-samples', type=int, default=8,
+                       help='Minimum ink samples required before live OCR can run (default: 8)')
+    parser.add_argument('--letter-labels', default='letters',
+                       help='Label set used after holding virtual L for letter mode (default: letters)')
+    parser.add_argument('--digit-labels', default='digits',
+                       help='Label set used after holding virtual R for number mode (default: digits)')
+    parser.add_argument('--joystick-dwell-seconds', type=float, default=2.0,
+                       help='Seconds the cursor must dwell inside a virtual button to press it (default: 2.0)')
+    parser.add_argument('--no-writing-filter', action='store_true',
+                       help='Draw every pose sample into the OCR image instead of filtering writing/hover samples')
+    parser.add_argument('--writing-min-velocity', type=float, default=0.002,
+                       help='Minimum XY pose velocity for a sample to count as writing (default: 0.002 pose-units/s)')
+    parser.add_argument('--writing-max-velocity', type=float, default=None,
+                       help='Optional maximum XY pose velocity for writing; faster moves become repositioning (default: disabled)')
+    parser.add_argument('--writing-min-closeness', type=float, default=None,
+                       help='Optional normalized Z closeness gate for board/contact mode, 0..1 (default: disabled for air-writing)')
 
     args = parser.parse_args()
 
@@ -929,6 +1608,22 @@ def main():
         parser.error("--z-near and --z-far must be provided together")
     if args.z_near is not None and args.z_near == args.z_far:
         parser.error("--z-near and --z-far must be different")
+    if args.writing_min_velocity < 0:
+        parser.error("--writing-min-velocity must be non-negative")
+    if args.joystick_dwell_seconds <= 0:
+        parser.error("--joystick-dwell-seconds must be positive")
+    if args.classifier_interval <= 0:
+        parser.error("--classifier-interval must be positive")
+    if args.classifier_cpu_threads < 1:
+        parser.error("--classifier-cpu-threads must be at least 1")
+    if args.classifier_idle_seconds <= 0:
+        parser.error("--classifier-idle-seconds must be positive")
+    if args.classifier_min_ink_samples < 1:
+        parser.error("--classifier-min-ink-samples must be at least 1")
+    if args.writing_max_velocity is not None and args.writing_max_velocity < args.writing_min_velocity:
+        parser.error("--writing-max-velocity must be greater than or equal to --writing-min-velocity")
+    if args.writing_min_closeness is not None and not 0.0 <= args.writing_min_closeness <= 1.0:
+        parser.error("--writing-min-closeness must be between 0 and 1")
 
     print(f"Magnetometer Data Reader")
     print(f"Plotting Sensor: {args.sensor}")
@@ -941,7 +1636,32 @@ def main():
         print(f"Z Calibration: near={args.z_near}, far={args.z_far}")
     else:
         print("Z Calibration: relative per trail")
-    print(f"Character Classifier: {'disabled' if args.no_classifier else 'EasyOCR'} ({args.classifier_labels})")
+    print(
+        f"Character Classifier: {'disabled' if args.no_classifier else 'EasyOCR'} "
+        f"({args.classifier_labels}, mode={args.classifier_mode}, "
+        f"interval={args.classifier_interval}s, lazy={not args.load_classifier_at_start})"
+    )
+    print(
+        "Virtual Joystick: "
+        f"L -> letters ({args.letter_labels}), "
+        f"R -> numbers ({args.digit_labels}), "
+        f"dwell={args.joystick_dwell_seconds}s"
+    )
+    if args.no_writing_filter:
+        print("Writing Filter: disabled")
+    else:
+        velocity_range = f"velocity>={args.writing_min_velocity}"
+        if args.writing_max_velocity is not None:
+            velocity_range += f" and <= {args.writing_max_velocity}"
+        z_gate = (
+            f", closeness>={args.writing_min_closeness}"
+            if args.writing_min_closeness is not None
+            else ", Z gate off"
+        )
+        print(
+            "Writing Filter: "
+            f"{velocity_range}{z_gate}"
+        )
     print("-" * 40)
 
     reader = MagnetometerReader(
@@ -957,6 +1677,19 @@ def main():
         enable_classifier=not args.no_classifier,
         classifier_gpu=args.classifier_gpu,
         classifier_labels=args.classifier_labels,
+        lazy_classifier=not args.load_classifier_at_start,
+        classifier_cpu_threads=args.classifier_cpu_threads,
+        classifier_interval=args.classifier_interval,
+        classifier_mode=args.classifier_mode,
+        classifier_idle_seconds=args.classifier_idle_seconds,
+        classifier_min_ink_samples=args.classifier_min_ink_samples,
+        enable_writing_filter=not args.no_writing_filter,
+        writing_min_velocity=args.writing_min_velocity,
+        writing_max_velocity=args.writing_max_velocity,
+        writing_min_closeness=args.writing_min_closeness,
+        joystick_dwell_seconds=args.joystick_dwell_seconds,
+        letter_labels=args.letter_labels,
+        digit_labels=args.digit_labels,
     )
     reader.run(csv_filename=None if args.no_csv else args.csv, baudrate=args.baudrate)
 

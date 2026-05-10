@@ -510,7 +510,18 @@ This project includes a Python program for reading magnetometer data from a seri
 - `--z-close-mode`: How Z maps to stroke darkness; `max` means larger Z is darker (default)
 - `--no-classifier`: Run without loading the real-time EasyOCR character classifier
 - `--classifier-gpu`: Use GPU for EasyOCR if available
-- `--classifier-labels`: Character set for EasyOCR recognition: `alphanumeric`, `digits`, or `letters` (default: alphanumeric)
+- `--classifier-labels`: Character set for EasyOCR recognition: `alphanumeric`, `digits`, `letters`, or a custom subset such as `ABCX0123` (default: alphanumeric)
+- `--classifier-interval`: Minimum seconds between background OCR requests (default: 0.75)
+- `--classifier-mode`: Run live OCR after a writing pause (`on-idle`) or continuously at `--classifier-interval` (default: on-idle)
+- `--classifier-idle-seconds`: Writing pause duration before OCR runs in `on-idle` mode (default: 0.8)
+- `--classifier-min-ink-samples`: Minimum ink samples required before live OCR can run (default: 8)
+- `--letter-labels`: Label set used after holding virtual **L** for letter mode (default: letters)
+- `--digit-labels`: Label set used after holding virtual **R** for number mode (default: digits)
+- `--joystick-dwell-seconds`: Seconds the cursor must dwell inside a virtual button to press it (default: 2.0)
+- `--no-writing-filter`: Disable writing/hover filtering and draw every pose sample into the OCR image
+- `--writing-min-velocity`: Minimum XY pose velocity for a sample to count as writing (default: 0.002)
+- `--writing-max-velocity`: Optional maximum XY pose velocity; faster moves are treated as repositioning/pen-up (default: disabled)
+- `--writing-min-closeness`: Optional normalized Z closeness gate for board/contact mode, 0..1 (default: disabled for air-writing)
 
 #### Session Recording Controls
 
@@ -521,7 +532,7 @@ The program supports recording separate character drawing sessions:
 - **s**: Stop current recording session and save CSV + projected PNG
 - **q**: Quit program
 
-Each session creates a separate CSV file and a 64x64 grayscale PNG in `digit_images/`.
+Each session creates a separate CSV file, a 64x64 grayscale PNG in `digit_images/`, and a JSON sidecar containing the projection/filter settings used for that image.
 
 #### Examples
 
@@ -547,10 +558,14 @@ python magnetometer_reader.py
 This creates files such as:
 - `digit_5_YYYYMMDD_HHMMSS.csv`
 - `digit_images/digit_5_YYYYMMDD_HHMMSS_64px.png`
+- `digit_images/digit_5_YYYYMMDD_HHMMSS_64px.json`
 - `letter_A_YYYYMMDD_HHMMSS.csv`
 - `digit_images/letter_A_YYYYMMDD_HHMMSS_64px.png`
+- `digit_images/letter_A_YYYYMMDD_HHMMSS_64px.json`
 
 ## Data Processing Pipeline
+
+For the current week 4 implementation plan, see `PROJECT_TASKS.md`.
 
 The project implements a complete pipeline for processing magnetometer data and classifying 2D magnet trajectories as characters. The pipeline consists of the following stages:
 
@@ -574,7 +589,7 @@ The project implements a complete pipeline for processing magnetometer data and 
    - Saves projected images as PNG files in the `digit_images/` directory.
 
 5. **Character Classification**:
-   - Uses EasyOCR (pretrained OCR model) to classify the 2D projected images as digits 0-9 and letters A-Z.
+   - Uses EasyOCR (pretrained OCR model) to classify the 2D projected images as digits, letters, or a smaller custom command alphabet.
    - Provides real-time predictions with confidence scores and smoothed results.
    - Supports GPU acceleration for faster inference.
 
@@ -601,7 +616,17 @@ Run the magnetometer reader with real-time OCR classification:
 python magnetometer_reader.py --no-csv
 ```
 
-The live classifier panel shows the top prediction, runner-up, and a top-character confidence chart. By default the classifier accepts digits 0-9 and letters A-Z; use `--classifier-labels digits` or `--classifier-labels letters` to narrow the recognition set. The projected magnetometer image has a white background and dark strokes; the EasyOCR wrapper upsamples and autocontrasts the image before recognition.
+Do not pass `--no-classifier` when testing predictions. With `--no-classifier`, the virtual joystick still switches modes and queues the active label set, but the right classifier panel will stay disabled because EasyOCR was intentionally not loaded.
+
+EasyOCR is relatively slow, so live OCR runs in a background worker. By default it runs only after you stop writing briefly, which keeps the joystick/cursor responsive and avoids spending CPU while the trajectory is still changing. Use `--classifier-mode continuous` to restore repeated live OCR, and increase `--classifier-interval` if your machine lags.
+
+The live classifier panel shows the top prediction, runner-up, and a top-character confidence chart. By default the classifier accepts digits 0-9 and letters A-Z; use `--classifier-labels digits`, `--classifier-labels letters`, or a custom subset such as `--classifier-labels ABCX0123` to narrow the recognition set. The projected magnetometer image has a white background and dark strokes; the EasyOCR wrapper upsamples and autocontrasts the image before recognition.
+
+The final robot command vocabulary does not need all 26 letters. Prefer a small set of characters that are reliable in air-writing and map cleanly to robot tasks. Non-OCR shapes such as a star should be handled by a future gesture/template recognizer rather than EasyOCR.
+
+The live interface now includes two virtual joystick groups on the writing surface. Dwelling on **L** switches to letter detection, dwelling on **R** switches to number detection, and **A/B/C/X/U/D** currently emit robot-command placeholders for the later ROS adapter. The joystick/app-mode logic lives in `colmag/interaction.py` so the UI, OCR, and future robot adapter can stay separate.
+
+The OCR image is filtered before classification: by default a pose sample only becomes ink when the magnet moves fast enough in X/Y. This prevents a resting magnet from becoming a dot while still supporting air-writing. For multi-stroke letters, tune `--writing-max-velocity` so fast repositioning motions are treated as pen-up, then draw actual strokes with slower controlled motion. `--writing-min-closeness` is still available for board/contact experiments, but it is disabled by default.
 
 To skip classification:
 

@@ -32,9 +32,8 @@ def main():
     parser.add_argument("--gpu", action="store_true", help="Use EasyOCR GPU mode if available")
     parser.add_argument(
         "--labels",
-        choices=["digits", "letters", "alphanumeric"],
         default="alphanumeric",
-        help="Character set for EasyOCR recognition (default: alphanumeric)",
+        help="EasyOCR label set: digits, letters, alphanumeric, or a custom subset such as ABCX0123",
     )
     args = parser.parse_args()
 
