@@ -587,65 +587,114 @@ python magnetometer_reader.py --input-source touchpad --touchpad-ink-mode pen
 
 ### Session Recording Workflow
 
-1. Start the program normally
-2. Press the digit or letter key you want to draw, e.g. **5** or **A**
-3. Press **s** to stop recording
-4. Repeat for more samples
-5. Press **q** to quit
-
-This creates files under `data/lab_YYYY-MM-DD/` organized by label:
-
-```
-data/lab_2026-05-20/
-├── manifest.json
-├── raw/
-│   └── run_001_raw.csv
-├── samples/
-│   ├── digit_5/
-│   │   ├── run_001_digit_5_rep001_20260520_143022.csv
-│   │   ├── run_001_digit_5_rep001_20260520_143022.png
-│   │   └── run_001_digit_5_rep001_20260520_143022.json
-│   ├── letter_A/
-│   │   ├── run_001_letter_A_rep001_20260520_144155.csv
-│   │   ├── run_001_letter_A_rep001_20260520_144155.png
-│   │   └── run_001_letter_A_rep001_20260520_144155.json
-│   └── control_blank/
-│       ├── run_001_control_blank_rep001_20260520_150312.csv
-│       ├── run_001_control_blank_rep001_20260520_150312.png
-│       └── run_001_control_blank_rep001_20260520_150312.json
-```
-
-Each JSON sidecar and the run manifest include **git metadata** (branch, commit hash, dirty status) for full reproducibility. Control samples are stored as separate labels, not as `digit_0`. For special unfiltered controls, add `--no-writing-filter` so stationary samples also appear in the PNG; otherwise the raw CSV still captures them while the image remains blank.
-
-### Touchpad Magnetic Calibration
-
-Touchpad mode already writes the same row format as the real sensor: timestamp, 48 magnetic channels, and 6 pose values. By default those 48 channels come from a simple synthetic dipole model. To make that synthetic data closer to tomorrow's sensor grid, record one short calibration run in the lab:
+**Full recording command** (replace date/run-id as needed):
 
 ```bash
 python magnetometer_reader.py \
+  --input-source serial \
   --record-data \
-  --no-classifier \
-  --output-dir data/lab_2026-05-20 \
-  --run-id magcal_001
+  --output-dir data/lab_$(date +%Y-%m-%d)/ \
+  --run-id run_001
 ```
 
-Move the magnet slowly across the whole pad: center, corners, edges, a few heights, and a few normal writing motions. You do not need to start character sessions for calibration because the continuous raw CSV is enough. Stop with `Ctrl+C`, then fit the JSON:
+**Keys during recording:**
+
+| Key          | Action                                    |
+|--------------|-------------------------------------------|
+| `0` – `9`   | Start recording that digit                |
+| `A` – `Z`   | Start recording that letter (a–z also works; `s` and `q` are reserved) |
+| `-`          | Start `control_blank` (no magnet, stationary) |
+| `=`          | Start `control_still` (magnet held still) |
+| `s`          | Stop & save current session               |
+| `q`          | Quit                                      |
+
+**What to record** (38 target labels, aim for ≥ 5 reps each):
+
+```
+Digits  : 0 1 2 3 4 5 6 7 8 9
+Letters : A B C D E F G H I J K L M
+          N O P Q R S T U V W X Y Z
+Controls: blank(-) still(=)
+```
+
+After every `s` the terminal prints a live checklist:
+
+```
+============================================================
+RECORDING PROGRESS  (target: 5 reps each, v = done)
+  Digits:   0[3 ] 1[5v] 2[2 ] ...
+  Letters:  A[5v] B[3 ] C[0 ] ...
+  Controls: blank(-)[2 ]  still(=)[0 ]
+  Done: 3/38 labels | 15/190 reps total
+  Still needed: 0 2 3 ...
+============================================================
+```
+
+The checklist tracks reps within the current run. If you restart the program for a new run, the counter resets — that is intentional so each run ID is independent.
+
+**Output layout:**
+
+```
+data/lab_2026-05-20/
+├── manifest.json           ← lists every session with paths, git hash, settings
+├── raw/
+│   └── run_001_raw.csv     ← continuous magnetic stream (all 48 channels + pose)
+└── samples/
+    ├── digit_5/
+    │   ├── run_001_digit_5_rep001_20260520_143022.csv
+    │   ├── run_001_digit_5_rep001_20260520_143022.png
+    │   └── run_001_digit_5_rep001_20260520_143022.json
+    ├── letter_A/
+    │   └── ...
+    └── control_blank/
+        └── ...
+```
+
+Each JSON sidecar includes git metadata, settings snapshot, and classifier prediction.
+Control labels are stored as separate folders (`control_blank`, `control_still`), not mixed with characters.
+For `control_still`, add `--no-writing-filter` so the stationary samples appear in the PNG projection.
+
+### Touchpad Magnetic Calibration
+
+> **Full guide: see [CALIBRATION_GUIDE.md](CALIBRATION_GUIDE.md)**
+
+The touchpad simulator generates synthetic magnetic fields matching a 4×4 dipole grid.
+Calibrating maps that synthetic output onto the real sensor channel scale/offset, so
+touchpad recordings are a realistic drop-in for real hardware data.
+
+**Step 1 — Record calibration CSV** (real sensor, ~2 min slow scan):
+
+```bash
+python magnetometer_reader.py \
+  --input-source serial \
+  --csv data/lab_$(date +%Y-%m-%d)/raw/magcal_raw.csv
+```
+
+Move the magnet slowly: all four corners, edges, centre, at 2–3 heights. `Ctrl+C` to stop.
+
+**Step 2 — Fit the calibration:**
 
 ```bash
 python calibrate_touchpad_magnetics.py \
-  data/lab_2026-05-20/raw/magcal_001_raw.csv \
-  --output data/lab_2026-05-20/touchpad_magnetic_calibration.json
+  data/lab_2026-05-20/raw/magcal_raw.csv
 ```
 
-Use that JSON for offline touchpad work:
+Prints a per-sensor RMSE table + quality badge (`EXCELLENT / GOOD / ACCEPTABLE / POOR`).
+Output: `data/lab_2026-05-20/raw/touchpad_magnetic_calibration.json`
+
+**Step 3 — Use it with the touchpad simulator:**
 
 ```bash
 python magnetometer_reader.py \
   --input-source touchpad \
-  --touchpad-magnetic-calibration data/lab_2026-05-20/touchpad_magnetic_calibration.json
+  --touchpad-magnetic-calibration data/lab_2026-05-20/raw/touchpad_magnetic_calibration.json \
+  --record-data \
+  --output-dir data/lab_2026-05-20/ \
+  --run-id run_001
 ```
 
-This calibrates per-channel scale and offset for pipeline testing. It is not a full physics reconstruction, but it makes touchpad-generated magnetic rows much more realistic for CSV saving, ROS replay, and downstream debugging.
+This calibrates per-channel scale and offset — not a full physics model, but makes touchpad
+magnetic rows much more realistic for CSV saving and downstream pipeline testing.
 
 ## Data Processing Pipeline
 

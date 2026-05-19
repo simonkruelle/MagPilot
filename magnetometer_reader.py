@@ -59,6 +59,13 @@ CLASSIFIER_LABEL_PRESETS = {
 }
 DATA_MANIFEST_SCHEMA_VERSION = 1
 
+RECORDING_TARGETS = (
+    tuple(f'digit_{d}' for d in '0123456789') +
+    tuple(f'letter_{c}' for c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ') +
+    ('control_blank', 'control_still')
+)
+TARGET_REPS_DEFAULT = 5
+
 
 def top_label_indices(scores, count):
     """Return label indices sorted by descending score, keeping label order for ties."""
@@ -223,6 +230,7 @@ class MagnetometerReader:
         self.action_feedback_text = ""
         self.action_feedback_button = None
         self.action_feedback_until = 0.0
+        self.touchpad_pen_enabled = True
         self.classifier_thread = None
         self.classifier_stop_event = threading.Event()
         self.classifier_input_event = threading.Event()
@@ -472,6 +480,54 @@ class MagnetometerReader:
                     next_rep = max(next_rep, int(match.group(1)) + 1)
         return next_rep
 
+    def reps_by_label(self):
+        """Count completed repetitions per label for this run from in-memory session list."""
+        counts = {}
+        for (session_name, *_) in self.recording_sessions:
+            label = self.session_label(session_name)
+            counts[label] = counts.get(label, 0) + 1
+        return counts
+
+    def print_recording_checklist(self, target_reps=TARGET_REPS_DEFAULT):
+        """Print an ASCII checklist showing recording progress for all standard targets."""
+        counts = self.reps_by_label()
+
+        digits  = [f'digit_{d}' for d in '0123456789']
+        letters = [f'letter_{c}' for c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ']
+        controls = ['control_blank', 'control_still']
+
+        done_labels = sum(1 for lbl in RECORDING_TARGETS if counts.get(lbl, 0) >= target_reps)
+        total_reps  = sum(counts.values())
+        needed_reps = len(RECORDING_TARGETS) * target_reps
+
+        def cell(label, display):
+            n = counts.get(label, 0)
+            mark = 'v' if n >= target_reps else ' '
+            return f"{display}[{n}{mark}]"
+
+        dig_row = ' '.join(cell(lbl, d) for lbl, d in zip(digits, '0123456789'))
+        let_row1 = ' '.join(cell(lbl, c) for lbl, c in zip(letters[:13], 'ABCDEFGHIJKLM'))
+        let_row2 = ' '.join(cell(lbl, c) for lbl, c in zip(letters[13:], 'NOPQRSTUVWXYZ'))
+        ctl_row  = '  '.join(cell(lbl, name) for lbl, name in zip(controls, ['blank(-)', 'still(=)']))
+
+        print()
+        print("=" * 60)
+        print(f"RECORDING PROGRESS  (target: {target_reps} reps each, v = done)")
+        print(f"  Digits:   {dig_row}")
+        print(f"  Letters:  {let_row1}")
+        print(f"            {let_row2}")
+        print(f"  Controls: {ctl_row}")
+        print(f"  Done: {done_labels}/{len(RECORDING_TARGETS)} labels | {total_reps}/{needed_reps} reps total")
+        missing = [
+            lbl.replace('digit_', '').replace('letter_', '').replace('control_', '')
+            for lbl in RECORDING_TARGETS if counts.get(lbl, 0) < target_reps
+        ]
+        if missing:
+            shown = ' '.join(missing[:25])
+            extra = f' (+{len(missing)-25} more)' if len(missing) > 25 else ''
+            print(f"  Still needed: {shown}{extra}")
+        print("=" * 60)
+
     def create_session_paths(self, session_name):
         """Create a matched CSV/PNG/JSON basename and return all paths."""
         label = self.session_label(session_name)
@@ -702,7 +758,15 @@ class MagnetometerReader:
                 self.confirm_classifier_candidate(event.command, event.button.name)
             elif event.command == 'canvas:reset':
                 self.reset_writing_canvas()
+                self._set_key_feedback("Canvas reset", duration=1.0)
+            elif event.command == 'letter_detection':
+                self._set_key_feedback("Mode: letters")
+                print(f"Virtual joystick: {event.button.name} -> {event.command}")
+            elif event.command == 'number_detection':
+                self._set_key_feedback("Mode: digits")
+                print(f"Virtual joystick: {event.button.name} -> {event.command}")
             else:
+                self._set_key_feedback(f"{event.button.name}: {event.command.split(':', 1)[-1]}")
                 print(f"Virtual joystick: {event.button.name} -> {event.command}")
 
     def confirm_classifier_candidate(self, command, button_name):
@@ -1059,15 +1123,23 @@ class MagnetometerReader:
                 except:
                     pass
 
+    def _set_key_feedback(self, text, duration=1.5):
+        self.action_feedback_text = text
+        self.action_feedback_until = time.monotonic() + duration
+        self.action_feedback_button = None
+
     def handle_keypress(self, key):
         """Handle keyboard input for session controls."""
         if not key:
             return
         if key in '0123456789':
+            self._set_key_feedback(f"REC  digit_{key}")
             self.start_session(f'digit_{key}')
         elif key == '-':
+            self._set_key_feedback("REC  blank")
             self.start_session('control_blank')
         elif key == '=':
+            self._set_key_feedback("REC  still")
             self.start_session('control_still')
         elif key == 's':
             self.stop_session()
@@ -1075,6 +1147,7 @@ class MagnetometerReader:
             print("Quitting...")
             self.stop()
         elif key.isalpha() and len(key) == 1:
+            self._set_key_feedback(f"REC  letter_{key.upper()}")
             self.start_session(f'letter_{key.upper()}')
 
     def start_session(self, session_name):
@@ -1092,12 +1165,13 @@ class MagnetometerReader:
         else:
             self.latest_prediction_text = self.classifier_unloaded_prediction_text()
         self.latest_runner_up_text = "Runner-up: --"
-        print(f"\n🎬 STARTED RECORDING SESSION: '{session_name}'")
+        label = self.session_label(session_name)
+        existing_reps = self.reps_by_label().get(label, 0)
+        rep_info = f"rep {existing_reps + 1}" if self.record_data else "live"
+        print(f"\n>>> RECORDING: '{session_name}'  [{rep_info}]")
+        print(f"    Draw — then move to classification button — then press 's' to save <<<")
         if self.record_data:
-            print(f"Raw CSV log: {self.csv_file.name if self.csv_file else 'disabled'}")
-            print(f"Session artifacts will be saved under: {self.output_dir}/samples/{self.session_label(session_name)}/")
-        else:
-            print("Live session only; use --record-data to save artifacts")
+            print(f"    Save dir : {self.output_dir}/samples/{label}/")
 
     def stop_session(self):
         """Stop the current recording session."""
@@ -1117,14 +1191,24 @@ class MagnetometerReader:
 
         self.recording_sessions.append((session_name, start_time, end_time, data_points))
 
-        print(f"\n⏹️ STOPPED RECORDING SESSION: '{session_name}'")
-        print(f"Recorded {data_points} data points")
-        print(f"Duration: {start_time} to {end_time}")
+        label = self.session_label(session_name)
+        completed_reps = self.reps_by_label().get(label, 1)
+
+        print(f"\n<<< SAVED: '{session_name}'  rep {completed_reps}/{TARGET_REPS_DEFAULT}  ({data_points} samples) >>>")
 
         if self.record_data:
             self.save_session_artifacts(session_name, start_time, end_time, data_points)
+            self.print_recording_checklist()
+            self._set_key_feedback(
+                f"Saved  {session_name}  rep {completed_reps}/{TARGET_REPS_DEFAULT}  ({data_points} pts)",
+                duration=3.0,
+            )
         else:
-            print("(Skipping file save — use --record-data to enable CSV/PNG/JSON output)")
+            print("(live mode — use --record-data to save CSV/PNG/JSON)")
+            self._set_key_feedback(
+                f"Stopped  {session_name}  ({data_points} pts, not saved)",
+                duration=3.0,
+            )
 
         self.current_session = None
         self.session_data = []
@@ -1651,14 +1735,38 @@ class MagnetometerReader:
         def on_key_press(event):
             raw_key = event.key or ''
             key = raw_key.lower()
-            if self.input_source == 'touchpad' and key == 'l' and raw_key == 'l':
+            # Shift+L/D/R = mode/reset controls (keep lowercase free for recording)
+            if self.input_source == 'touchpad' and raw_key in ('L', 'shift+l'):
                 self.activate_classifier_mode('letters')
-            elif self.input_source == 'touchpad' and key == 'r' and raw_key == 'r':
+                self._set_key_feedback("Mode: letters")
+            elif self.input_source == 'touchpad' and raw_key in ('D', 'shift+d'):
                 self.activate_classifier_mode('digits')
+                self._set_key_feedback("Mode: digits")
+            elif self.input_source == 'touchpad' and raw_key in ('R', 'shift+r'):
+                self.reset_writing_canvas()
+                self._set_key_feedback("Canvas reset")
             elif self.input_source == 'touchpad' and key in (' ', 'space'):
                 self.touchpad_state['pen_down'] = True
-            elif self.input_source == 'touchpad' and key == 'p':
-                self.touchpad_state['pen_down'] = not self.touchpad_state['pen_down']
+            elif self.input_source == 'touchpad' and raw_key in ('P', 'shift+p'):
+                # Shift+P = pen toggle; lowercase p falls through to record letter_P
+                self.touchpad_pen_enabled = not self.touchpad_pen_enabled
+                if not self.touchpad_pen_enabled:
+                    self.touchpad_state['pen_down'] = False
+                state = "ON" if self.touchpad_pen_enabled else "OFF"
+                self._set_key_feedback(f"Pen: {state}")
+            elif self.input_source == 'touchpad' and raw_key in ('S', 'shift+s'):
+                # Shift+S = stop & save; lowercase s records letter_S
+                self.stop_session()
+            elif self.input_source == 'touchpad' and raw_key in ('Q', 'shift+q'):
+                # Shift+Q = quit; lowercase q records letter_Q
+                print("Quitting...")
+                self.stop()
+            elif self.input_source == 'touchpad' and raw_key == 's':
+                self._set_key_feedback("REC  letter_S")
+                self.start_session('letter_S')
+            elif self.input_source == 'touchpad' and raw_key == 'q':
+                self._set_key_feedback("REC  letter_Q")
+                self.start_session('letter_Q')
             else:
                 self.handle_keypress(raw_key)
 
@@ -1673,6 +1781,12 @@ class MagnetometerReader:
         fig.canvas.mpl_connect('axes_leave_event', on_axes_leave)
         fig.canvas.mpl_connect('key_press_event', on_key_press)
         fig.canvas.mpl_connect('key_release_event', on_key_release)
+        # Disconnect matplotlib's built-in key handler (l=log scale, r=reset, etc.)
+        # so our key bindings take exclusive control.
+        try:
+            fig.canvas.mpl_disconnect(fig.canvas.manager.key_press_handler_id)
+        except AttributeError:
+            pass
 
     def append_touchpad_sample(self, force=False):
         """Append synthetic rows from the current touchpad state."""
@@ -1789,9 +1903,13 @@ class MagnetometerReader:
 
     def touchpad_pen_mask(self, rows):
         """Return the pen-down gate encoded in Pose_mx for synthetic rows."""
-        if self.input_source != 'touchpad' or self.touchpad_ink_mode != 'pen':
+        if self.input_source != 'touchpad':
             return None
-        return np.array([float(row[-3]) > 0.5 for row in rows], dtype=bool)
+        if not self.touchpad_pen_enabled:
+            return np.zeros(len(rows), dtype=bool)
+        if self.touchpad_ink_mode == 'pen':
+            return np.array([float(row[-3]) > 0.5 for row in rows], dtype=bool)
+        return None
 
     def joystick_button_mask(self, pose_x, pose_y):
         """Return samples that are inside virtual buttons and should not become ink."""
@@ -1957,7 +2075,7 @@ class MagnetometerReader:
                 self.action_feedback_button == button.name
                 and time.monotonic() < self.action_feedback_until
             ):
-                facecolor = '#95d5a6'
+                facecolor = '#40b872'
 
             artist.set_facecolor(facecolor)
             # Only call set_text() when text actually changes (avoids text re-layout each frame)
@@ -2050,6 +2168,23 @@ class MagnetometerReader:
         ax5.set_title('Virtual Joystick + Writing Surface')
         ax5.set_xticks([])
         ax5.set_yticks([])
+        if self.input_source == 'touchpad':
+            _hint_line1 = "Shift+S = save   Shift+Q = quit   |   A-Z / 0-9 / - / = = record   p/s/q = letter P/S/Q"
+            _hint_line2 = "Space / click = draw   Shift+P = pen   |   Shift+L = letters OCR   Shift+D = digits OCR   Shift+R = reset"
+            _hint_lines = [_hint_line1, _hint_line2]
+        else:
+            _hint_lines = ["s = stop & save   q = quit   |   A-Z = letter   0-9 = digit   - = blank   = = still"]
+        hint_text = ax5.text(
+            0.5, 0.03,
+            "\n".join(_hint_lines),
+            transform=ax5.transAxes,
+            ha='center', va='bottom',
+            fontsize=6.5,
+            family='monospace',
+            color='#222222',
+            bbox={'facecolor': 'white', 'edgecolor': '#aaaaaa', 'boxstyle': 'round,pad=0.3', 'alpha': 0.93},
+            zorder=9,
+        )
         button_artists, cursor_artist, interface_text, completion_text = self.setup_joystick_artists(ax5)
         # Collect button artists for blit. Circles must be redrawn for hover/feedback,
         # and labels must be redrawn too so filled patches do not cover cached text.
@@ -2125,6 +2260,7 @@ class MagnetometerReader:
         raw_blit_artists = (
             *sensor_trace_artists,
             image_artist,
+            hint_text,       # drawn after image so it stays on top of ink
             *button_circles,
             *button_labels,
             cursor_artist,
@@ -2370,7 +2506,12 @@ class MagnetometerReader:
                 else:
                     self.classifier_candidates = []
                 active_display_count = min(display_count, len(result_labels))
-                display_indices = list(range(active_display_count))
+                # Sort all labels by probability descending so top predictions appear first
+                sorted_by_prob = sorted(
+                    range(len(result_labels)),
+                    key=lambda i: -float(probabilities[i]),
+                )
+                display_indices = sorted_by_prob[:active_display_count]
 
                 self.update_joystick_artists(button_artists)
 
@@ -2639,17 +2780,23 @@ class MagnetometerReader:
             print("Controls:")
             if self.input_source == 'touchpad':
                 if self.touchpad_ink_mode == 'pen':
-                    print("  Mouse/touchpad: hover to move cursor, click-drag to draw ink")
-                    print("  Space: hold for pen-down drawing, p: toggle pen down/up")
+                    print("  Mouse/touchpad : hover to move, click-drag or Space to draw")
                 else:
-                    print("  Mouse/touchpad: hover to move cursor, controlled movement draws ink")
-                print(f"  Touchpad dwell default: {self.app_controller.detector.dwell_seconds:.1f}s")
-                print("  l/r: switch to letter/digit classification")
-            print("  0-9: Start recording that digit")
-            print("  A-Z: Start recording that letter (lowercase s/q are reserved)")
-            print("  -/=: Start control_blank / control_still recording")
-            print("  s:   Stop current recording and save CSV + projected PNG")
-            print("  q:   Quit program")
+                    print("  Mouse/touchpad : hover to move cursor, movement draws ink")
+                print(f"  Touchpad dwell : {self.app_controller.detector.dwell_seconds:.1f}s to activate a button")
+                print("  Shift+L        : switch to letters OCR mode")
+                print("  Shift+D        : switch to digits OCR mode")
+                print("  Shift+R        : reset writing canvas")
+                print("  Shift+P        : toggle pen on/off")
+                print("  Shift+S        : stop & save current recording")
+                print("  Shift+Q        : quit")
+                print("  p / s / q      : record letter_P / letter_S / letter_Q")
+            else:
+                print("  s              : stop & save current recording")
+                print("  q              : quit")
+            print("  0-9 / A-Z      : start recording that digit / letter")
+            print("                   (tip: draw → move to classification button → Shift+S to save)")
+            print("  - / =          : start control_blank / control_still recording")
             print(f"Projection: X/Y plane, Z intensity, {self.image_size}x{self.image_size}px, last {self.trail_length} samples")
             if self.enable_writing_filter:
                 velocity_range = f"velocity>={self.writing_min_velocity}"
@@ -2666,7 +2813,10 @@ class MagnetometerReader:
                 )
             else:
                 print("Writing filter: disabled")
-            print("="*60)
+            if self.record_data:
+                self.print_recording_checklist()
+            else:
+                print("="*60)
             print("Press Ctrl+C to stop...")
 
             # Start keyboard input thread
