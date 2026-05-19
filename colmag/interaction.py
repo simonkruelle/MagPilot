@@ -44,21 +44,21 @@ class VirtualJoystick:
     @classmethod
     def default(cls, extent):
         radius = extent * 0.15
-        left_x = -extent * 0.55
-        right_x = extent * 0.55
-        horizontal = extent * 0.30
-        vertical = extent * 0.52
+        left_x = -extent * 0.50
+        right_x = extent * 0.50
+        horizontal = extent * 0.18
+        vertical = extent * 0.36
 
         return cls(
             [
                 VirtualButton('U', left_x, vertical, radius, 'robot:up'),
-                VirtualButton('D', left_x, -vertical, radius, 'robot:down'),
+                VirtualButton('D', left_x, -vertical, radius, 'canvas:reset'),
                 VirtualButton('L', left_x - horizontal, 0.0, radius, 'mode:letters'),
                 VirtualButton('R', left_x + horizontal, 0.0, radius, 'mode:digits'),
-                VirtualButton('X', right_x, vertical, radius, 'robot:x'),
-                VirtualButton('B', right_x, -vertical, radius, 'robot:b'),
-                VirtualButton('A', right_x - horizontal, 0.0, radius, 'robot:a'),
-                VirtualButton('C', right_x + horizontal, 0.0, radius, 'robot:c'),
+                VirtualButton('1', right_x, vertical, radius, 'choice:0'),
+                VirtualButton('2', right_x + horizontal, 0.0, radius, 'choice:1'),
+                VirtualButton('3', right_x, -vertical, radius, 'choice:2'),
+                VirtualButton('4', right_x - horizontal, 0.0, radius, 'choice:3'),
             ]
         )
 
@@ -149,6 +149,12 @@ class AppController:
             command = 'number_detection'
         elif button.action.startswith('robot:'):
             self.mode = InputMode.ROBOT
+            command = button.action
+            self.last_command = command
+        elif button.action.startswith('choice:'):
+            command = button.action
+            self.last_command = command
+        elif button.action.startswith('canvas:'):
             command = button.action
             self.last_command = command
 

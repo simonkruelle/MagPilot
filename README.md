@@ -519,9 +519,27 @@ This project includes a Python program for reading magnetometer data from a seri
 - `--digit-labels`: Label set used after holding virtual **R** for number mode (default: digits)
 - `--joystick-dwell-seconds`: Seconds the cursor must dwell inside a virtual button to press it (default: 2.0)
 - `--no-writing-filter`: Disable writing/hover filtering and draw every pose sample into the OCR image
-- `--writing-min-velocity`: Minimum XY pose velocity for a sample to count as writing (default: 0.002)
+- `--writing-min-velocity`: Minimum XY pose velocity for a sample to count as writing (default: 0.01)
 - `--writing-max-velocity`: Optional maximum XY pose velocity; faster moves are treated as repositioning/pen-up (default: disabled)
 - `--writing-min-closeness`: Optional normalized Z closeness gate for board/contact mode, 0..1 (default: disabled for air-writing)
+
+#### New Mode Flags (Lab Preparation)
+
+These flags control what happens when you run the program:
+
+- `--record-data`: Explicitly enable saving CSV/PNG/JSON session files. Without this flag, the program runs in **live view only** — sessions can be started/stopped for live classification, but no files are written to disk.
+- `--dry-run`: Skip sensor and touchpad hardware setup entirely. Shows the plot layout for 5 seconds and exits. Perfect for verifying the visualization layout works before connecting hardware.
+- `--validation-mode`: Connect to the real sensor but do NOT save any files. Prints packet health stats (packet rate, bad packet ratio) for 60 seconds. Run this at the start of every lab session to verify the sensor link is healthy.
+- `--output-dir`: Base directory for recorded session data. Defaults to `data/lab_YYYY-MM-DD/` using today's date, so each lab day gets its own folder automatically.
+- `--run-id`: Optional prefix for session filenames (e.g., `run_001`). Useful when recording multiple runs in the same lab session.
+
+**Mode selection rules:**
+| Mode Flag | Sensor Connects? | Files Saved? | Use Case |
+|-----------|-----------------|-------------|----------|
+| (none) | ✓ | ✗ | Live view, test classifier, practice |
+| `--record-data` | ✓ | ✓ | Real data capture for training/analysis |
+| `--dry-run` | ✗ | ✗ | Verify plot layout, test flags |
+| `--validation-mode` | ✓ | ✗ | Check sensor health before recording |
 
 #### Session Recording Controls
 
@@ -545,6 +563,18 @@ python magnetometer_reader.py --sensor 7 --baudrate 115200 --csv test_data.csv
 
 # Default settings (plots sensor 1)
 python magnetometer_reader.py
+
+# Dry run — test the plot layout without any hardware
+python magnetometer_reader.py --input-source touchpad --dry-run
+
+# Validation mode — check sensor health, no files saved
+python magnetometer_reader.py --validation-mode
+
+# Record data with structured output (auto date-based directory)
+python magnetometer_reader.py --record-data --output-dir data/lab_2026-05-20 --run-id run_001
+
+# Record with touchpad simulator for offline practice
+python magnetometer_reader.py --input-source touchpad --record-data --output-dir data/practice_2026-05-18
 ```
 
 ### Session Recording Workflow
@@ -555,13 +585,26 @@ python magnetometer_reader.py
 4. Repeat for more samples
 5. Press **q** to quit
 
-This creates files such as:
-- `digit_5_YYYYMMDD_HHMMSS.csv`
-- `digit_images/digit_5_YYYYMMDD_HHMMSS_64px.png`
-- `digit_images/digit_5_YYYYMMDD_HHMMSS_64px.json`
-- `letter_A_YYYYMMDD_HHMMSS.csv`
-- `digit_images/letter_A_YYYYMMDD_HHMMSS_64px.png`
-- `digit_images/letter_A_YYYYMMDD_HHMMSS_64px.json`
+This creates files under `data/lab_YYYY-MM-DD/` organized by label:
+
+```
+data/lab_2026-05-20/
+├── samples/
+│   ├── digit_5/
+│   │   ├── run_001_digit_5_20260520_143022.csv
+│   │   ├── run_001_digit_5_20260520_143022_64px.png
+│   │   └── run_001_digit_5_20260520_143022_64px.json
+│   ├── letter_A/
+│   │   ├── run_001_letter_A_20260520_144155.csv
+│   │   ├── run_001_letter_A_20260520_144155_64px.png
+│   │   └── run_001_letter_A_20260520_144155_64px.json
+│   └── digit_0/
+│       ├── run_002_digit_0_20260520_150312.csv
+│       ├── run_002_digit_0_20260520_150312_64px.png
+│       └── run_002_digit_0_20260520_150312_64px.json
+```
+
+Each JSON sidecar now includes **git metadata** (branch, commit hash, dirty status) for full reproducibility.
 
 ## Data Processing Pipeline
 

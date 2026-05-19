@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# PYTHON_ARGCOMPLETE_OK
 """
 Magnetometer Data Reader for Collaborative Robotics Seminar
 Reads serial data from magnetometer sensor and processes it.
@@ -21,12 +22,13 @@ from mpl_toolkits.mplot3d import Axes3D
 import numpy as np
 import signal
 import sys
+import argcomplete
 from collections import deque
 import argparse
 from datetime import datetime
 import select
 
-from colmag.interaction import AppController, VirtualJoystick
+from colmag.interaction import AppController, InputMode, VirtualJoystick
 
 try:
     import serial
@@ -82,22 +84,38 @@ class MagnetometerReader:
         lazy_classifier=True,
         classifier_cpu_threads=1,
         enable_writing_filter=True,
-        writing_min_velocity=0.002,
+        writing_min_velocity=0.01,
         writing_max_velocity=None,
         writing_min_closeness=None,
-        joystick_dwell_seconds=2.0,
+        joystick_dwell_seconds=1.5,
         letter_labels='letters',
         digit_labels='digits',
         classifier_interval=0.75,
         classifier_mode='on-idle',
         classifier_idle_seconds=0.8,
         classifier_min_ink_samples=8,
+        input_source='serial',
+        touchpad_z=0.02,
+        touchpad_sample_rate=100.0,
+        touchpad_ink_strength=1.0,
+        touchpad_synthetic_magnetics=True,
+        touchpad_magnetic_scale=1e-6,
+        touchpad_ink_mode='pen',
+        touchpad_speed_log=None,
+        touchpad_speed_report_interval=1.0,
+        display_window=2000,
+        plot_fps=None,
+        # Modes
+        record_data=False,
+        dry_run=False,
+        validation_mode=False,
+        output_dir=None,
+        run_id=None,
     ):
         self.serial_port = None
         self.is_running = False
         self.read_thread = None
         self.data_lock = threading.Lock()
-        self.data_buffer = deque(maxlen=1000)  # Keep last 1000 readings for plotting
         self.csv_file = None
         self.csv_writer = None
         self.plot_sensor = plot_sensor  # Which sensor to plot (1-16)
@@ -128,6 +146,57 @@ class MagnetometerReader:
         self.classifier_mode = classifier_mode
         self.classifier_idle_seconds = classifier_idle_seconds
         self.classifier_min_ink_samples = classifier_min_ink_samples
+        if touchpad_sample_rate <= 0:
+            raise ValueError("touchpad_sample_rate must be positive")
+        if not 0.0 <= touchpad_ink_strength <= 1.0:
+            raise ValueError("touchpad_ink_strength must be between 0 and 1")
+        if touchpad_ink_mode not in ('pen', 'velocity'):
+            raise ValueError("touchpad_ink_mode must be 'pen' or 'velocity'")
+        self.input_source = input_source
+        self.touchpad_z = touchpad_z
+        self.touchpad_sample_rate = float(touchpad_sample_rate)
+        self.touchpad_ink_strength = float(touchpad_ink_strength)
+        self.touchpad_synthetic_magnetics = touchpad_synthetic_magnetics
+        self.touchpad_magnetic_scale = float(touchpad_magnetic_scale)
+        self.touchpad_ink_mode = touchpad_ink_mode
+        self.touchpad_speed_log = touchpad_speed_log
+        self.touchpad_speed_report_interval = float(touchpad_speed_report_interval)
+        self.touchpad_sample_interval = 1.0 / self.touchpad_sample_rate
+        self.display_window = display_window
+        self.plot_fps = plot_fps
+        self.record_data = record_data
+        self.dry_run = dry_run
+        self.validation_mode = validation_mode
+        self.output_dir = output_dir
+        self.run_id = run_id
+        buffer_length = 1000
+        if self.input_source == 'touchpad':
+            buffer_length = max(buffer_length, int(self.touchpad_sample_rate * 300))
+        self.data_buffer = deque(maxlen=buffer_length)
+        self.touchpad_state = {
+            'x': 0.0,
+            'y': 0.0,
+            'inside': True,
+            'pen_down': False,
+            'last_sample_at': 0.0,
+            'last_sample_x': 0.0,
+            'last_sample_y': 0.0,
+            'last_sample_pen_down': False,
+        }
+        self.touchpad_speed_samples = deque(maxlen=5000)
+        self.touchpad_last_speed = 0.0
+        self.touchpad_last_speed_report_at = 0.0
+        self.touchpad_speed_log_file = None
+        self.touchpad_speed_log_writer = None
+        self.live_digit_image = np.ones((self.image_size, self.image_size), dtype=float)
+        self.live_digit_processed_count = 0
+        self.live_digit_last_timestamp = None
+        self.live_ink_count = 0
+        self.live_ink_count = 0
+        self.classifier_candidates = []
+        self.action_feedback_text = ""
+        self.action_feedback_button = None
+        self.action_feedback_until = 0.0
         self.classifier_thread = None
         self.classifier_stop_event = threading.Event()
         self.classifier_input_event = threading.Event()
@@ -160,7 +229,18 @@ class MagnetometerReader:
         if enable_classifier and not lazy_classifier:
             self.load_classifier()
         elif enable_classifier:
-            self.latest_prediction_text = "Prediction: classifier ready on first use"
+            self.latest_prediction_text = self.classifier_unloaded_prediction_text()
+
+        # Fix 5: Pre-compute Gaussian brush kernel once (avoids np.ogrid + np.exp per point per frame)
+        self._brush_radius = max(0.75, self.image_size / 64.0)
+        self._brush_extent = int(np.ceil(self._brush_radius * 2.5))
+        y_ker, x_ker = np.ogrid[
+            -self._brush_extent:self._brush_extent + 1,
+            -self._brush_extent:self._brush_extent + 1
+        ]
+        self._brush_kernel = np.exp(
+            -(x_ker * x_ker + y_ker * y_ker) / (2.0 * self._brush_radius ** 2)
+        )
 
         # Session recording
         self.recording_sessions = []  # List of (session_name, start_time, end_time, data_points)
@@ -286,6 +366,7 @@ class MagnetometerReader:
         self.classifier_last_submitted_ink_count = -1
         self.classifier_last_submit_time = 0.0
         self.classification_started_at = None
+        self.reset_live_digit_image()
 
     def mark_classification_start(self, timestamp):
         """Start a fresh writing capture window for the active OCR mode."""
@@ -295,6 +376,13 @@ class MagnetometerReader:
             self.classification_started_at = None
         self.classifier_last_submitted_ink_count = -1
         self.classifier_waiting_for_pause = False
+        self.reset_live_digit_image()
+
+    def reset_live_digit_image(self):
+        """Clear the incremental live OCR canvas."""
+        self.live_digit_image = np.ones((self.image_size, self.image_size), dtype=float)
+        self.live_digit_processed_count = 0
+        self.live_digit_last_timestamp = None
 
     def classification_sample_mask(self, rows):
         """Return which rows are part of the current writing capture window."""
@@ -320,10 +408,21 @@ class MagnetometerReader:
                 self.classifier_status_text,
             )
 
+    def classifier_unloaded_prediction_text(self):
+        """Describe the classifier state before an EasyOCR reader is available."""
+        if not self.enable_classifier:
+            return "Prediction: classifier disabled"
+        if self.classifier_loading:
+            return "Prediction: classifier loading"
+        if self.classifier_load_error is not None:
+            return "Prediction: classifier failed to load"
+        return "Prediction: classifier ready on first use"
+
     def set_classifier_labels(self, labels):
         """Switch the OCR allowlist without reloading EasyOCR weights."""
         self.classifier_labels = labels
         self.classifier_requested_labels = labels
+        self.classifier_candidates = []
         self.prediction_history.clear()
         self.reset_live_classification_session()
 
@@ -338,7 +437,8 @@ class MagnetometerReader:
             print(f"Classifier labels scheduled: {''.join(display_labels_for(labels))}")
         else:
             if self.enable_classifier:
-                self.latest_prediction_text = "Prediction: classifier failed to load"
+                self.latest_prediction_text = self.classifier_unloaded_prediction_text()
+                self.latest_runner_up_text = "Runner-up: --"
                 if self.classifier_load_error:
                     print(f"Classifier labels queued for next load: {labels}")
                     print(f"Classifier load error was: {self.classifier_load_error}")
@@ -356,7 +456,81 @@ class MagnetometerReader:
         if event.classifier_labels is not None:
             self.set_classifier_labels(event.classifier_labels)
         if event.command:
-            print(f"Virtual joystick: {event.button.name} -> {event.command}")
+            if event.command.startswith('choice:'):
+                self.confirm_classifier_candidate(event.command, event.button.name)
+            elif event.command == 'canvas:reset':
+                self.reset_writing_canvas()
+            else:
+                print(f"Virtual joystick: {event.button.name} -> {event.command}")
+
+    def confirm_classifier_candidate(self, command, button_name):
+        """Confirm one of the currently displayed classifier candidates."""
+        try:
+            candidate_index = int(command.split(':', 1)[1])
+        except (IndexError, ValueError):
+            print(f"Virtual joystick: {button_name} -> invalid candidate command")
+            return
+
+        if candidate_index >= len(self.classifier_candidates):
+            print(f"Virtual joystick: {button_name} -> no classifier candidate yet")
+            return
+
+        label, confidence = self.classifier_candidates[candidate_index]
+        confirmed_command = f"confirm:{label}"
+        self.app_controller.last_command = confirmed_command
+        self.action_feedback_text = f"Completed: {label} ({confidence * 100:.1f}%)"
+        self.action_feedback_button = button_name
+        self.action_feedback_until = time.monotonic() + 2.0
+        print(
+            f"Virtual joystick: {button_name} -> {confirmed_command} "
+            f"({confidence * 100:.1f}%)"
+        )
+
+    def reset_writing_canvas(self):
+        """Clear the current live writing canvas without leaving the OCR mode."""
+        self.classification_started_at = datetime.now()
+        self.classifier_candidates = []
+        self.prediction_history.clear()
+        self.classifier_last_writing_time = 0.0
+        self.classifier_waiting_for_pause = False
+        self.classifier_last_submitted_ink_count = -1
+        self.reset_live_digit_image()
+        self.action_feedback_text = ""
+        self.action_feedback_button = None
+        self.action_feedback_until = 0.0
+
+        with self.classifier_state_lock:
+            self.classifier_latest_result = None
+            self.classifier_latest_error = None
+            if self.classifier is not None:
+                self.classifier_status_text = "OCR idle"
+
+        if self.enable_classifier and self.app_controller.mode.value in ('letters', 'digits'):
+            self.latest_prediction_text = "Prediction: waiting for writing"
+        else:
+            self.latest_prediction_text = self.classifier_unloaded_prediction_text()
+        self.latest_runner_up_text = "Runner-up: --"
+        print("Writing canvas reset")
+
+    def activate_classifier_mode(self, mode_name):
+        """Switch classifier modes without requiring a dwell gesture."""
+        if mode_name == 'letters':
+            self.app_controller.mode = InputMode.LETTERS
+            self.app_controller.classifier_labels = self.app_controller.letter_labels
+            self.app_controller.last_command = 'letter_detection'
+            self.set_classifier_labels(self.app_controller.letter_labels)
+        elif mode_name == 'digits':
+            self.app_controller.mode = InputMode.DIGITS
+            self.app_controller.classifier_labels = self.app_controller.digit_labels
+            self.app_controller.last_command = 'number_detection'
+            self.set_classifier_labels(self.app_controller.digit_labels)
+        else:
+            return
+
+        rows = self.get_data_copy()
+        if rows:
+            self.mark_classification_start(rows[-1][0])
+        print(f"Touchpad mode: {mode_name} classification active")
 
     def list_ports(self):
         """List all available serial ports."""
@@ -658,10 +832,8 @@ class MagnetometerReader:
         self.prediction_history.clear()
         if self.classifier is not None:
             self.latest_prediction_text = "Prediction: --"
-        elif self.enable_classifier:
-            self.latest_prediction_text = "Prediction: classifier failed to load"
         else:
-            self.latest_prediction_text = "Prediction: classifier disabled"
+            self.latest_prediction_text = self.classifier_unloaded_prediction_text()
         self.latest_runner_up_text = "Runner-up: --"
         print(f"\n🎬 STARTED RECORDING SESSION: '{session_name}'")
         print(f"Recording to main CSV file: {self.csv_file.name if self.csv_file else 'None'}")
@@ -686,22 +858,33 @@ class MagnetometerReader:
         print(f"Recorded {data_points} data points")
         print(f"Duration: {start_time} to {end_time}")
 
-        # Save session data to separate CSV file
-        self.save_session_csv(session_name)
-        image_result = self.save_session_image(session_name)
-        if image_result:
-            _, character_image = image_result
-            self.print_final_prediction(character_image)
+        if self.record_data:
+            # Save session data using shared basename for CSV/PNG/JSON triplet
+            basename = self.save_session_csv(session_name)
+            image_result = self.save_session_image(session_name, basename=basename)
+            if image_result:
+                _, character_image = image_result
+                self.print_final_prediction(character_image)
+        else:
+            print("(Skipping file save — use --record-data to enable CSV/PNG/JSON output)")
 
         self.current_session = None
         self.session_data = []
 
     def save_session_csv(self, session_name):
-        """Save session data to a separate CSV file."""
+        """Save session data to a structured CSV file under output_dir/samples/<label>/."""
         if not self.session_data:
             return
 
-        filename = f"{session_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        # Determine label from session_name (e.g. "digit_5" -> "digit_5", "letter_A" -> "letter_A")
+        label = session_name.rsplit('_', 1)[0] if '_' in session_name else session_name
+        label_dir = os.path.join(self.output_dir, 'samples', label)
+        os.makedirs(label_dir, exist_ok=True)
+
+        run_prefix = f"{self.run_id}_" if self.run_id else ""
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        basename = f"{run_prefix}{session_name}_{timestamp}"
+        filename = os.path.join(label_dir, f"{basename}.csv")
         try:
             with open(filename, 'w', newline='') as f:
                 writer = csv.writer(f)
@@ -718,9 +901,11 @@ class MagnetometerReader:
                     writer.writerow(row)
 
             print(f"Session data saved to: {filename}")
+            return basename  # Return for sharing with image/metadata
 
         except IOError as e:
             print(f"Error saving session CSV: {e}")
+            return None
 
     def extract_pose_trail(self, rows, trail_length=None, include_timestamps=False):
         """Return pose X/Y/Z arrays from buffered CSV-style rows."""
@@ -810,14 +995,8 @@ class MagnetometerReader:
 
         return finite & moving & close, speed, closeness
 
-    def pose_to_digit_image(self, pose_x, pose_y, pose_z, sample_mask=None):
-        """
-        Project a 3D pose trail to a grayscale image.
-
-        X/Y select the pixel location. Z controls stroke darkness: points closer
-        to the sensor grid are darker, while untouched pixels remain white.
-        """
-        image = np.ones((self.image_size, self.image_size), dtype=float)
+    def draw_pose_samples_on_image(self, image, pose_x, pose_y, pose_z, sample_mask=None):
+        """Draw pose samples into an existing grayscale OCR image."""
         if len(pose_x) == 0:
             return image
 
@@ -854,24 +1033,131 @@ class MagnetometerReader:
 
         closeness = self.z_to_closeness(z_values)
 
-        brush_radius = max(1.25, self.image_size / 32.0)
-        brush_extent = int(np.ceil(brush_radius * 2.5))
+        # Use pre-computed brush kernel (Fix 5) — avoids np.ogrid + np.exp per point
+        be = self._brush_extent
+        kernel = self._brush_kernel
 
         for x, y, close in zip(x_pixels, y_pixels, closeness):
             stroke_strength = 0.18 + 0.82 * float(np.clip(close, 0.0, 1.0))
 
-            x0 = max(0, x - brush_extent)
-            x1 = min(self.image_size, x + brush_extent + 1)
-            y0 = max(0, y - brush_extent)
-            y1 = min(self.image_size, y + brush_extent + 1)
+            # Image slice for this brush
+            x0 = max(0, x - be)
+            x1 = min(self.image_size, x + be + 1)
+            y0 = max(0, y - be)
+            y1 = min(self.image_size, y + be + 1)
 
-            yy, xx = np.ogrid[y0:y1, x0:x1]
-            dist_sq = (xx - x) ** 2 + (yy - y) ** 2
-            brush = np.exp(-dist_sq / (2 * brush_radius ** 2))
-            patch = 1.0 - stroke_strength * brush
+            # Corresponding kernel slice (handles edge clipping)
+            kx0 = max(0, be - x)
+            kx1 = min(2 * be + 1, be + self.image_size - x)
+            ky0 = max(0, be - y)
+            ky1 = min(2 * be + 1, be + self.image_size - y)
+
+            patch = 1.0 - stroke_strength * kernel[ky0:ky1, kx0:kx1]
             image[y0:y1, x0:x1] = np.minimum(image[y0:y1, x0:x1], patch)
 
         return np.clip(image, 0.0, 1.0)
+
+    def pose_to_digit_image(self, pose_x, pose_y, pose_z, sample_mask=None):
+        """
+        Project a 3D pose trail to a grayscale image.
+
+        X/Y select the pixel location. Z controls stroke darkness: points closer
+        to the sensor grid are darker, while untouched pixels remain white.
+        """
+        image = np.ones((self.image_size, self.image_size), dtype=float)
+        return self.draw_pose_samples_on_image(image, pose_x, pose_y, pose_z, sample_mask)
+
+    def live_pose_to_digit_image(self, rows, pose_x, pose_y, pose_z, sample_mask):
+        """Update the live OCR canvas incrementally instead of redrawing history."""
+        if len(pose_x) == 0 or not rows:
+            return self.live_digit_image.copy()
+
+        start_index = 0
+        if self.live_digit_last_timestamp is not None:
+            matching_indices = [
+                index for index, row in enumerate(rows)
+                if row and row[0] == self.live_digit_last_timestamp
+            ]
+            if matching_indices:
+                start_index = max(0, matching_indices[-1] - 1)
+            else:
+                self.reset_live_digit_image()
+                start_index = 0
+
+        if len(pose_x) < self.live_digit_processed_count:
+            self.reset_live_digit_image()
+
+        if start_index < len(pose_x):
+            self.live_digit_image = self.draw_pose_samples_on_image(
+                self.live_digit_image,
+                pose_x[start_index:],
+                pose_y[start_index:],
+                pose_z[start_index:],
+                sample_mask[start_index:],
+            )
+            self.live_digit_processed_count = len(pose_x)
+            self.live_digit_last_timestamp = rows[-1][0]
+
+        return self.live_digit_image.copy()
+
+    def update_live_digit_image_from_rows(self, rows):
+        """Fast live OCR update that only processes rows unseen by the canvas."""
+        pose_rows = self.display_pose_rows(rows)
+        if not pose_rows:
+            return self.live_digit_image.copy(), self.live_ink_count, False, None
+
+        start_index = 0
+        skip_count = 0
+        if self.live_digit_last_timestamp is not None:
+            matching_indices = [
+                index for index, row in enumerate(pose_rows)
+                if row and row[0] == self.live_digit_last_timestamp
+            ]
+            if matching_indices:
+                last_index = matching_indices[-1]
+                start_index = max(0, last_index - 1)
+                skip_count = last_index - start_index + 1
+            else:
+                self.reset_live_digit_image()
+
+        new_rows = pose_rows[start_index:]
+        if not new_rows:
+            return self.live_digit_image.copy(), self.live_ink_count, False, pose_rows[-1]
+
+        pose_x, pose_y, pose_z, timestamps = self.extract_pose_trail(
+            new_rows,
+            trail_length=0,
+            include_timestamps=True,
+        )
+        writing_mask, _, _ = self.writing_sample_mask(
+            pose_x,
+            pose_y,
+            pose_z,
+            timestamps,
+        )
+        if skip_count:
+            writing_mask[:skip_count] = False
+
+        pen_mask = self.touchpad_pen_mask(new_rows)
+        if pen_mask is not None:
+            writing_mask &= pen_mask
+        writing_mask &= ~self.joystick_button_mask(pose_x, pose_y)
+        writing_mask &= self.classification_sample_mask(new_rows)
+
+        new_ink_count = int(np.count_nonzero(writing_mask))
+        if new_ink_count:
+            self.live_digit_image = self.draw_pose_samples_on_image(
+                self.live_digit_image,
+                pose_x,
+                pose_y,
+                pose_z,
+                writing_mask,
+            )
+            self.live_ink_count += new_ink_count
+
+        self.live_digit_last_timestamp = pose_rows[-1][0]
+        self.live_digit_processed_count = len(pose_rows)
+        return self.live_digit_image.copy(), self.live_ink_count, bool(len(writing_mask) and writing_mask[-1]), pose_rows[-1]
 
     @staticmethod
     def normalize_values(values):
@@ -885,6 +1171,9 @@ class MagnetometerReader:
     def z_to_closeness(self, z_values):
         """Map Z values to 0..1 closeness, where 1 creates the darkest stroke."""
         z_values = np.asarray(z_values, dtype=float)
+
+        if self.input_source == 'touchpad' and self.z_near is None and self.z_far is None:
+            return np.full_like(z_values, np.clip(self.touchpad_ink_strength, 0.0, 1.0))
 
         if self.z_near is not None and self.z_far is not None:
             denominator = self.z_near - self.z_far
@@ -905,25 +1194,61 @@ class MagnetometerReader:
             include_timestamps=True,
         )
         writing_mask, _, _ = self.writing_sample_mask(pose_x, pose_y, pose_z, timestamps)
+        pen_mask = self.touchpad_pen_mask(rows[-len(writing_mask):] if len(writing_mask) else [])
+        if pen_mask is not None:
+            writing_mask &= pen_mask
+        writing_mask &= ~self.joystick_button_mask(pose_x, pose_y)
         return self.pose_to_digit_image(pose_x, pose_y, pose_z, sample_mask=writing_mask)
 
-    def save_session_image(self, session_name):
-        """Save the recorded pose trail as a classifier-ready grayscale PNG."""
+    def save_session_image(self, session_name, basename=None):
+        """Save the recorded pose trail as a classifier-ready grayscale PNG under output_dir/samples/<label>/."""
         if not self.session_data:
             return
 
+        label = session_name.rsplit('_', 1)[0] if '_' in session_name else session_name
+        label_dir = os.path.join(self.output_dir, 'samples', label)
+        os.makedirs(label_dir, exist_ok=True)
+
+        if basename is None:
+            run_prefix = f"{self.run_id}_" if self.run_id else ""
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            basename = f"{run_prefix}{session_name}_{timestamp}"
+
         image = self.rows_to_digit_image(self.session_data)
-        output_dir = self.image_output_dir
-        os.makedirs(output_dir, exist_ok=True)
-        filename = f"{session_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{self.image_size}px.png"
-        output_path = os.path.join(output_dir, filename)
+        filename = f"{basename}_{self.image_size}px.png"
+        output_path = os.path.join(label_dir, filename)
         plt.imsave(output_path, image, cmap='gray', vmin=0.0, vmax=1.0)
         print(f"Projected character image saved to: {output_path}")
-        self.save_session_metadata(session_name, output_path)
+        self.save_session_metadata(session_name, output_path, basename=basename)
         return output_path, image
 
-    def save_session_metadata(self, session_name, image_path):
-        """Save a sidecar file describing how the session image was generated."""
+    def save_session_metadata(self, session_name, image_path, basename=None):
+        """Save a sidecar JSON file with session settings and git metadata."""
+        # Collect git metadata (best-effort, silently handle errors)
+        git_info = {}
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['git', 'log', '-1', '--format=%H', '--no-show-signature'],
+                capture_output=True, text=True, timeout=3,
+            )
+            if result.returncode == 0:
+                git_info['commit'] = result.stdout.strip()
+            result = subprocess.run(
+                ['git', 'branch', '--show-current'],
+                capture_output=True, text=True, timeout=3,
+            )
+            if result.returncode == 0:
+                git_info['branch'] = result.stdout.strip()
+            result = subprocess.run(
+                ['git', 'status', '--porcelain'],
+                capture_output=True, text=True, timeout=3,
+            )
+            if result.returncode == 0:
+                git_info['dirty'] = len(result.stdout.strip()) > 0
+        except Exception:
+            git_info['error'] = 'git metadata unavailable'
+
         metadata = {
             'session_name': session_name,
             'created_at': datetime.now().isoformat(),
@@ -936,12 +1261,14 @@ class MagnetometerReader:
             'z_near': self.z_near,
             'z_far': self.z_far,
             'classifier_labels': ''.join(display_labels_for(self.classifier_labels)),
+            'input_source': self.input_source,
             'writing_filter': {
                 'enabled': self.enable_writing_filter,
                 'min_velocity': self.writing_min_velocity,
                 'max_velocity': self.writing_max_velocity,
                 'min_closeness': self.writing_min_closeness,
             },
+            'git': git_info,
         }
         metadata_path = os.path.splitext(image_path)[0] + '.json'
         try:
@@ -980,16 +1307,273 @@ class MagnetometerReader:
             f"runner-up {runner_text}"
         )
 
-    def get_data_copy(self):
-        """Get a copy of the data buffer for plotting (thread-safe)."""
+    def get_data_copy(self, tail=None):
+        """Get a thread-safe copy of the data buffer, optionally limited to the last N rows.
+
+        Parameters
+        ----------
+        tail : int or None
+            If set, only copy the last *tail* rows (avoids copying 30K rows every frame).
+            Pass ``self.display_window`` from the update loop for a 20s rolling window.
+        """
         with self.data_lock:
-            return list(self.data_buffer)
+            buf = self.data_buffer
+            if tail is not None and len(buf) > tail:
+                from itertools import islice
+                start = len(buf) - tail
+                return list(islice(buf, start, len(buf)))
+            return list(buf)
+
+    def setup_touchpad_events(self, fig, ax):
+        """Wire Matplotlib pointer events into the synthetic touchpad state."""
+        if self.input_source != 'touchpad':
+            return
+
+        def update_position(event, pen_down=None):
+            if event.inaxes is not ax or event.xdata is None or event.ydata is None:
+                self.touchpad_state['inside'] = False
+                if pen_down is not None:
+                    self.touchpad_state['pen_down'] = pen_down
+                return
+
+            x = float(np.clip(event.xdata, -self.projection_extent, self.projection_extent))
+            y = float(np.clip(event.ydata, -self.projection_extent, self.projection_extent))
+            self.touchpad_state['x'] = x
+            self.touchpad_state['y'] = y
+            self.touchpad_state['inside'] = True
+            if pen_down is not None:
+                self.touchpad_state['pen_down'] = pen_down
+
+        def on_press(event):
+            update_position(event, pen_down=True)
+
+        def on_release(event):
+            update_position(event, pen_down=False)
+
+        def on_motion(event):
+            update_position(event)
+
+        def on_axes_leave(event):
+            self.touchpad_state['inside'] = False
+            self.touchpad_state['pen_down'] = False
+
+        def on_key_press(event):
+            key = (event.key or '').lower()
+            if key == 'l':
+                self.activate_classifier_mode('letters')
+            elif key == 'r':
+                self.activate_classifier_mode('digits')
+            elif key in (' ', 'space'):
+                self.touchpad_state['pen_down'] = True
+            elif key == 'p':
+                self.touchpad_state['pen_down'] = not self.touchpad_state['pen_down']
+
+        def on_key_release(event):
+            key = (event.key or '').lower()
+            if key in (' ', 'space'):
+                self.touchpad_state['pen_down'] = False
+
+        fig.canvas.mpl_connect('button_press_event', on_press)
+        fig.canvas.mpl_connect('button_release_event', on_release)
+        fig.canvas.mpl_connect('motion_notify_event', on_motion)
+        fig.canvas.mpl_connect('axes_leave_event', on_axes_leave)
+        fig.canvas.mpl_connect('key_press_event', on_key_press)
+        fig.canvas.mpl_connect('key_release_event', on_key_release)
+
+    def append_touchpad_sample(self, force=False):
+        """Append synthetic rows from the current touchpad state."""
+        if self.input_source != 'touchpad':
+            return
+
+        now = time.monotonic()
+        last_sample_at = self.touchpad_state['last_sample_at']
+        if not force and now - last_sample_at < self.touchpad_sample_interval:
+            return
+
+        current_x = self.touchpad_state['x']
+        current_y = self.touchpad_state['y']
+        current_pen_down = bool(self.touchpad_state['pen_down'])
+
+        if force or last_sample_at <= 0.0:
+            sample_specs = [(now, current_x, current_y, current_pen_down)]
+        else:
+            elapsed = max(0.0, now - last_sample_at)
+            last_x = self.touchpad_state['last_sample_x']
+            last_y = self.touchpad_state['last_sample_y']
+            last_pen_down = bool(self.touchpad_state['last_sample_pen_down'])
+            movement_distance = ((current_x - last_x) ** 2 + (current_y - last_y) ** 2) ** 0.5
+            pixel_spacing = 2.0 * self.projection_extent / max(1, self.image_size - 1)
+            stroke_spacing = max(pixel_spacing * 0.75, 1e-6)
+            time_sample_count = max(1, int(round(elapsed / self.touchpad_sample_interval)))
+            distance_sample_count = max(1, int(np.ceil(movement_distance / stroke_spacing)))
+            sample_count = min(max(time_sample_count, distance_sample_count), 32)
+            sample_specs = []
+            for index in range(1, sample_count + 1):
+                fraction = index / sample_count
+                sample_time = last_sample_at + elapsed * fraction
+                sample_x = last_x + (current_x - last_x) * fraction
+                sample_y = last_y + (current_y - last_y) * fraction
+                sample_pen_down = current_pen_down or (last_pen_down and fraction < 1.0)
+                sample_specs.append((sample_time, sample_x, sample_y, sample_pen_down))
+
+        rows = []
+        speed_rows = []
+        previous_time = last_sample_at
+        previous_x = self.touchpad_state['last_sample_x']
+        previous_y = self.touchpad_state['last_sample_y']
+        for sample_time, sample_x, sample_y, sample_pen_down in sample_specs:
+            if previous_time > 0.0 and sample_time > previous_time:
+                distance = ((sample_x - previous_x) ** 2 + (sample_y - previous_y) ** 2) ** 0.5
+                sample_speed = distance / (sample_time - previous_time)
+            else:
+                sample_speed = 0.0
+            self.touchpad_last_speed = sample_speed
+            self.touchpad_speed_samples.append(sample_speed)
+
+            mag_values = (
+                self.synthetic_magnetic_values(sample_x, sample_y, self.touchpad_z)
+                if self.touchpad_synthetic_magnetics
+                else [0.0] * 48
+            )
+            wall_timestamp = datetime.fromtimestamp(
+                time.time() - max(0.0, now - sample_time)
+            ).isoformat()
+            rows.append([
+                wall_timestamp,
+                *mag_values,
+                sample_x,
+                sample_y,
+                self.touchpad_z,
+                1.0 if sample_pen_down else 0.0,
+                0.0,
+                0.0,
+            ])
+            speed_rows.append([
+                wall_timestamp,
+                sample_x,
+                sample_y,
+                self.touchpad_z,
+                sample_speed,
+                1.0 if sample_pen_down else 0.0,
+            ])
+            previous_time = sample_time
+            previous_x = sample_x
+            previous_y = sample_y
+
+        with self.data_lock:
+            for row_data in rows:
+                self.data_buffer.append(row_data)
+                if self.current_session:
+                    self.session_data.append(row_data)
+
+        if self.csv_writer:
+            for row_data in rows:
+                self.csv_writer.writerow(row_data)
+        if self.touchpad_speed_log_writer:
+            for speed_row in speed_rows:
+                self.touchpad_speed_log_writer.writerow(speed_row)
+            self.touchpad_speed_log_file.flush()
+
+        self.packet_count += len(rows)
+        self.touchpad_state['last_sample_at'] = now
+        self.touchpad_state['last_sample_x'] = current_x
+        self.touchpad_state['last_sample_y'] = current_y
+        self.touchpad_state['last_sample_pen_down'] = current_pen_down
+
+    def synthetic_magnetic_values(self, pose_x, pose_y, pose_z):
+        """Generate a simple 4x4 dipole-like magnetic field for touchpad rows."""
+        sensor_axis = np.linspace(
+            -self.projection_extent,
+            self.projection_extent,
+            4,
+            dtype=float,
+        )
+        values = []
+        magnet_z = max(abs(float(pose_z)), 1e-3)
+        moment_z = 1.0
+
+        for sensor_y in sensor_axis:
+            for sensor_x in sensor_axis:
+                rx = float(sensor_x) - float(pose_x)
+                ry = float(sensor_y) - float(pose_y)
+                rz = -magnet_z
+                r_sq = rx * rx + ry * ry + rz * rz + 1e-9
+                r = r_sq ** 0.5
+                r3 = r_sq * r
+                r5 = r3 * r_sq
+                dot = moment_z * rz
+                bx = 3.0 * rx * dot / r5
+                by = 3.0 * ry * dot / r5
+                bz = 3.0 * rz * dot / r5 - moment_z / r3
+                values.extend([
+                    bx * self.touchpad_magnetic_scale,
+                    by * self.touchpad_magnetic_scale,
+                    bz * self.touchpad_magnetic_scale,
+                ])
+
+        return values
+
+    def touchpad_pen_mask(self, rows):
+        """Return the pen-down gate encoded in Pose_mx for synthetic rows."""
+        if self.input_source != 'touchpad' or self.touchpad_ink_mode != 'pen':
+            return None
+        return np.array([float(row[-3]) > 0.5 for row in rows], dtype=bool)
+
+    def joystick_button_mask(self, pose_x, pose_y):
+        """Return samples that are inside virtual buttons and should not become ink."""
+        if len(pose_x) == 0:
+            return np.array([], dtype=bool)
+        return np.array(
+            [
+                self.joystick.button_at(x, y) is not None
+                if np.isfinite(x) and np.isfinite(y)
+                else False
+                for x, y in zip(pose_x, pose_y)
+            ],
+            dtype=bool,
+        )
+
+    def live_pose_rows(self, rows):
+        """Return the row window used by live pose, joystick, and OCR views."""
+        if self.trail_length and len(rows) > self.trail_length:
+            return rows[-self.trail_length:]
+        return rows
+
+    def classifier_canvas_active(self):
+        """Return whether the live OCR canvas should use reset-driven history."""
+        return (
+            self.app_controller.mode.value in ('letters', 'digits')
+            and self.classification_started_at is not None
+        )
+
+    def display_pose_rows(self, rows):
+        """Return rows for the live display/OCR canvas."""
+        if not self.classifier_canvas_active():
+            return self.live_pose_rows(rows)
+
+        selected = []
+        for row in rows:
+            try:
+                timestamp = datetime.fromisoformat(str(row[0]))
+            except (TypeError, ValueError):
+                selected.append(row)
+            else:
+                if timestamp >= self.classification_started_at:
+                    selected.append(row)
+        return selected
 
     def setup_joystick_artists(self, ax):
         """Draw the virtual joystick layer on the projection axis."""
         ax.set_xlim(-self.projection_extent, self.projection_extent)
         ax.set_ylim(-self.projection_extent, self.projection_extent)
-        ax.set_aspect('equal', adjustable='box')
+        if self.input_source == 'touchpad':
+            ax.set_aspect('auto')
+            try:
+                ax.set_box_aspect(0.62)
+            except Exception:
+                pass
+        else:
+            ax.set_aspect('equal', adjustable='box')
         ax.set_xlabel('')
         ax.set_ylabel('')
 
@@ -1005,17 +1589,20 @@ class MagnetometerReader:
                 zorder=4,
             )
             ax.add_patch(circle)
-            ax.text(
+            label = ax.text(
                 button.x,
                 button.y,
                 button.name,
                 ha='center',
                 va='center',
-                fontsize=11,
+                fontsize=10 if button.action.startswith('choice:') else 11,
                 weight='bold',
                 zorder=5,
             )
-            button_artists[button.name] = circle
+            button_artists[button.name] = {
+                'circle': circle,
+                'label': label,
+            }
 
         cursor_artist = ax.scatter(
             [],
@@ -1034,43 +1621,98 @@ class MagnetometerReader:
             va='top',
             ha='left',
             fontsize=8,
+            # Fix 9: white bbox clears old text during blit
+            bbox={'facecolor': 'white', 'edgecolor': 'none', 'pad': 0},
         )
-        return button_artists, cursor_artist, interface_text
+        completion_text = ax.text(
+            0.5,
+            0.96,
+            "",
+            transform=ax.transAxes,
+            va='top',
+            ha='center',
+            fontsize=13,
+            weight='bold',
+            color='#1b7f3a',
+            bbox={
+                'boxstyle': 'round,pad=0.35',
+                'facecolor': '#e8f7ee',
+                'edgecolor': '#1b7f3a',
+                'alpha': 0.94,
+            },
+            zorder=8,
+        )
+        return button_artists, cursor_artist, interface_text, completion_text
 
     def update_joystick_artists(self, button_artists):
         active_button = self.app_controller.active_button
         last_button = self.app_controller.last_event.button.name if self.app_controller.last_event else None
 
+        # Fix 7: Cache last-rendered label text to avoid expensive set_text() calls
+        if not hasattr(self, '_cached_button_texts'):
+            self._cached_button_texts = {}
+
         for button in self.joystick.buttons:
-            artist = button_artists[button.name]
+            artist_group = button_artists[button.name]
+            artist = artist_group['circle']
+            label_artist = artist_group['label']
             facecolor = '#f5f5f5'
+            label_text = button.name
             if button.action == 'mode:letters' and self.app_controller.mode.value == 'letters':
                 facecolor = '#d8ecff'
             elif button.action == 'mode:digits' and self.app_controller.mode.value == 'digits':
                 facecolor = '#d8ecff'
+            elif button.action.startswith('choice:'):
+                try:
+                    candidate_index = int(button.action.split(':', 1)[1])
+                except (IndexError, ValueError):
+                    candidate_index = -1
+                if 0 <= candidate_index < len(self.classifier_candidates):
+                    candidate_label, candidate_confidence = self.classifier_candidates[candidate_index]
+                    label_text = f"{button.name}\n{candidate_label}"
+                    facecolor = '#fff3bf' if candidate_confidence > 0.0 else '#f5f5f5'
+            elif button.action.startswith('canvas:'):
+                facecolor = '#fde2e2' if button.name == last_button else '#ffe8e8'
             elif button.action.startswith('robot:') and button.name == last_button:
                 facecolor = '#d8f3dc'
 
             if button.name == active_button:
                 facecolor = '#ffd166'
 
+            if (
+                self.action_feedback_button == button.name
+                and time.monotonic() < self.action_feedback_until
+            ):
+                facecolor = '#95d5a6'
+
             artist.set_facecolor(facecolor)
+            # Only call set_text() when text actually changes (avoids text re-layout each frame)
+            prev_text = self._cached_button_texts.get(button.name)
+            if label_text != prev_text:
+                label_artist.set_text(label_text)
+                self._cached_button_texts[button.name] = label_text
 
     def plot_data(self):
         """Create real-time plot of Bx, By, Bz for the selected sensor."""
-        fig = plt.figure(figsize=(14, 8))
+        fig = plt.figure(figsize=(18, 10))
         fig.suptitle(
             f'Real-time Magnetometer Data - Sensor {self.plot_sensor} | '
             f'Projection: {self.image_size}x{self.image_size}, last {self.trail_length} samples',
             fontsize=14
         )
 
-        ax1 = fig.add_subplot(2, 3, 1)
-        ax2 = fig.add_subplot(2, 3, 2)
-        ax3 = fig.add_subplot(2, 3, 3)
-        ax4 = fig.add_subplot(2, 3, 4, projection='3d')
-        ax5 = fig.add_subplot(2, 3, 5)
-        ax6 = fig.add_subplot(2, 3, 6)
+        grid = fig.add_gridspec(
+            2,
+            4,
+            width_ratios=[0.9, 1.8, 1.8, 1.0],
+            height_ratios=[0.85, 1.7],
+        )
+        ax1 = fig.add_subplot(grid[0, 0])
+        ax2 = fig.add_subplot(grid[0, 1])
+        ax3 = fig.add_subplot(grid[0, 2])
+        ax4 = fig.add_subplot(grid[1, 0], projection='3d')
+        ax5 = fig.add_subplot(grid[1, 1:3])
+        ax6 = fig.add_subplot(grid[:, 3])
 
         # Bx plot
         ax1.set_title(f'Sensor {self.plot_sensor} - Bx')
@@ -1134,7 +1776,12 @@ class MagnetometerReader:
         ax5.set_title('Virtual Joystick + Writing Surface')
         ax5.set_xticks([])
         ax5.set_yticks([])
-        button_artists, cursor_artist, interface_text = self.setup_joystick_artists(ax5)
+        button_artists, cursor_artist, interface_text, completion_text = self.setup_joystick_artists(ax5)
+        # Collect button artists for blit. Circles must be redrawn for hover/feedback,
+        # and labels must be redrawn too so filled patches do not cover cached text.
+        button_circles = [artist_group['circle'] for artist_group in button_artists.values()]
+        button_labels = [artist_group['label'] for artist_group in button_artists.values()]
+        self.setup_touchpad_events(fig, ax5)
 
         z_range = (
             f"calibrated {self.z_near:.4f}->{self.z_far:.4f}"
@@ -1144,24 +1791,36 @@ class MagnetometerReader:
         classifier_labels = display_labels_for(self.classifier_labels)
         display_count = min(12, len(classifier_labels))
         display_indices = list(range(display_count))
-        y_positions = np.arange(display_count)
+        classifier_header_rows = 2.8
+        y_positions = np.arange(display_count) + classifier_header_rows
+        current_classifier_axis_labels = [classifier_labels[index] for index in display_indices]
         ax6.set_title('EasyOCR Character Classifier')
         ax6.set_xlim(0.0, 1.0)
-        ax6.set_ylim(-0.5, display_count - 0.5)
+        ax6.set_ylim(-0.5, display_count + classifier_header_rows - 0.5)
         ax6.set_yticks(y_positions)
-        ax6.set_yticklabels([classifier_labels[index] for index in display_indices])
+        ax6.set_yticklabels(current_classifier_axis_labels, fontsize=8)
+        ax6.tick_params(axis='y', which='both', left=False, labelleft=True, pad=2)
         ax6.invert_yaxis()
         ax6.set_xlabel('Confidence')
         prob_bars = ax6.barh(y_positions, np.zeros(display_count), color='#7c9cc8')
+        prob_bar_artists = list(prob_bars)
         info_text = ax6.text(
-            0.0,
-            1.28,
+            0.98,
+            0.98,
             "Prediction: --\n"
             "Runner-up: --\n"
-            f"Z: -- ({z_range})",
+            "Z: --",
             transform=ax6.transAxes,
             va='top',
-            fontsize=9,
+            ha='right',
+            fontsize=8,
+            bbox={
+                'boxstyle': 'round,pad=0.25',
+                'facecolor': 'white',
+                'edgecolor': 'none',
+                'alpha': 0.88,
+            },
+            zorder=8,
         )
         ax6.text(
             0.0,
@@ -1170,25 +1829,57 @@ class MagnetometerReader:
             transform=ax6.transAxes,
             va='top',
             fontsize=8,
+            # Fix 9: white bbox clears old text during blit
+            bbox={'facecolor': 'white', 'edgecolor': 'none', 'pad': 0},
         )
-        if self.classifier is None and self.enable_classifier and self.classifier_loading:
-            self.latest_prediction_text = "Prediction: classifier loading"
-        elif self.classifier is None:
-            if self.enable_classifier:
-                if self.classifier_load_error:
-                    self.latest_prediction_text = "Prediction: classifier failed to load"
-                else:
-                    self.latest_prediction_text = "Prediction: classifier ready on first use"
-            else:
-                self.latest_prediction_text = "Prediction: classifier disabled"
+        if self.classifier is None:
+            self.latest_prediction_text = self.classifier_unloaded_prediction_text()
             info_text.set_text(
                 f"{self.latest_prediction_text}\n"
                 f"{self.latest_runner_up_text}\n"
-                f"Z: -- ({z_range})"
+                "Z: --"
             )
 
         # tight_layout once at init, not per-frame
         plt.tight_layout()
+
+        sensor_trace_artists = () if self.input_source == 'touchpad' else (
+            line_bx,
+            line_by,
+            line_bz,
+        )
+        raw_blit_artists = (
+            *sensor_trace_artists,
+            image_artist,
+            *button_circles,
+            *button_labels,
+            cursor_artist,
+            interface_text,
+            completion_text,
+            *prob_bar_artists,
+            info_text,
+        )
+        blit_artists = tuple(
+            artist for artist in raw_blit_artists
+            if getattr(artist, 'axes', None) is not None
+        )
+        for artist in blit_artists:
+            artist.set_animated(True)
+
+        def update_classifier_axis_labels(labels, indices):
+            nonlocal current_classifier_axis_labels
+
+            axis_labels = [labels[index] for index in indices]
+            axis_labels.extend([''] * (display_count - len(axis_labels)))
+            if axis_labels != current_classifier_axis_labels:
+                ax6.set_yticks(y_positions)
+                ax6.set_yticklabels(axis_labels, fontsize=8)
+                fig.canvas.draw()
+                try:
+                    ani._blit_cache.clear()
+                except (NameError, AttributeError):
+                    pass
+                current_classifier_axis_labels = axis_labels
 
         def init_plot():
             line_bx.set_data([], [])
@@ -1202,58 +1893,87 @@ class MagnetometerReader:
             trajectory_line.set_data([], [])
             trajectory_line.set_3d_properties([])
             current_pos_scatter._offsets3d = (np.array([]), np.array([]), np.array([]))
-            return (line_bx, line_by, line_bz, image_artist, cursor_artist,
-                    hover_scatter, writing_scatter, trajectory_line, current_pos_scatter,
-                    interface_text, info_text)
+            return blit_artists
+
+        # Fix 6: Cache axis limits to avoid 6× matplotlib layout recalculations per frame.
+        _cached_xlim = [0.0, 0.0, 0.0]
+        _cached_ylim = [(0.0, 0.0), (0.0, 0.0), (0.0, 0.0)]
 
         def update_plot(frame):
-            data = self.get_data_copy()
+            self.append_touchpad_sample()
+            # Fix 4: Only copy the last display_window rows instead of the full 30K buffer.
+            data = self.get_data_copy(tail=self.display_window)
             if not data:
-                return (line_bx, line_by, line_bz, image_artist, cursor_artist,
-                        hover_scatter, writing_scatter, trajectory_line, current_pos_scatter,
-                        interface_text, info_text)
+                return blit_artists
 
-            # Extract Bx, By, Bz for selected sensor
-            sensor_idx = self.plot_sensor - 1
-            bx_data = [row[1 + sensor_idx*3] for row in data]
-            by_data = [row[1 + sensor_idx*3 + 1] for row in data]
-            bz_data = [row[1 + sensor_idx*3 + 2] for row in data]
+            if self.input_source != 'touchpad':
+                # Extract Bx, By, Bz for selected sensor
+                sensor_idx = self.plot_sensor - 1
+                bx_data = [row[1 + sensor_idx*3] for row in data]
+                by_data = [row[1 + sensor_idx*3 + 1] for row in data]
+                bz_data = [row[1 + sensor_idx*3 + 2] for row in data]
 
-            # Update line plots
-            x_vals = list(range(len(bx_data)))
-            line_bx.set_data(x_vals, bx_data)
-            line_by.set_data(x_vals, by_data)
-            line_bz.set_data(x_vals, bz_data)
+                # Update line plots
+                x_vals = list(range(len(bx_data)))
+                line_bx.set_data(x_vals, bx_data)
+                line_by.set_data(x_vals, by_data)
+                line_bz.set_data(x_vals, bz_data)
 
-            # Update axis limits (legends are set once at init)
-            for ax, data_vals in [(ax1, bx_data), (ax2, by_data), (ax3, bz_data)]:
-                if data_vals:
-                    ax.set_xlim(0, len(data_vals))
-                    y_min = min(data_vals)
-                    y_max = max(data_vals)
-                    if y_min == y_max:
-                        pad = abs(y_min) * 0.1 or 1.0
-                        ax.set_ylim(y_min - pad, y_max + pad)
-                    else:
-                        ax.set_ylim(y_min * 1.1, y_max * 1.1)
+                # Fix 6: Throttle axis limits — only update when data exceeds cached bounds by >10%.
+                for ax_index, (ax, data_vals) in enumerate([(ax1, bx_data), (ax2, by_data), (ax3, bz_data)]):
+                    if data_vals:
+                        n = len(data_vals)
+                        y_min = min(data_vals)
+                        y_max = max(data_vals)
+                        prev_xmax = _cached_xlim[ax_index]
+                        prev_ymin, prev_ymax = _cached_ylim[ax_index]
+                        # Compute target limits (same formula as before)
+                        if y_min == y_max:
+                            pad = abs(y_min) * 0.1 or 1.0
+                            y_lo, y_hi = y_min - pad, y_max + pad
+                        else:
+                            y_lo, y_hi = y_min * 1.1, y_max * 1.1
+                        # Only call set_xlim/set_ylim if bounds have expanded by >10%
+                        x_changed = n > prev_xmax * 1.1 or (prev_xmax == 0.0 and n > 0)
+                        y_changed = (
+                            y_lo < prev_ymin * 0.9 or y_hi > prev_ymax * 1.1
+                            or (prev_ymin == 0.0 and prev_ymax == 0.0 and n > 0)
+                        )
+                        if x_changed:
+                            ax.set_xlim(0, n)
+                            _cached_xlim[ax_index] = float(n)
+                        if y_changed:
+                            ax.set_ylim(y_lo, y_hi)
+                            _cached_ylim[ax_index] = (y_lo, y_hi)
 
-            pose_x, pose_y, pose_z, timestamps = self.extract_pose_trail(data, include_timestamps=True)
+            pose_rows = self.display_pose_rows(data)
+            pose_x, pose_y, pose_z, timestamps = self.extract_pose_trail(
+                pose_rows,
+                trail_length=0 if self.classifier_canvas_active() else None,
+                include_timestamps=True,
+            )
             writing_mask, _, _ = self.writing_sample_mask(
                 pose_x,
                 pose_y,
                 pose_z,
                 timestamps,
             )
-            capture_mask = self.classification_sample_mask(data)
+            pen_mask = self.touchpad_pen_mask(pose_rows)
+            if pen_mask is not None:
+                writing_mask &= pen_mask
+            writing_mask &= ~self.joystick_button_mask(pose_x, pose_y)
+            capture_mask = self.classification_sample_mask(pose_rows)
             ocr_mask = writing_mask & capture_mask
             ink_count = int(np.count_nonzero(ocr_mask))
-            digit_image = self.pose_to_digit_image(
+            digit_image = self.live_pose_to_digit_image(
+                pose_rows,
                 pose_x,
                 pose_y,
                 pose_z,
-                sample_mask=ocr_mask,
+                ocr_mask,
             )
             image_artist.set_data(digit_image)
+            clear_canvas_requested = False
             if len(pose_x) > 0 and np.isfinite(pose_x[-1]) and np.isfinite(pose_y[-1]):
                 cursor_artist.set_offsets([[pose_x[-1], pose_y[-1]]])
                 interface_event = self.app_controller.update_cursor(
@@ -1262,12 +1982,25 @@ class MagnetometerReader:
                     time.monotonic(),
                 )
                 if interface_event is not None:
+                    clear_canvas_requested = (
+                        interface_event.command == 'canvas:reset'
+                        or interface_event.classifier_labels is not None
+                    )
                     self.handle_interface_event(interface_event)
-                    if interface_event.classifier_labels is not None and data:
-                        self.mark_classification_start(data[-1][0])
+                    if interface_event.classifier_labels is not None and pose_rows:
+                        self.mark_classification_start(pose_rows[-1][0])
             else:
                 cursor_artist.set_offsets(np.empty((0, 2)))
 
+            if clear_canvas_requested:
+                self.reset_live_digit_image()
+                digit_image = self.live_digit_image.copy()
+                image_artist.set_data(digit_image)
+                ocr_mask = np.zeros_like(ocr_mask, dtype=bool)
+                ink_count = 0
+
+            now = time.monotonic()
+            self.report_touchpad_speed(now)
             self.update_joystick_artists(button_artists)
             dwell_text = (
                 f"{self.app_controller.active_button} "
@@ -1275,7 +2008,8 @@ class MagnetometerReader:
                 if self.app_controller.active_button
                 else "--"
             )
-            labels_text = ''.join(display_labels_for(self.classifier_labels))
+            active_classifier_labels = display_labels_for(self.classifier_labels)
+            labels_text = ''.join(active_classifier_labels)
             if len(labels_text) > 12:
                 labels_text = labels_text[:12] + "..."
             last_text = self.app_controller.last_command or (
@@ -1287,11 +2021,30 @@ class MagnetometerReader:
                 f"Labels: {labels_text} | "
                 f"Last: {last_text}"
             )
+            if self.input_source == 'touchpad':
+                pen_text = "down" if self.touchpad_state['pen_down'] else "up"
+                if self.touchpad_ink_mode == 'pen':
+                    self.latest_interface_text += f" | Ink: pen {pen_text}"
+                else:
+                    self.latest_interface_text += (
+                        f" | Ink: velocity "
+                        f"{self.touchpad_last_speed:.3f}/{self.writing_min_velocity:.3f}"
+                    )
+            if self.classifier_candidates:
+                choices_text = ' '.join(
+                    f"{index + 1}={label}"
+                    for index, (label, _) in enumerate(self.classifier_candidates[:4])
+                )
+                self.latest_interface_text += f" | Choices: {choices_text}"
+            if now < self.action_feedback_until and self.action_feedback_text:
+                self.latest_interface_text += f" | {self.action_feedback_text}"
+                completion_text.set_text(self.action_feedback_text)
+            else:
+                completion_text.set_text("")
             interface_text.set_text(self.latest_interface_text)
 
             prediction_text = self.latest_prediction_text
             runner_up_text = self.latest_runner_up_text
-            now = time.monotonic()
             is_writing_now = bool(len(ocr_mask) > 0 and ocr_mask[-1])
             can_classify = (
                 self.enable_classifier
@@ -1303,6 +2056,8 @@ class MagnetometerReader:
                     self.submit_classifier_image(digit_image)
                 else:
                     if is_writing_now:
+                        if not self.classifier_waiting_for_pause:
+                            self.classifier_candidates = []
                         self.classifier_last_writing_time = now
                         self.classifier_waiting_for_pause = True
                     elif (
@@ -1315,15 +2070,30 @@ class MagnetometerReader:
                         self.classifier_waiting_for_pause = False
 
             result, classifier_error, classifier_status = self.get_classifier_state()
+            if result is None:
+                active_display_count = min(display_count, len(active_classifier_labels))
+                update_classifier_axis_labels(active_classifier_labels, list(range(active_display_count)))
+
             if classifier_error is not None:
+                self.classifier_candidates = []
                 prediction_text = f"Prediction failed: {classifier_error}"
                 runner_up_text = "Runner-up: --"
             elif result is not None:
                 probabilities = result['probabilities']
-                result_labels = result.get('labels', classifier_labels)
+                result_labels = tuple(result.get('labels', active_classifier_labels))
                 top_two = top_label_indices(probabilities, 2)
+                top_four = top_label_indices(probabilities, min(4, len(result_labels)))
+                if top_four and probabilities[top_four[0]] > 0.0:
+                    self.classifier_candidates = [
+                        (result_labels[index], float(probabilities[index]))
+                        for index in top_four
+                    ]
+                else:
+                    self.classifier_candidates = []
                 active_display_count = min(display_count, len(result_labels))
-                display_indices = top_label_indices(probabilities, active_display_count)
+                display_indices = list(range(active_display_count))
+
+                self.update_joystick_artists(button_artists)
 
                 if probabilities[top_two[0]] > 0.0:
                     prediction_text = (
@@ -1340,11 +2110,7 @@ class MagnetometerReader:
                 else:
                     runner_up_text = "Runner-up: --"
 
-                # Only update tick labels when they actually change (Fix 4)
-                if result_labels != classifier_labels:
-                    axis_labels = [result_labels[index] for index in display_indices]
-                    axis_labels.extend([''] * (display_count - len(axis_labels)))
-                    ax6.set_yticklabels(axis_labels)
+                update_classifier_axis_labels(result_labels, display_indices)
 
                 for bar in prob_bars:
                     bar.set_width(0.0)
@@ -1387,64 +2153,37 @@ class MagnetometerReader:
                     info_text.set_text(
                         f"{prediction_text}\n"
                         f"{runner_up_text}\n"
-                        f"Ink: {ink_count}/{len(pose_z)} | "
-                        f"Z: {finite_z[-1]:.5f} [{np.min(finite_z):.5f}, {np.max(finite_z):.5f}]"
+                        f"Ink: {ink_count}/{len(pose_z)}\n"
+                        f"Z: {finite_z[-1]:.4f} "
+                        f"[{np.min(finite_z):.4f}..{np.max(finite_z):.4f}]"
                     )
             else:
                 info_text.set_text(
                     f"{prediction_text}\n"
                     f"{runner_up_text}\n"
-                    f"Ink: {ink_count}/{len(pose_z)} | Z: -- ({z_range})"
+                    f"Ink: {ink_count}/{len(pose_z)}\n"
+                    "Z: --"
                 )
 
-            # Update persistent 3D artists in-place instead of clear+redraw (Fix 1)
-            if len(pose_x) > 1:
-                colors = np.linspace(0, 1, len(pose_x))
-                hover_mask = ~writing_mask
+            # The 3D subplot is intentionally not part of the blit set. Matplotlib's
+            # mplot3d artists are backend-fragile under blitting and were causing
+            # the 2D writing surface to vanish. The live interaction path uses the
+            # 2D projection, sensor traces, and classifier panel.
+            return blit_artists
 
-                if np.any(hover_mask):
-                    hover_scatter._offsets3d = (
-                        pose_x[hover_mask], pose_y[hover_mask], pose_z[hover_mask]
-                    )
-                    hover_scatter.set_visible(True)
-                else:
-                    hover_scatter.set_visible(False)
+        target_plot_fps = self.plot_fps
+        if target_plot_fps is None:
+            target_plot_fps = 60.0 if self.input_source == 'touchpad' else 30.0
+        animation_interval_ms = max(1, int(round(1000.0 / target_plot_fps)))
 
-                if np.any(writing_mask):
-                    writing_scatter._offsets3d = (
-                        pose_x[writing_mask], pose_y[writing_mask], pose_z[writing_mask]
-                    )
-                    writing_scatter.set_array(colors[writing_mask])
-                    writing_scatter.set_visible(True)
-                else:
-                    writing_scatter.set_visible(False)
-
-                trajectory_line.set_data(pose_x, pose_y)
-                trajectory_line.set_3d_properties(pose_z)
-
-                current_pos_scatter._offsets3d = (
-                    pose_x[-1:], pose_y[-1:], pose_z[-1:]
-                )
-                current_pos_scatter.set_visible(True)
-            else:
-                hover_scatter.set_visible(False)
-                writing_scatter.set_visible(False)
-                trajectory_line.set_data([], [])
-                trajectory_line.set_3d_properties([])
-                current_pos_scatter.set_visible(False)
-
-            # tight_layout removed from per-frame path (Fix 2)
-            # Legend calls removed from per-frame path (Fix 3)
-            return (line_bx, line_by, line_bz, image_artist, cursor_artist,
-                    hover_scatter, writing_scatter, trajectory_line, current_pos_scatter,
-                    interface_text, info_text)
-
+        # Blit only the 2D artists. The 3D axis stays static because mplot3d
+        # does not blit reliably on all Matplotlib backends.
         ani = FuncAnimation(
             fig,
             update_plot,
             init_func=init_plot,
-            interval=100,
-            blit=True,   # Only redraw changed artists (Fix 5)
+            interval=animation_interval_ms,
+            blit=True,
             cache_frame_data=False,
         )
         plt.show()
@@ -1475,32 +2214,147 @@ class MagnetometerReader:
         if self.csv_file:
             self.csv_file.close()
 
+        if self.touchpad_speed_log_file:
+            self.touchpad_speed_log_file.close()
+            self.touchpad_speed_log_file = None
+            self.touchpad_speed_log_writer = None
+
         print("Magnetometer reader stopped")
 
-    def run(self, csv_filename='magnetometer_data.csv', baudrate=921600):
-        """Main run function."""
+    def start_touchpad_speed_logging(self, filename):
+        """Write touchpad pose speed samples for threshold calibration."""
         try:
-            # List and choose port
-            port_name = self.choose_port()
-            if not port_name:
+            os.makedirs(os.path.dirname(filename) if os.path.dirname(filename) else '.', exist_ok=True)
+            self.touchpad_speed_log_file = open(filename, 'w', newline='')
+            self.touchpad_speed_log_writer = csv.writer(self.touchpad_speed_log_file)
+            self.touchpad_speed_log_writer.writerow([
+                'timestamp',
+                'pose_x',
+                'pose_y',
+                'pose_z',
+                'xy_speed',
+                'pen_down',
+            ])
+            print(f"Started touchpad speed logging to {filename}")
+            return True
+        except IOError as e:
+            print(f"Error creating touchpad speed log: {e}")
+            return False
+
+    def touchpad_speed_summary(self):
+        """Return compact speed stats for calibration."""
+        speeds = np.asarray(self.touchpad_speed_samples, dtype=float)
+        speeds = speeds[np.isfinite(speeds)]
+        if len(speeds) == 0:
+            return None
+        return {
+            'last': float(self.touchpad_last_speed),
+            'p50': float(np.percentile(speeds, 50)),
+            'p90': float(np.percentile(speeds, 90)),
+            'p99': float(np.percentile(speeds, 99)),
+            'max': float(np.max(speeds)),
+        }
+
+    def report_touchpad_speed(self, now=None):
+        """Print touchpad speed stats at a controlled cadence."""
+        if self.input_source != 'touchpad' or self.touchpad_speed_report_interval <= 0:
+            return
+        now = time.monotonic() if now is None else now
+        if now - self.touchpad_last_speed_report_at < self.touchpad_speed_report_interval:
+            return
+
+        summary = self.touchpad_speed_summary()
+        if summary is None:
+            return
+        self.touchpad_last_speed_report_at = now
+        print(
+            "Touchpad speed "
+            f"last={summary['last']:.4f}, "
+            f"p50={summary['p50']:.4f}, "
+            f"p90={summary['p90']:.4f}, "
+            f"p99={summary['p99']:.4f}, "
+            f"max={summary['max']:.4f}, "
+            f"threshold={self.writing_min_velocity:.4f}"
+        )
+
+    def run(self, csv_filename='magnetometer_data.csv', baudrate=921600):
+        """Main run function.
+
+        Mode logic:
+          dry_run        — no sensor/touchpad, just show layout, exit after 5s
+          validation_mode — connect to sensor, print health stats, no files saved
+          normal          — live view, sessions saved only when --record-data is set
+        """
+        try:
+            if self.dry_run:
+                print("\n=== DRY RUN MODE ===")
+                print("No sensor or touchpad connected. Showing plot layout for 5 seconds...")
+                self.is_running = False
+                # Start plot with empty data, then auto-exit after 5s
+                self.plot_data()
                 return
 
-            # Open serial port
-            if not self.open_port(port_name, baudrate):
+            if self.validation_mode:
+                print("\n=== VALIDATION MODE ===")
+                print("Sensor health check only — NO files will be saved.")
+                # Open port and read for a short period, check packet health
+                port_name = self.choose_port()
+                if not port_name:
+                    return
+                if not self.open_port(port_name, baudrate):
+                    return
+                if not self.start_reading():
+                    return
+                self.is_running = True
+                print("Validating sensor link for 60 seconds (Ctrl+C to skip)...")
+                # Show minimal layout for validation
+                self.plot_data()
                 return
 
-            # Start CSV logging
-            if csv_filename and not self.start_csv_logging(csv_filename):
-                return
-
-            # Start reading thread
-            if not self.start_reading():
+            # === Normal mode ===
+            if self.input_source == 'serial':
+                port_name = self.choose_port()
+                if not port_name:
+                    return
+                if not self.open_port(port_name, baudrate):
+                    return
+                if csv_filename and not self.start_csv_logging(csv_filename):
+                    return
+                if not self.start_reading():
+                    return
+            elif self.input_source == 'touchpad':
+                if csv_filename and not self.start_csv_logging(csv_filename):
+                    return
+                if self.touchpad_speed_log and not self.start_touchpad_speed_logging(self.touchpad_speed_log):
+                    return
+                self.is_running = True
+                self.append_touchpad_sample(force=True)
+                print(
+                    "Started touchpad simulator "
+                    f"({self.touchpad_sample_rate:.1f} Hz, z={self.touchpad_z}, "
+                    f"ink={self.touchpad_ink_strength})"
+                )
+            else:
+                print(f"Unknown input source: {self.input_source}")
                 return
 
             print("\n" + "="*60)
             print("MAGNETOMETER DATA ACQUISITION SYSTEM")
             print("="*60)
+            print(f"Input source: {self.input_source}")
+            if self.record_data:
+                print(f"RECORDING MODE: Session files saved to {self.output_dir}/samples/")
+            else:
+                print("Live view only. Use --record-data to enable CSV/PNG session saving.")
             print("Controls:")
+            if self.input_source == 'touchpad':
+                if self.touchpad_ink_mode == 'pen':
+                    print("  Mouse/touchpad: hover to move cursor, click-drag to draw ink")
+                    print("  Space: hold for pen-down drawing, p: toggle pen down/up")
+                else:
+                    print("  Mouse/touchpad: hover to move cursor, controlled movement draws ink")
+                print(f"  Touchpad dwell default: {self.app_controller.detector.dwell_seconds:.1f}s")
+                print("  l/r: switch to letter/digit classification")
             print("  0-9: Start recording that digit")
             print("  A-Z: Start recording that letter (lowercase s/q are reserved)")
             print("  s:   Stop current recording and save CSV + projected PNG")
@@ -1547,6 +2401,29 @@ def main():
                        help='CSV output filename (default: magnetometer_data.csv)')
     parser.add_argument('--no-csv', action='store_true',
                        help='Disable CSV logging for maximum live read rate')
+    parser.add_argument('--input-source', choices=['serial', 'touchpad'], default='serial',
+                       help='Input source: real serial magnetometer or synthetic touchpad rows (default: serial)')
+    parser.add_argument('--touchpad-z', type=float, default=0.02,
+                       help='Synthetic Pose_z value used in --input-source touchpad mode (default: 0.02)')
+    parser.add_argument('--touchpad-sample-rate', type=float, default=100.0,
+                       help='Synthetic sample rate for --input-source touchpad mode in Hz (default: 100)')
+    parser.add_argument('--touchpad-ink-strength', type=float, default=1.0,
+                       help='Synthetic stroke darkness for --input-source touchpad mode, 0..1 (default: 1.0)')
+    parser.add_argument('--touchpad-ink-mode', choices=['pen', 'velocity'], default='pen',
+                       help='Touchpad ink gate: pen uses click/space/p, velocity mimics magnet writing (default: pen)')
+    parser.add_argument('--no-touchpad-magnetics', action='store_true',
+                       help='Use zero magnetic values in touchpad mode instead of synthetic 16-sensor fields')
+    parser.add_argument('--touchpad-magnetic-scale', type=float, default=1e-6,
+                       help='Scale factor for synthetic magnetic fields in touchpad mode (default: 1e-6)')
+    parser.add_argument('--touchpad-speed-log', type=str, default=None,
+                       help='Optional CSV path for touchpad speed calibration samples')
+    parser.add_argument('--touchpad-speed-report-interval', type=float, default=1.0,
+                       help='Seconds between touchpad speed calibration printouts; use 0 to disable (default: 1.0)')
+    parser.add_argument('--display-window', type=int, default=2000,
+                       help='Recent samples to show in live plots (default: 2000 serial, 240 touchpad). '
+                            'Lower = less data to render per frame = less lag.')
+    parser.add_argument('--plot-fps', type=float, default=None,
+                       help='Target UI redraw rate. Defaults to 60 FPS for touchpad, 30 FPS for serial')
     parser.add_argument('--verbose', '-v', action='store_true',
                        help='Print every decoded packet for debugging (slows real-time reading)')
     parser.add_argument('--trail-length', type=int, default=250,
@@ -1585,17 +2462,30 @@ def main():
                        help='Label set used after holding virtual L for letter mode (default: letters)')
     parser.add_argument('--digit-labels', default='digits',
                        help='Label set used after holding virtual R for number mode (default: digits)')
-    parser.add_argument('--joystick-dwell-seconds', type=float, default=2.0,
-                       help='Seconds the cursor must dwell inside a virtual button to press it (default: 2.0)')
+    parser.add_argument('--joystick-dwell-seconds', type=float, default=1.5,
+                       help='Seconds the cursor must dwell inside a virtual button to press it (default: 1.5)')
     parser.add_argument('--no-writing-filter', action='store_true',
                        help='Draw every pose sample into the OCR image instead of filtering writing/hover samples')
-    parser.add_argument('--writing-min-velocity', type=float, default=0.002,
-                       help='Minimum XY pose velocity for a sample to count as writing (default: 0.002 pose-units/s)')
+    parser.add_argument('--writing-min-velocity', type=float, default=0.01,
+                       help='Minimum XY pose velocity for a sample to count as writing (default: 0.01 pose-units/s)')
     parser.add_argument('--writing-max-velocity', type=float, default=None,
                        help='Optional maximum XY pose velocity for writing; faster moves become repositioning (default: disabled)')
     parser.add_argument('--writing-min-closeness', type=float, default=None,
                        help='Optional normalized Z closeness gate for board/contact mode, 0..1 (default: disabled for air-writing)')
 
+    # === New mode flags ===
+    parser.add_argument('--record-data', action='store_true',
+                       help='Explicitly enable saving CSV/PNG/JSON session files (default: off, live view only)')
+    parser.add_argument('--dry-run', action='store_true',
+                       help='Skip sensor/touchpad setup entirely, just show the plot layout and exit after 5s')
+    parser.add_argument('--validation-mode', action='store_true',
+                       help='Connect to sensor and print packet health stats, but do NOT save any files')
+    parser.add_argument('--output-dir', type=str, default=None,
+                       help='Base output directory for recorded session data; defaults to data/lab_YYYY-MM-DD/')
+    parser.add_argument('--run-id', type=str, default=None,
+                       help='Optional run label prefix for the shared basename (e.g. run_001)')
+
+    argcomplete.autocomplete(parser)
     args = parser.parse_args()
 
     if args.trail_length <= 0:
@@ -1614,6 +2504,8 @@ def main():
         parser.error("--joystick-dwell-seconds must be positive")
     if args.classifier_interval <= 0:
         parser.error("--classifier-interval must be positive")
+    if args.plot_fps is not None and args.plot_fps <= 0:
+        parser.error("--plot-fps must be positive")
     if args.classifier_cpu_threads < 1:
         parser.error("--classifier-cpu-threads must be at least 1")
     if args.classifier_idle_seconds <= 0:
@@ -1624,12 +2516,94 @@ def main():
         parser.error("--writing-max-velocity must be greater than or equal to --writing-min-velocity")
     if args.writing_min_closeness is not None and not 0.0 <= args.writing_min_closeness <= 1.0:
         parser.error("--writing-min-closeness must be between 0 and 1")
+    if args.touchpad_sample_rate <= 0:
+        parser.error("--touchpad-sample-rate must be positive")
+    if not 0.0 <= args.touchpad_ink_strength <= 1.0:
+        parser.error("--touchpad-ink-strength must be between 0 and 1")
+    if args.touchpad_magnetic_scale < 0:
+        parser.error("--touchpad-magnetic-scale must be non-negative")
+    if args.touchpad_speed_report_interval < 0:
+        parser.error("--touchpad-speed-report-interval must be non-negative")
+
+    # Resolve output_dir with date-based smart default
+    if args.output_dir is None:
+        args.output_dir = f"data/lab_{datetime.now().strftime('%Y-%m-%d')}"
+    # Ensure the output directory exists early
+    os.makedirs(args.output_dir, exist_ok=True)
+    samples_dir = os.path.join(args.output_dir, 'samples')
+    os.makedirs(samples_dir, exist_ok=True)
+
+    writing_min_velocity_was_explicit = any(
+        arg == '--writing-min-velocity' or arg.startswith('--writing-min-velocity=')
+        for arg in sys.argv[1:]
+    )
+    if (
+        args.input_source == 'touchpad'
+        and args.touchpad_ink_mode == 'velocity'
+        and not writing_min_velocity_was_explicit
+    ):
+        args.writing_min_velocity = 0.08
+    display_window_was_explicit = any(
+        arg == '--display-window' or arg.startswith('--display-window=')
+        for arg in sys.argv[1:]
+    )
+    if args.input_source == 'touchpad' and not display_window_was_explicit:
+        args.display_window = 240
+    classifier_mode_was_explicit = any(
+        arg == '--classifier-mode' or arg.startswith('--classifier-mode=')
+        for arg in sys.argv[1:]
+    )
+    classifier_interval_was_explicit = any(
+        arg == '--classifier-interval' or arg.startswith('--classifier-interval=')
+        for arg in sys.argv[1:]
+    )
+    if args.input_source == 'touchpad' and not classifier_mode_was_explicit:
+        args.classifier_mode = 'continuous'
+    if (
+        args.input_source == 'touchpad'
+        and args.classifier_mode == 'continuous'
+        and not classifier_interval_was_explicit
+    ):
+        args.classifier_interval = 0.35
 
     print(f"Magnetometer Data Reader")
+    if args.dry_run:
+        print("MODE: DRY RUN — no sensor, no save, showing layout only")
+    elif args.validation_mode:
+        print("MODE: VALIDATION — sensor connected, packet health check, NO files saved")
+    elif args.record_data:
+        print(f"MODE: RECORD — explicit recording, output dir: {args.output_dir}")
+    else:
+        print("MODE: LIVE VIEW — no data saved, use --record-data to enable recording")
+    print(f"Input Source: {args.input_source}")
     print(f"Plotting Sensor: {args.sensor}")
     print(f"Baudrate: {args.baudrate}")
-    print(f"CSV Output: {'disabled' if args.no_csv else args.csv}")
+    csv_was_explicit = any(
+        arg == '--csv' or arg == '-c' or arg.startswith('--csv=')
+        for arg in sys.argv[1:]
+    )
+    csv_filename = None if args.no_csv else args.csv
+    if args.input_source == 'touchpad' and not csv_was_explicit:
+        csv_filename = None
+    # In dry-run or validation mode, force CSV off
+    if args.dry_run or args.validation_mode:
+        csv_filename = None
+    if args.record_data and csv_filename is None and args.input_source == 'serial':
+        # Auto-enable CSV in record mode for serial input
+        csv_filename = args.csv
+    print(f"CSV Output: {'disabled' if csv_filename is None else csv_filename}")
     print(f"Verbose Packet Output: {args.verbose}")
+    if args.input_source == 'touchpad':
+        print(
+            f"Touchpad Input: z={args.touchpad_z}, "
+            f"sample_rate={args.touchpad_sample_rate} Hz, "
+            f"plot_fps={args.plot_fps or 60.0}, "
+            f"display_window={args.display_window}, "
+            f"ink_strength={args.touchpad_ink_strength}, "
+            f"ink_mode={args.touchpad_ink_mode}, "
+            f"magnetics={'off' if args.no_touchpad_magnetics else 'synthetic'}, "
+            f"speed_log={args.touchpad_speed_log or 'off'}"
+        )
     print(f"Projection Image: {args.image_size}x{args.image_size}px, trail={args.trail_length}, dir={args.image_dir}")
     print(f"Projection Extent: +/-{args.projection_extent}, Z close mode: {args.z_close_mode}")
     if args.z_near is not None:
@@ -1683,6 +2657,17 @@ def main():
         classifier_mode=args.classifier_mode,
         classifier_idle_seconds=args.classifier_idle_seconds,
         classifier_min_ink_samples=args.classifier_min_ink_samples,
+        input_source=args.input_source,
+        touchpad_z=args.touchpad_z,
+        touchpad_sample_rate=args.touchpad_sample_rate,
+        touchpad_ink_strength=args.touchpad_ink_strength,
+        display_window=args.display_window,
+        plot_fps=args.plot_fps,
+        touchpad_synthetic_magnetics=not args.no_touchpad_magnetics,
+        touchpad_magnetic_scale=args.touchpad_magnetic_scale,
+        touchpad_ink_mode=args.touchpad_ink_mode,
+        touchpad_speed_log=args.touchpad_speed_log,
+        touchpad_speed_report_interval=args.touchpad_speed_report_interval,
         enable_writing_filter=not args.no_writing_filter,
         writing_min_velocity=args.writing_min_velocity,
         writing_max_velocity=args.writing_max_velocity,
@@ -1690,8 +2675,14 @@ def main():
         joystick_dwell_seconds=args.joystick_dwell_seconds,
         letter_labels=args.letter_labels,
         digit_labels=args.digit_labels,
+        # New mode params
+        record_data=args.record_data,
+        dry_run=args.dry_run,
+        validation_mode=args.validation_mode,
+        output_dir=args.output_dir,
+        run_id=args.run_id,
     )
-    reader.run(csv_filename=None if args.no_csv else args.csv, baudrate=args.baudrate)
+    reader.run(csv_filename=csv_filename, baudrate=args.baudrate)
 
 
 if __name__ == "__main__":
