@@ -1579,7 +1579,7 @@ class MagnetometerReader:
         if not self.session_data:
             return
 
-        image = self.rows_to_digit_image(self.session_data)
+        image = self.rows_to_digit_image(self.session_data, trail_length=0)
         plt.imsave(output_path, image, cmap='gray', vmin=0.0, vmax=1.0)
         print(f"Projected character image saved to: {output_path}")
         return output_path, image
