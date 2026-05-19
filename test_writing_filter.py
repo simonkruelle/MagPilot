@@ -73,6 +73,7 @@ def main():
     touch_reader = MagnetometerReader(
         enable_classifier=False,
         input_source='touchpad',
+        touchpad_ink_mode='pen',
         trail_length=10,
         writing_min_velocity=0.0,
     )
@@ -121,6 +122,7 @@ def main():
     persistent_reader = MagnetometerReader(
         enable_classifier=False,
         input_source='touchpad',
+        touchpad_ink_mode='pen',
         trail_length=5,
         writing_min_velocity=0.0,
     )

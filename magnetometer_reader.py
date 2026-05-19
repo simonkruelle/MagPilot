@@ -11,6 +11,7 @@ import struct
 import csv
 import os
 import json
+import re
 
 os.environ.setdefault('XDG_CACHE_HOME', '/private/tmp/colmag-cache')
 os.environ.setdefault('MPLCONFIGDIR', '/private/tmp/colmag-matplotlib-cache')
@@ -29,6 +30,11 @@ from datetime import datetime
 import select
 
 from colmag.interaction import AppController, InputMode, VirtualJoystick
+from colmag.magnetic_sim import (
+    apply_magnetic_calibration,
+    load_magnetic_calibration,
+    synthetic_dipole_values,
+)
 
 try:
     import serial
@@ -51,6 +57,7 @@ CLASSIFIER_LABEL_PRESETS = {
     'letters': tuple('ABCDEFGHIJKLMNOPQRSTUVWXYZ'),
     'alphanumeric': DEFAULT_CLASSIFIER_LABELS,
 }
+DATA_MANIFEST_SCHEMA_VERSION = 1
 
 
 def top_label_indices(scores, count):
@@ -100,7 +107,8 @@ class MagnetometerReader:
         touchpad_ink_strength=1.0,
         touchpad_synthetic_magnetics=True,
         touchpad_magnetic_scale=1e-6,
-        touchpad_ink_mode='pen',
+        touchpad_ink_mode='velocity',
+        touchpad_magnetic_calibration=None,
         touchpad_speed_log=None,
         touchpad_speed_report_interval=1.0,
         display_window=2000,
@@ -159,6 +167,16 @@ class MagnetometerReader:
         self.touchpad_synthetic_magnetics = touchpad_synthetic_magnetics
         self.touchpad_magnetic_scale = float(touchpad_magnetic_scale)
         self.touchpad_ink_mode = touchpad_ink_mode
+        self.touchpad_magnetic_calibration_file = touchpad_magnetic_calibration
+        self.touchpad_magnetic_calibration = None
+        if touchpad_magnetic_calibration:
+            try:
+                self.touchpad_magnetic_calibration = load_magnetic_calibration(
+                    touchpad_magnetic_calibration
+                )
+                print(f"Loaded touchpad magnetic calibration: {touchpad_magnetic_calibration}")
+            except Exception as e:
+                raise ValueError(f"Could not load touchpad magnetic calibration: {e}") from e
         self.touchpad_speed_log = touchpad_speed_log
         self.touchpad_speed_report_interval = float(touchpad_speed_report_interval)
         self.touchpad_sample_interval = 1.0 / self.touchpad_sample_rate
@@ -168,7 +186,15 @@ class MagnetometerReader:
         self.dry_run = dry_run
         self.validation_mode = validation_mode
         self.output_dir = output_dir
-        self.run_id = run_id
+        self.run_id = self.sanitize_path_component(run_id) if run_id else run_id
+        self.command_line = list(sys.argv)
+        self.raw_csv_path = None
+        self.raw_csv_enabled = False
+        self.manifest_path = (
+            os.path.join(self.output_dir, 'manifest.json')
+            if self.output_dir
+            else None
+        )
         buffer_length = 1000
         if self.input_source == 'touchpad':
             buffer_length = max(buffer_length, int(self.touchpad_sample_rate * 300))
@@ -246,9 +272,225 @@ class MagnetometerReader:
         self.recording_sessions = []  # List of (session_name, start_time, end_time, data_points)
         self.current_session = None
         self.session_data = []
+        self.current_session_started_at = None
 
         # Setup signal handler for graceful shutdown
         signal.signal(signal.SIGINT, self.signal_handler)
+
+    @staticmethod
+    def csv_header():
+        """Return the shared row header for raw and per-session CSV files."""
+        header = ['timestamp']
+        for i in range(16):
+            header.extend([f'Sensor{i+1}_Bx', f'Sensor{i+1}_By', f'Sensor{i+1}_Bz'])
+        header.extend(['Pose_x', 'Pose_y', 'Pose_z', 'Pose_mx', 'Pose_my', 'Pose_mz'])
+        return header
+
+    @staticmethod
+    def sanitize_path_component(value):
+        """Make a user/run label safe as a single filename component."""
+        safe = re.sub(r'[^A-Za-z0-9_.-]+', '_', str(value).strip())
+        safe = safe.strip('._-')
+        return safe or 'unnamed'
+
+    def session_label(self, session_name):
+        """Return the exact label folder name for a recording session."""
+        return self.sanitize_path_component(session_name)
+
+    def path_relative_to_output(self, path):
+        """Return a manifest-friendly path relative to output_dir when possible."""
+        if not path:
+            return None
+        if not self.output_dir:
+            return path
+        try:
+            return os.path.relpath(path, self.output_dir)
+        except ValueError:
+            return path
+
+    def collect_git_metadata(self):
+        """Collect git branch/commit/dirty metadata for reproducibility."""
+        git_info = {}
+        try:
+            import subprocess
+            commands = {
+                'commit': ['git', 'log', '-1', '--format=%H', '--no-show-signature'],
+                'branch': ['git', 'branch', '--show-current'],
+                'status': ['git', 'status', '--porcelain'],
+            }
+            for key, command in commands.items():
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                )
+                if result.returncode == 0:
+                    if key == 'status':
+                        git_info['dirty'] = len(result.stdout.strip()) > 0
+                    else:
+                        git_info[key] = result.stdout.strip()
+        except Exception:
+            git_info['error'] = 'git metadata unavailable'
+        return git_info
+
+    def manifest_settings(self):
+        """Return the settings block stored in run and session metadata."""
+        return {
+            'image_size': self.image_size,
+            'trail_length': self.trail_length,
+            'projection_extent': self.projection_extent,
+            'z_close_mode': self.z_close_mode,
+            'z_near': self.z_near,
+            'z_far': self.z_far,
+            'classifier_labels': ''.join(display_labels_for(self.classifier_labels)),
+            'classifier_mode': self.classifier_mode,
+            'classifier_interval': self.classifier_interval,
+            'classifier_idle_seconds': self.classifier_idle_seconds,
+            'classifier_min_ink_samples': self.classifier_min_ink_samples,
+            'writing_filter': {
+                'enabled': self.enable_writing_filter,
+                'min_velocity': self.writing_min_velocity,
+                'max_velocity': self.writing_max_velocity,
+                'min_closeness': self.writing_min_closeness,
+            },
+            'touchpad': {
+                'z': self.touchpad_z,
+                'sample_rate': self.touchpad_sample_rate,
+                'ink_strength': self.touchpad_ink_strength,
+                'ink_mode': self.touchpad_ink_mode,
+                'synthetic_magnetics': self.touchpad_synthetic_magnetics,
+                'magnetic_scale': self.touchpad_magnetic_scale,
+                'magnetic_calibration_file': self.touchpad_magnetic_calibration_file,
+                'magnetic_calibration_model': (
+                    self.touchpad_magnetic_calibration.get('model')
+                    if self.touchpad_magnetic_calibration
+                    else None
+                ),
+            },
+            'display_window': self.display_window,
+            'plot_fps': self.plot_fps,
+        }
+
+    def prepare_recording_layout(self, raw_csv_path=None, raw_csv_enabled=None):
+        """Create the record/dry-run folder layout and write the run manifest."""
+        if not self.output_dir:
+            raise ValueError("output_dir is required for recording layout")
+        if not self.run_id:
+            self.run_id = datetime.now().strftime('run_%Y%m%d_%H%M%S')
+        self.run_id = self.sanitize_path_component(self.run_id)
+        self.manifest_path = os.path.join(self.output_dir, 'manifest.json')
+        if raw_csv_path is not None:
+            self.raw_csv_path = raw_csv_path
+        if raw_csv_enabled is not None:
+            self.raw_csv_enabled = bool(raw_csv_enabled)
+
+        os.makedirs(self.output_dir, exist_ok=True)
+        os.makedirs(os.path.join(self.output_dir, 'raw'), exist_ok=True)
+        os.makedirs(os.path.join(self.output_dir, 'samples'), exist_ok=True)
+        self.write_manifest()
+
+    def load_manifest(self):
+        """Load the current manifest, returning a minimal base if absent."""
+        if not self.manifest_path or not os.path.exists(self.manifest_path):
+            return {
+                'schema_version': DATA_MANIFEST_SCHEMA_VERSION,
+                'created_at': datetime.now().isoformat(),
+                'sessions': [],
+            }
+
+        try:
+            with open(self.manifest_path, 'r', encoding='utf-8') as f:
+                manifest = json.load(f)
+        except (IOError, json.JSONDecodeError):
+            manifest = {
+                'schema_version': DATA_MANIFEST_SCHEMA_VERSION,
+                'created_at': datetime.now().isoformat(),
+                'sessions': [],
+            }
+
+        manifest.setdefault('schema_version', DATA_MANIFEST_SCHEMA_VERSION)
+        manifest.setdefault('created_at', datetime.now().isoformat())
+        manifest.setdefault('sessions', [])
+        return manifest
+
+    def write_manifest(self, session_entry=None):
+        """Write the manifest atomically, optionally appending one session."""
+        if not self.manifest_path:
+            return
+
+        manifest = self.load_manifest()
+        sessions = manifest.get('sessions', [])
+        if session_entry is not None:
+            sessions.append(session_entry)
+
+        manifest.update({
+            'schema_version': DATA_MANIFEST_SCHEMA_VERSION,
+            'updated_at': datetime.now().isoformat(),
+            'run_id': self.run_id,
+            'output_dir': os.path.abspath(self.output_dir) if self.output_dir else None,
+            'command_line': self.command_line,
+            'input_source': self.input_source,
+            'record_data': self.record_data,
+            'dry_run': self.dry_run,
+            'validation_mode': self.validation_mode,
+            'git': self.collect_git_metadata(),
+            'settings': self.manifest_settings(),
+            'raw_log': {
+                'enabled': bool(self.raw_csv_enabled and self.raw_csv_path),
+                'path': self.path_relative_to_output(self.raw_csv_path),
+            },
+            'sessions': sessions,
+        })
+
+        temp_path = f"{self.manifest_path}.tmp"
+        with open(temp_path, 'w', encoding='utf-8') as f:
+            json.dump(manifest, f, indent=2)
+            f.write('\n')
+        os.replace(temp_path, self.manifest_path)
+
+    def next_session_repetition(self, label):
+        """Return the next repetition number for run_id + exact label."""
+        next_rep = 1
+        manifest = self.load_manifest()
+        for session in manifest.get('sessions', []):
+            if session.get('run_id') == self.run_id and session.get('label') == label:
+                try:
+                    next_rep = max(next_rep, int(session.get('repetition', 0)) + 1)
+                except (TypeError, ValueError):
+                    next_rep = max(next_rep, 2)
+
+        label_dir = os.path.join(self.output_dir, 'samples', label)
+        basename_prefix = f"{self.run_id}_{label}_rep"
+        if os.path.isdir(label_dir):
+            for filename in os.listdir(label_dir):
+                match = re.match(
+                    rf"{re.escape(basename_prefix)}(\d+)_.*\.(?:csv|png|json)$",
+                    filename,
+                )
+                if match:
+                    next_rep = max(next_rep, int(match.group(1)) + 1)
+        return next_rep
+
+    def create_session_paths(self, session_name):
+        """Create a matched CSV/PNG/JSON basename and return all paths."""
+        label = self.session_label(session_name)
+        label_dir = os.path.join(self.output_dir, 'samples', label)
+        os.makedirs(label_dir, exist_ok=True)
+
+        repetition = self.next_session_repetition(label)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        basename = f"{self.run_id}_{label}_rep{repetition:03d}_{timestamp}"
+        return {
+            'label': label,
+            'label_dir': label_dir,
+            'repetition': repetition,
+            'timestamp': timestamp,
+            'basename': basename,
+            'csv_path': os.path.join(label_dir, f"{basename}.csv"),
+            'image_path': os.path.join(label_dir, f"{basename}.png"),
+            'metadata_path': os.path.join(label_dir, f"{basename}.json"),
+        }
 
     def load_classifier(self):
         """Load the optional pretrained EasyOCR character classifier."""
@@ -603,13 +845,9 @@ class MagnetometerReader:
 
             self.csv_file = open(filename, 'w', newline='')
             self.csv_writer = csv.writer(self.csv_file)
-
-            # Write header
-            header = ['timestamp']
-            for i in range(16):
-                header.extend([f'Sensor{i+1}_Bx', f'Sensor{i+1}_By', f'Sensor{i+1}_Bz'])
-            header.extend(['Pose_x', 'Pose_y', 'Pose_z', 'Pose_mx', 'Pose_my', 'Pose_mz'])
-            self.csv_writer.writerow(header)
+            self.csv_writer.writerow(self.csv_header())
+            self.raw_csv_path = filename
+            self.raw_csv_enabled = True
 
             print(f"Started CSV logging to {filename}")
         except IOError as e:
@@ -684,6 +922,7 @@ class MagnetometerReader:
         buffer = bytearray()
         last_status_time = time.monotonic()
         last_status_count = 0
+        last_bad_count = 0
 
         print("Starting serial read thread in real-time mode")
 
@@ -770,14 +1009,25 @@ class MagnetometerReader:
             now = time.monotonic()
             if now - last_status_time >= 1.0:
                 packets_since_last = self.packet_count - last_status_count
+                bad_since_last = self.bad_packet_count - last_bad_count
+                total_since_last = packets_since_last + bad_since_last
+                bad_ratio = (
+                    bad_since_last / total_since_last
+                    if total_since_last > 0
+                    else 0.0
+                )
                 status = f"Read rate: {packets_since_last / (now - last_status_time):.1f} packets/s"
+                if self.validation_mode or self.bad_packet_count:
+                    status += (
+                        f" | bad packets: {self.bad_packet_count} "
+                        f"({bad_ratio * 100:.2f}% recent)"
+                    )
                 if self.current_session:
                     status += f" | RECORDING: {self.current_session} ({len(self.session_data)} points)"
-                if self.bad_packet_count:
-                    status += f" | bad packets: {self.bad_packet_count}"
                 print(status)
                 last_status_time = now
                 last_status_count = self.packet_count
+                last_bad_count = self.bad_packet_count
 
     def start_reading(self):
         """Start the reading thread."""
@@ -811,8 +1061,14 @@ class MagnetometerReader:
 
     def handle_keypress(self, key):
         """Handle keyboard input for session controls."""
+        if not key:
+            return
         if key in '0123456789':
             self.start_session(f'digit_{key}')
+        elif key == '-':
+            self.start_session('control_blank')
+        elif key == '=':
+            self.start_session('control_still')
         elif key == 's':
             self.stop_session()
         elif key == 'q':
@@ -829,6 +1085,7 @@ class MagnetometerReader:
 
         self.current_session = session_name
         self.session_data = []
+        self.current_session_started_at = datetime.now().isoformat()
         self.prediction_history.clear()
         if self.classifier is not None:
             self.latest_prediction_text = "Prediction: --"
@@ -836,8 +1093,11 @@ class MagnetometerReader:
             self.latest_prediction_text = self.classifier_unloaded_prediction_text()
         self.latest_runner_up_text = "Runner-up: --"
         print(f"\n🎬 STARTED RECORDING SESSION: '{session_name}'")
-        print(f"Recording to main CSV file: {self.csv_file.name if self.csv_file else 'None'}")
-        print(f"Projected character image will be saved in: {self.image_output_dir}")
+        if self.record_data:
+            print(f"Raw CSV log: {self.csv_file.name if self.csv_file else 'disabled'}")
+            print(f"Session artifacts will be saved under: {self.output_dir}/samples/{self.session_label(session_name)}/")
+        else:
+            print("Live session only; use --record-data to save artifacts")
 
     def stop_session(self):
         """Stop the current recording session."""
@@ -848,8 +1108,11 @@ class MagnetometerReader:
         session_name = self.current_session
         data_points = len(self.session_data)
 
-        # Save session info
-        start_time = self.session_data[0][0] if self.session_data else datetime.now().isoformat()
+        start_time = (
+            self.session_data[0][0]
+            if self.session_data
+            else self.current_session_started_at or datetime.now().isoformat()
+        )
         end_time = self.session_data[-1][0] if self.session_data else datetime.now().isoformat()
 
         self.recording_sessions.append((session_name, start_time, end_time, data_points))
@@ -859,53 +1122,80 @@ class MagnetometerReader:
         print(f"Duration: {start_time} to {end_time}")
 
         if self.record_data:
-            # Save session data using shared basename for CSV/PNG/JSON triplet
-            basename = self.save_session_csv(session_name)
-            image_result = self.save_session_image(session_name, basename=basename)
-            if image_result:
-                _, character_image = image_result
-                self.print_final_prediction(character_image)
+            self.save_session_artifacts(session_name, start_time, end_time, data_points)
         else:
             print("(Skipping file save — use --record-data to enable CSV/PNG/JSON output)")
 
         self.current_session = None
         self.session_data = []
+        self.current_session_started_at = None
 
-    def save_session_csv(self, session_name):
-        """Save session data to a structured CSV file under output_dir/samples/<label>/."""
+    def save_session_artifacts(self, session_name, start_time, end_time, data_points):
+        """Save matched CSV/PNG/JSON artifacts and append the manifest entry."""
         if not self.session_data:
             return
 
-        # Determine label from session_name (e.g. "digit_5" -> "digit_5", "letter_A" -> "letter_A")
-        label = session_name.rsplit('_', 1)[0] if '_' in session_name else session_name
-        label_dir = os.path.join(self.output_dir, 'samples', label)
-        os.makedirs(label_dir, exist_ok=True)
+        if not self.output_dir:
+            print("Cannot save session artifacts: output_dir is not configured")
+            return
+        if not self.run_id:
+            self.run_id = datetime.now().strftime('run_%Y%m%d_%H%M%S')
 
-        run_prefix = f"{self.run_id}_" if self.run_id else ""
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        basename = f"{run_prefix}{session_name}_{timestamp}"
-        filename = os.path.join(label_dir, f"{basename}.csv")
+        paths = self.create_session_paths(session_name)
+        csv_saved = self.save_session_csv(paths['csv_path'])
+        image_result = self.save_session_image(paths['image_path'])
+        prediction = None
+        if image_result:
+            _, character_image = image_result
+            prediction = self.print_final_prediction(character_image)
+
+        metadata_path = self.save_session_metadata(
+            session_name=session_name,
+            paths=paths,
+            start_time=start_time,
+            end_time=end_time,
+            data_points=data_points,
+            prediction=prediction,
+        )
+
+        session_entry = {
+            'session_name': session_name,
+            'label': paths['label'],
+            'run_id': self.run_id,
+            'repetition': paths['repetition'],
+            'basename': paths['basename'],
+            'started_at': start_time,
+            'ended_at': end_time,
+            'saved_at': datetime.now().isoformat(),
+            'sample_count': data_points,
+            'paths': {
+                'csv': self.path_relative_to_output(paths['csv_path']) if csv_saved else None,
+                'png': self.path_relative_to_output(paths['image_path']) if image_result else None,
+                'json': self.path_relative_to_output(metadata_path) if metadata_path else None,
+            },
+            'prediction': prediction,
+        }
+        self.write_manifest(session_entry=session_entry)
+        print(f"Manifest updated: {self.manifest_path}")
+
+    def save_session_csv(self, filename):
+        """Save session data to a structured CSV file."""
+        if not self.session_data:
+            return False
+
         try:
             with open(filename, 'w', newline='') as f:
                 writer = csv.writer(f)
-
-                # Write header
-                header = ['timestamp']
-                for i in range(16):
-                    header.extend([f'Sensor{i+1}_Bx', f'Sensor{i+1}_By', f'Sensor{i+1}_Bz'])
-                header.extend(['Pose_x', 'Pose_y', 'Pose_z', 'Pose_mx', 'Pose_my', 'Pose_mz'])
-                writer.writerow(header)
-
-                # Write session data
+                writer.writerow(self.csv_header())
                 for row in self.session_data:
                     writer.writerow(row)
 
             print(f"Session data saved to: {filename}")
-            return basename  # Return for sharing with image/metadata
+            return True
 
         except IOError as e:
             print(f"Error saving session CSV: {e}")
-            return None
+            return False
 
     def extract_pose_trail(self, rows, trail_length=None, include_timestamps=False):
         """Return pose X/Y/Z arrays from buffered CSV-style rows."""
@@ -1200,95 +1490,75 @@ class MagnetometerReader:
         writing_mask &= ~self.joystick_button_mask(pose_x, pose_y)
         return self.pose_to_digit_image(pose_x, pose_y, pose_z, sample_mask=writing_mask)
 
-    def save_session_image(self, session_name, basename=None):
-        """Save the recorded pose trail as a classifier-ready grayscale PNG under output_dir/samples/<label>/."""
+    def save_session_image(self, output_path):
+        """Save the recorded pose trail as a classifier-ready grayscale PNG."""
         if not self.session_data:
             return
 
-        label = session_name.rsplit('_', 1)[0] if '_' in session_name else session_name
-        label_dir = os.path.join(self.output_dir, 'samples', label)
-        os.makedirs(label_dir, exist_ok=True)
-
-        if basename is None:
-            run_prefix = f"{self.run_id}_" if self.run_id else ""
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            basename = f"{run_prefix}{session_name}_{timestamp}"
-
         image = self.rows_to_digit_image(self.session_data)
-        filename = f"{basename}_{self.image_size}px.png"
-        output_path = os.path.join(label_dir, filename)
         plt.imsave(output_path, image, cmap='gray', vmin=0.0, vmax=1.0)
         print(f"Projected character image saved to: {output_path}")
-        self.save_session_metadata(session_name, output_path, basename=basename)
         return output_path, image
 
-    def save_session_metadata(self, session_name, image_path, basename=None):
+    def save_session_metadata(
+        self,
+        session_name,
+        paths,
+        start_time,
+        end_time,
+        data_points,
+        prediction=None,
+    ):
         """Save a sidecar JSON file with session settings and git metadata."""
-        # Collect git metadata (best-effort, silently handle errors)
-        git_info = {}
-        try:
-            import subprocess
-            result = subprocess.run(
-                ['git', 'log', '-1', '--format=%H', '--no-show-signature'],
-                capture_output=True, text=True, timeout=3,
-            )
-            if result.returncode == 0:
-                git_info['commit'] = result.stdout.strip()
-            result = subprocess.run(
-                ['git', 'branch', '--show-current'],
-                capture_output=True, text=True, timeout=3,
-            )
-            if result.returncode == 0:
-                git_info['branch'] = result.stdout.strip()
-            result = subprocess.run(
-                ['git', 'status', '--porcelain'],
-                capture_output=True, text=True, timeout=3,
-            )
-            if result.returncode == 0:
-                git_info['dirty'] = len(result.stdout.strip()) > 0
-        except Exception:
-            git_info['error'] = 'git metadata unavailable'
-
         metadata = {
             'session_name': session_name,
+            'label': paths['label'],
+            'run_id': self.run_id,
+            'repetition': paths['repetition'],
+            'basename': paths['basename'],
             'created_at': datetime.now().isoformat(),
-            'image_path': image_path,
-            'sample_count': len(self.session_data),
-            'image_size': self.image_size,
-            'trail_length': self.trail_length,
-            'projection_extent': self.projection_extent,
-            'z_close_mode': self.z_close_mode,
-            'z_near': self.z_near,
-            'z_far': self.z_far,
-            'classifier_labels': ''.join(display_labels_for(self.classifier_labels)),
-            'input_source': self.input_source,
-            'writing_filter': {
-                'enabled': self.enable_writing_filter,
-                'min_velocity': self.writing_min_velocity,
-                'max_velocity': self.writing_max_velocity,
-                'min_closeness': self.writing_min_closeness,
+            'started_at': start_time,
+            'ended_at': end_time,
+            'sample_count': data_points,
+            'paths': {
+                'csv': self.path_relative_to_output(paths['csv_path']),
+                'png': self.path_relative_to_output(paths['image_path']),
+                'json': self.path_relative_to_output(paths['metadata_path']),
             },
-            'git': git_info,
+            'input_source': self.input_source,
+            'command_line': self.command_line,
+            'settings': self.manifest_settings(),
+            'raw_log': {
+                'enabled': bool(self.raw_csv_enabled and self.raw_csv_path),
+                'path': self.path_relative_to_output(self.raw_csv_path),
+            },
+            'prediction': prediction,
+            'git': self.collect_git_metadata(),
         }
-        metadata_path = os.path.splitext(image_path)[0] + '.json'
         try:
-            with open(metadata_path, 'w', encoding='utf-8') as f:
+            with open(paths['metadata_path'], 'w', encoding='utf-8') as f:
                 json.dump(metadata, f, indent=2)
-            print(f"Session metadata saved to: {metadata_path}")
+                f.write('\n')
+            print(f"Session metadata saved to: {paths['metadata_path']}")
+            return paths['metadata_path']
         except IOError as e:
             print(f"Error saving session metadata: {e}")
+            return None
 
     def print_final_prediction(self, character_image):
         """Run one final unsmoothed prediction for a completed recording."""
         if self.classifier is None:
-            return
+            return None
 
         try:
             with self.classifier_inference_lock:
                 result = self.classifier.predict(character_image.astype(np.float32))
         except Exception as e:
             print(f"Final character prediction failed: {e}")
-            return
+            return {
+                'status': 'failed',
+                'error': str(e),
+            }
 
         probabilities = result['probabilities']
         labels = result.get('labels', DEFAULT_CLASSIFIER_LABELS)
@@ -1296,16 +1566,35 @@ class MagnetometerReader:
         best_index = top_two[0]
         if probabilities[best_index] <= 0.0:
             print("Final character prediction: -- (0.0%)")
-            return
+            return {
+                'status': 'empty',
+                'best_label': None,
+                'best_confidence': 0.0,
+                'runner_up_label': None,
+                'runner_up_confidence': 0.0,
+                'labels': list(labels),
+            }
 
         runner_text = "--"
+        runner_label = None
+        runner_confidence = 0.0
         if len(top_two) > 1 and probabilities[top_two[1]] > 0.0:
+            runner_label = labels[top_two[1]]
+            runner_confidence = float(probabilities[top_two[1]])
             runner_text = f"{labels[top_two[1]]} ({probabilities[top_two[1]] * 100:.1f}%)"
         print(
             "Final character prediction: "
             f"{labels[best_index]} ({probabilities[best_index] * 100:.1f}%), "
             f"runner-up {runner_text}"
         )
+        return {
+            'status': 'ok',
+            'best_label': labels[best_index],
+            'best_confidence': float(probabilities[best_index]),
+            'runner_up_label': runner_label,
+            'runner_up_confidence': runner_confidence,
+            'labels': list(labels),
+        }
 
     def get_data_copy(self, tail=None):
         """Get a thread-safe copy of the data buffer, optionally limited to the last N rows.
@@ -1325,11 +1614,11 @@ class MagnetometerReader:
             return list(buf)
 
     def setup_touchpad_events(self, fig, ax):
-        """Wire Matplotlib pointer events into the synthetic touchpad state."""
-        if self.input_source != 'touchpad':
-            return
+        """Wire Matplotlib pointer and key events into the live app state."""
 
         def update_position(event, pen_down=None):
+            if self.input_source != 'touchpad':
+                return
             if event.inaxes is not ax or event.xdata is None or event.ydata is None:
                 self.touchpad_state['inside'] = False
                 if pen_down is not None:
@@ -1354,23 +1643,28 @@ class MagnetometerReader:
             update_position(event)
 
         def on_axes_leave(event):
+            if self.input_source != 'touchpad':
+                return
             self.touchpad_state['inside'] = False
             self.touchpad_state['pen_down'] = False
 
         def on_key_press(event):
-            key = (event.key or '').lower()
-            if key == 'l':
+            raw_key = event.key or ''
+            key = raw_key.lower()
+            if self.input_source == 'touchpad' and key == 'l' and raw_key == 'l':
                 self.activate_classifier_mode('letters')
-            elif key == 'r':
+            elif self.input_source == 'touchpad' and key == 'r' and raw_key == 'r':
                 self.activate_classifier_mode('digits')
-            elif key in (' ', 'space'):
+            elif self.input_source == 'touchpad' and key in (' ', 'space'):
                 self.touchpad_state['pen_down'] = True
-            elif key == 'p':
+            elif self.input_source == 'touchpad' and key == 'p':
                 self.touchpad_state['pen_down'] = not self.touchpad_state['pen_down']
+            else:
+                self.handle_keypress(raw_key)
 
         def on_key_release(event):
             key = (event.key or '').lower()
-            if key in (' ', 'space'):
+            if self.input_source == 'touchpad' and key in (' ', 'space'):
                 self.touchpad_state['pen_down'] = False
 
         fig.canvas.mpl_connect('button_press_event', on_press)
@@ -1482,35 +1776,15 @@ class MagnetometerReader:
 
     def synthetic_magnetic_values(self, pose_x, pose_y, pose_z):
         """Generate a simple 4x4 dipole-like magnetic field for touchpad rows."""
-        sensor_axis = np.linspace(
-            -self.projection_extent,
-            self.projection_extent,
-            4,
-            dtype=float,
+        values = synthetic_dipole_values(
+            pose_x,
+            pose_y,
+            pose_z,
+            projection_extent=self.projection_extent,
+            magnetic_scale=1.0 if self.touchpad_magnetic_calibration else self.touchpad_magnetic_scale,
         )
-        values = []
-        magnet_z = max(abs(float(pose_z)), 1e-3)
-        moment_z = 1.0
-
-        for sensor_y in sensor_axis:
-            for sensor_x in sensor_axis:
-                rx = float(sensor_x) - float(pose_x)
-                ry = float(sensor_y) - float(pose_y)
-                rz = -magnet_z
-                r_sq = rx * rx + ry * ry + rz * rz + 1e-9
-                r = r_sq ** 0.5
-                r3 = r_sq * r
-                r5 = r3 * r_sq
-                dot = moment_z * rz
-                bx = 3.0 * rx * dot / r5
-                by = 3.0 * ry * dot / r5
-                bz = 3.0 * rz * dot / r5 - moment_z / r3
-                values.extend([
-                    bx * self.touchpad_magnetic_scale,
-                    by * self.touchpad_magnetic_scale,
-                    bz * self.touchpad_magnetic_scale,
-                ])
-
+        if self.touchpad_magnetic_calibration:
+            return apply_magnetic_calibration(values, self.touchpad_magnetic_calibration)
         return values
 
     def touchpad_pen_mask(self, rows):
@@ -2036,6 +2310,11 @@ class MagnetometerReader:
                     for index, (label, _) in enumerate(self.classifier_candidates[:4])
                 )
                 self.latest_interface_text += f" | Choices: {choices_text}"
+            if self.current_session:
+                self.latest_interface_text += (
+                    f" | Rec: {self.current_session} "
+                    f"({len(self.session_data)})"
+                )
             if now < self.action_feedback_until and self.action_feedback_text:
                 self.latest_interface_text += f" | {self.action_feedback_text}"
                 completion_text.set_text(self.action_feedback_text)
@@ -2277,21 +2556,22 @@ class MagnetometerReader:
             f"threshold={self.writing_min_velocity:.4f}"
         )
 
-    def run(self, csv_filename='magnetometer_data.csv', baudrate=921600):
+    def run(self, csv_filename=None, baudrate=921600):
         """Main run function.
 
         Mode logic:
-          dry_run        — no sensor/touchpad, just show layout, exit after 5s
+          dry_run        — no sensor/touchpad, create data layout, then exit
           validation_mode — connect to sensor, print health stats, no files saved
           normal          — live view, sessions saved only when --record-data is set
         """
         try:
             if self.dry_run:
                 print("\n=== DRY RUN MODE ===")
-                print("No sensor or touchpad connected. Showing plot layout for 5 seconds...")
-                self.is_running = False
-                # Start plot with empty data, then auto-exit after 5s
-                self.plot_data()
+                print("No sensor or touchpad connected. Creating data layout only.")
+                self.prepare_recording_layout(raw_csv_path=None, raw_csv_enabled=False)
+                print(f"Output directory: {self.output_dir}")
+                print(f"Manifest: {self.manifest_path}")
+                print("Created subfolders: raw/, samples/")
                 return
 
             if self.validation_mode:
@@ -2312,6 +2592,12 @@ class MagnetometerReader:
                 return
 
             # === Normal mode ===
+            if self.record_data:
+                self.prepare_recording_layout(
+                    raw_csv_path=csv_filename,
+                    raw_csv_enabled=bool(csv_filename),
+                )
+
             if self.input_source == 'serial':
                 port_name = self.choose_port()
                 if not port_name:
@@ -2343,7 +2629,11 @@ class MagnetometerReader:
             print("="*60)
             print(f"Input source: {self.input_source}")
             if self.record_data:
+                self.raw_csv_path = csv_filename
+                self.raw_csv_enabled = bool(csv_filename)
+                self.write_manifest()
                 print(f"RECORDING MODE: Session files saved to {self.output_dir}/samples/")
+                print(f"Raw CSV log: {csv_filename if csv_filename else 'disabled (--no-csv)'}")
             else:
                 print("Live view only. Use --record-data to enable CSV/PNG session saving.")
             print("Controls:")
@@ -2357,6 +2647,7 @@ class MagnetometerReader:
                 print("  l/r: switch to letter/digit classification")
             print("  0-9: Start recording that digit")
             print("  A-Z: Start recording that letter (lowercase s/q are reserved)")
+            print("  -/=: Start control_blank / control_still recording")
             print("  s:   Stop current recording and save CSV + projected PNG")
             print("  q:   Quit program")
             print(f"Projection: X/Y plane, Z intensity, {self.image_size}x{self.image_size}px, last {self.trail_length} samples")
@@ -2398,7 +2689,8 @@ def main():
     parser.add_argument('--baudrate', '-b', type=int, default=921600,
                        help='Serial baudrate (default: 921600)')
     parser.add_argument('--csv', '-c', type=str, default='magnetometer_data.csv',
-                       help='CSV output filename (default: magnetometer_data.csv)')
+                       help='Explicit continuous raw CSV output filename. '
+                            'Default is off in live mode, or output_dir/raw/<run_id>_raw.csv with --record-data')
     parser.add_argument('--no-csv', action='store_true',
                        help='Disable CSV logging for maximum live read rate')
     parser.add_argument('--input-source', choices=['serial', 'touchpad'], default='serial',
@@ -2409,12 +2701,14 @@ def main():
                        help='Synthetic sample rate for --input-source touchpad mode in Hz (default: 100)')
     parser.add_argument('--touchpad-ink-strength', type=float, default=1.0,
                        help='Synthetic stroke darkness for --input-source touchpad mode, 0..1 (default: 1.0)')
-    parser.add_argument('--touchpad-ink-mode', choices=['pen', 'velocity'], default='pen',
-                       help='Touchpad ink gate: pen uses click/space/p, velocity mimics magnet writing (default: pen)')
+    parser.add_argument('--touchpad-ink-mode', choices=['pen', 'velocity'], default='velocity',
+                       help='Touchpad ink gate: velocity mimics magnet writing, pen uses click/space/p (default: velocity)')
     parser.add_argument('--no-touchpad-magnetics', action='store_true',
                        help='Use zero magnetic values in touchpad mode instead of synthetic 16-sensor fields')
     parser.add_argument('--touchpad-magnetic-scale', type=float, default=1e-6,
                        help='Scale factor for synthetic magnetic fields in touchpad mode (default: 1e-6)')
+    parser.add_argument('--touchpad-magnetic-calibration', type=str, default=None,
+                       help='Calibration JSON from calibrate_touchpad_magnetics.py for touchpad synthetic magnetics')
     parser.add_argument('--touchpad-speed-log', type=str, default=None,
                        help='Optional CSV path for touchpad speed calibration samples')
     parser.add_argument('--touchpad-speed-report-interval', type=float, default=1.0,
@@ -2445,7 +2739,7 @@ def main():
     parser.add_argument('--classifier-gpu', action='store_true',
                        help='Use GPU for EasyOCR if available')
     parser.add_argument('--classifier-labels', default='alphanumeric',
-                       help='EasyOCR label set: digits, letters, alphanumeric, or a custom subset such as ABCX0123 (default: alphanumeric)')
+                       help='EasyOCR label set: digits, letters, alphanumeric, or a custom subset such as ABCXLRUD0123 (default: alphanumeric)')
     parser.add_argument('--load-classifier-at-start', action='store_true',
                        help='Load EasyOCR during startup instead of lazily on the first completed drawing')
     parser.add_argument('--classifier-cpu-threads', type=int, default=1,
@@ -2477,7 +2771,7 @@ def main():
     parser.add_argument('--record-data', action='store_true',
                        help='Explicitly enable saving CSV/PNG/JSON session files (default: off, live view only)')
     parser.add_argument('--dry-run', action='store_true',
-                       help='Skip sensor/touchpad setup entirely, just show the plot layout and exit after 5s')
+                       help='Skip sensor/touchpad setup, create output layout + manifest, and exit')
     parser.add_argument('--validation-mode', action='store_true',
                        help='Connect to sensor and print packet health stats, but do NOT save any files')
     parser.add_argument('--output-dir', type=str, default=None,
@@ -2522,16 +2816,20 @@ def main():
         parser.error("--touchpad-ink-strength must be between 0 and 1")
     if args.touchpad_magnetic_scale < 0:
         parser.error("--touchpad-magnetic-scale must be non-negative")
+    if args.touchpad_magnetic_calibration and args.no_touchpad_magnetics:
+        parser.error("--touchpad-magnetic-calibration cannot be combined with --no-touchpad-magnetics")
+    if args.touchpad_magnetic_calibration and not os.path.exists(args.touchpad_magnetic_calibration):
+        parser.error(f"--touchpad-magnetic-calibration not found: {args.touchpad_magnetic_calibration}")
     if args.touchpad_speed_report_interval < 0:
         parser.error("--touchpad-speed-report-interval must be non-negative")
 
     # Resolve output_dir with date-based smart default
     if args.output_dir is None:
         args.output_dir = f"data/lab_{datetime.now().strftime('%Y-%m-%d')}"
-    # Ensure the output directory exists early
-    os.makedirs(args.output_dir, exist_ok=True)
-    samples_dir = os.path.join(args.output_dir, 'samples')
-    os.makedirs(samples_dir, exist_ok=True)
+    if (args.record_data or args.dry_run) and not args.run_id:
+        args.run_id = datetime.now().strftime('run_%Y%m%d_%H%M%S')
+    if args.run_id:
+        args.run_id = MagnetometerReader.sanitize_path_component(args.run_id)
 
     writing_min_velocity_was_explicit = any(
         arg == '--writing-min-velocity' or arg.startswith('--writing-min-velocity=')
@@ -2568,7 +2866,7 @@ def main():
 
     print(f"Magnetometer Data Reader")
     if args.dry_run:
-        print("MODE: DRY RUN — no sensor, no save, showing layout only")
+        print(f"MODE: DRY RUN — create layout only, output dir: {args.output_dir}")
     elif args.validation_mode:
         print("MODE: VALIDATION — sensor connected, packet health check, NO files saved")
     elif args.record_data:
@@ -2582,15 +2880,12 @@ def main():
         arg == '--csv' or arg == '-c' or arg.startswith('--csv=')
         for arg in sys.argv[1:]
     )
-    csv_filename = None if args.no_csv else args.csv
-    if args.input_source == 'touchpad' and not csv_was_explicit:
-        csv_filename = None
-    # In dry-run or validation mode, force CSV off
-    if args.dry_run or args.validation_mode:
-        csv_filename = None
-    if args.record_data and csv_filename is None and args.input_source == 'serial':
-        # Auto-enable CSV in record mode for serial input
-        csv_filename = args.csv
+    csv_filename = None
+    if not args.no_csv and not args.dry_run and not args.validation_mode:
+        if csv_was_explicit:
+            csv_filename = args.csv
+        elif args.record_data:
+            csv_filename = os.path.join(args.output_dir, 'raw', f"{args.run_id}_raw.csv")
     print(f"CSV Output: {'disabled' if csv_filename is None else csv_filename}")
     print(f"Verbose Packet Output: {args.verbose}")
     if args.input_source == 'touchpad':
@@ -2602,6 +2897,7 @@ def main():
             f"ink_strength={args.touchpad_ink_strength}, "
             f"ink_mode={args.touchpad_ink_mode}, "
             f"magnetics={'off' if args.no_touchpad_magnetics else 'synthetic'}, "
+            f"calibration={args.touchpad_magnetic_calibration or 'none'}, "
             f"speed_log={args.touchpad_speed_log or 'off'}"
         )
     print(f"Projection Image: {args.image_size}x{args.image_size}px, trail={args.trail_length}, dir={args.image_dir}")
@@ -2666,6 +2962,7 @@ def main():
         touchpad_synthetic_magnetics=not args.no_touchpad_magnetics,
         touchpad_magnetic_scale=args.touchpad_magnetic_scale,
         touchpad_ink_mode=args.touchpad_ink_mode,
+        touchpad_magnetic_calibration=args.touchpad_magnetic_calibration,
         touchpad_speed_log=args.touchpad_speed_log,
         touchpad_speed_report_interval=args.touchpad_speed_report_interval,
         enable_writing_filter=not args.no_writing_filter,

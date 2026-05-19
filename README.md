@@ -502,22 +502,25 @@ This project includes a Python program for reading magnetometer data from a seri
 
 - `--sensor, -s`: Sensor number to plot (1-16, default: 1)
 - `--baudrate, -b`: Serial baudrate (default: 921600)
-- `--csv, -c`: CSV output filename (default: magnetometer_data.csv)
+- `--csv, -c`: Explicit continuous raw CSV output filename (default: off unless `--record-data`)
 - `--no-csv`: Disable CSV logging for maximum live read rate
+- `--input-source`: `serial` for the real sensor or `touchpad` for synthetic rows (default: serial)
+- `--touchpad-ink-mode`: `velocity` draws from movement like the magnet, `pen` draws only while clicking/holding space (default: velocity)
+- `--touchpad-magnetic-calibration`: Calibration JSON from `calibrate_touchpad_magnetics.py` for more realistic synthetic touchpad magnetic fields
 - `--trail-length`: Number of recent pose samples used for the 3D trail and 2D character image (default: 250)
 - `--image-size`: Projection image size in pixels (default: 64)
 - `--image-dir`: Directory for projected character PNGs (default: digit_images)
 - `--z-close-mode`: How Z maps to stroke darkness; `max` means larger Z is darker (default)
 - `--no-classifier`: Run without loading the real-time EasyOCR character classifier
 - `--classifier-gpu`: Use GPU for EasyOCR if available
-- `--classifier-labels`: Character set for EasyOCR recognition: `alphanumeric`, `digits`, `letters`, or a custom subset such as `ABCX0123` (default: alphanumeric)
+- `--classifier-labels`: Character set for EasyOCR recognition: `alphanumeric`, `digits`, `letters`, or a custom subset such as `ABCXLRUD0123` (default: alphanumeric). For lab recordings, use the full union of every character you may write so the confidence chart is not spread over unused labels.
 - `--classifier-interval`: Minimum seconds between background OCR requests (default: 0.75)
 - `--classifier-mode`: Run live OCR after a writing pause (`on-idle`) or continuously at `--classifier-interval` (default: on-idle)
 - `--classifier-idle-seconds`: Writing pause duration before OCR runs in `on-idle` mode (default: 0.8)
 - `--classifier-min-ink-samples`: Minimum ink samples required before live OCR can run (default: 8)
 - `--letter-labels`: Label set used after holding virtual **L** for letter mode (default: letters)
 - `--digit-labels`: Label set used after holding virtual **R** for number mode (default: digits)
-- `--joystick-dwell-seconds`: Seconds the cursor must dwell inside a virtual button to press it (default: 2.0)
+- `--joystick-dwell-seconds`: Seconds the cursor must dwell inside a virtual button to press it (default: 1.5)
 - `--no-writing-filter`: Disable writing/hover filtering and draw every pose sample into the OCR image
 - `--writing-min-velocity`: Minimum XY pose velocity for a sample to count as writing (default: 0.01)
 - `--writing-max-velocity`: Optional maximum XY pose velocity; faster moves are treated as repositioning/pen-up (default: disabled)
@@ -527,8 +530,8 @@ This project includes a Python program for reading magnetometer data from a seri
 
 These flags control what happens when you run the program:
 
-- `--record-data`: Explicitly enable saving CSV/PNG/JSON session files. Without this flag, the program runs in **live view only** — sessions can be started/stopped for live classification, but no files are written to disk.
-- `--dry-run`: Skip sensor and touchpad hardware setup entirely. Shows the plot layout for 5 seconds and exits. Perfect for verifying the visualization layout works before connecting hardware.
+- `--record-data`: Explicitly enable saving a continuous raw CSV plus per-session CSV/PNG/JSON artifacts. Without this flag, the program runs in **live view only** — sessions can be started/stopped for live classification, but no files are written to disk unless `--csv` is explicitly passed.
+- `--dry-run`: Skip sensor and touchpad hardware setup entirely. Creates `output_dir`, `raw/`, `samples/`, and a placeholder `manifest.json`, then exits. Perfect for verifying paths and permissions before connecting hardware.
 - `--validation-mode`: Connect to the real sensor but do NOT save any files. Prints packet health stats (packet rate, bad packet ratio) for 60 seconds. Run this at the start of every lab session to verify the sensor link is healthy.
 - `--output-dir`: Base directory for recorded session data. Defaults to `data/lab_YYYY-MM-DD/` using today's date, so each lab day gets its own folder automatically.
 - `--run-id`: Optional prefix for session filenames (e.g., `run_001`). Useful when recording multiple runs in the same lab session.
@@ -536,9 +539,9 @@ These flags control what happens when you run the program:
 **Mode selection rules:**
 | Mode Flag | Sensor Connects? | Files Saved? | Use Case |
 |-----------|-----------------|-------------|----------|
-| (none) | ✓ | ✗ | Live view, test classifier, practice |
+| (none) | ✓ | ✗, unless `--csv` is explicit | Live view, test classifier, practice |
 | `--record-data` | ✓ | ✓ | Real data capture for training/analysis |
-| `--dry-run` | ✗ | ✗ | Verify plot layout, test flags |
+| `--dry-run` | ✗ | layout + manifest only | Verify output paths and permissions |
 | `--validation-mode` | ✓ | ✗ | Check sensor health before recording |
 
 #### Session Recording Controls
@@ -547,10 +550,12 @@ The program supports recording separate character drawing sessions:
 
 - **0-9**: Start recording that digit
 - **A-Z**: Start recording that letter (lowercase **s** and **q** are reserved for controls; uppercase **S** and **Q** record letters)
+- **-**: Start a `control_blank` recording
+- **=**: Start a `control_still` recording
 - **s**: Stop current recording session and save CSV + projected PNG
 - **q**: Quit program
 
-Each session creates a separate CSV file, a 64x64 grayscale PNG in `digit_images/`, and a JSON sidecar containing the projection/filter settings used for that image.
+With `--record-data`, each session creates a matched CSV, grayscale PNG, and JSON sidecar under `data/lab_YYYY-MM-DD/samples/<exact_label>/`. The run-level `manifest.json` records paths, settings, command line, raw CSV status, and git metadata.
 
 #### Examples
 
@@ -564,8 +569,8 @@ python magnetometer_reader.py --sensor 7 --baudrate 115200 --csv test_data.csv
 # Default settings (plots sensor 1)
 python magnetometer_reader.py
 
-# Dry run — test the plot layout without any hardware
-python magnetometer_reader.py --input-source touchpad --dry-run
+# Dry run — test the data layout without any hardware
+python magnetometer_reader.py --dry-run --record-data --run-id dry_test
 
 # Validation mode — check sensor health, no files saved
 python magnetometer_reader.py --validation-mode
@@ -575,6 +580,9 @@ python magnetometer_reader.py --record-data --output-dir data/lab_2026-05-20 --r
 
 # Record with touchpad simulator for offline practice
 python magnetometer_reader.py --input-source touchpad --record-data --output-dir data/practice_2026-05-18
+
+# Touchpad with click-to-write instead of velocity-to-write
+python magnetometer_reader.py --input-source touchpad --touchpad-ink-mode pen
 ```
 
 ### Session Recording Workflow
@@ -589,22 +597,55 @@ This creates files under `data/lab_YYYY-MM-DD/` organized by label:
 
 ```
 data/lab_2026-05-20/
+├── manifest.json
+├── raw/
+│   └── run_001_raw.csv
 ├── samples/
 │   ├── digit_5/
-│   │   ├── run_001_digit_5_20260520_143022.csv
-│   │   ├── run_001_digit_5_20260520_143022_64px.png
-│   │   └── run_001_digit_5_20260520_143022_64px.json
+│   │   ├── run_001_digit_5_rep001_20260520_143022.csv
+│   │   ├── run_001_digit_5_rep001_20260520_143022.png
+│   │   └── run_001_digit_5_rep001_20260520_143022.json
 │   ├── letter_A/
-│   │   ├── run_001_letter_A_20260520_144155.csv
-│   │   ├── run_001_letter_A_20260520_144155_64px.png
-│   │   └── run_001_letter_A_20260520_144155_64px.json
-│   └── digit_0/
-│       ├── run_002_digit_0_20260520_150312.csv
-│       ├── run_002_digit_0_20260520_150312_64px.png
-│       └── run_002_digit_0_20260520_150312_64px.json
+│   │   ├── run_001_letter_A_rep001_20260520_144155.csv
+│   │   ├── run_001_letter_A_rep001_20260520_144155.png
+│   │   └── run_001_letter_A_rep001_20260520_144155.json
+│   └── control_blank/
+│       ├── run_001_control_blank_rep001_20260520_150312.csv
+│       ├── run_001_control_blank_rep001_20260520_150312.png
+│       └── run_001_control_blank_rep001_20260520_150312.json
 ```
 
-Each JSON sidecar now includes **git metadata** (branch, commit hash, dirty status) for full reproducibility.
+Each JSON sidecar and the run manifest include **git metadata** (branch, commit hash, dirty status) for full reproducibility. Control samples are stored as separate labels, not as `digit_0`. For special unfiltered controls, add `--no-writing-filter` so stationary samples also appear in the PNG; otherwise the raw CSV still captures them while the image remains blank.
+
+### Touchpad Magnetic Calibration
+
+Touchpad mode already writes the same row format as the real sensor: timestamp, 48 magnetic channels, and 6 pose values. By default those 48 channels come from a simple synthetic dipole model. To make that synthetic data closer to tomorrow's sensor grid, record one short calibration run in the lab:
+
+```bash
+python magnetometer_reader.py \
+  --record-data \
+  --no-classifier \
+  --output-dir data/lab_2026-05-20 \
+  --run-id magcal_001
+```
+
+Move the magnet slowly across the whole pad: center, corners, edges, a few heights, and a few normal writing motions. You do not need to start character sessions for calibration because the continuous raw CSV is enough. Stop with `Ctrl+C`, then fit the JSON:
+
+```bash
+python calibrate_touchpad_magnetics.py \
+  data/lab_2026-05-20/raw/magcal_001_raw.csv \
+  --output data/lab_2026-05-20/touchpad_magnetic_calibration.json
+```
+
+Use that JSON for offline touchpad work:
+
+```bash
+python magnetometer_reader.py \
+  --input-source touchpad \
+  --touchpad-magnetic-calibration data/lab_2026-05-20/touchpad_magnetic_calibration.json
+```
+
+This calibrates per-channel scale and offset for pipeline testing. It is not a full physics reconstruction, but it makes touchpad-generated magnetic rows much more realistic for CSV saving, ROS replay, and downstream debugging.
 
 ## Data Processing Pipeline
 
@@ -619,7 +660,7 @@ The project implements a complete pipeline for processing magnetometer data and 
 
 2. **Real-time Visualization and Logging**:
    - Plots magnetic field components (Bx, By, Bz) for a selected sensor in real-time.
-   - Logs all data to CSV for offline analysis.
+   - In `--record-data` mode, logs the continuous raw stream to `data/lab_YYYY-MM-DD/raw/<run_id>_raw.csv`.
    - Displays 3D pose trajectories and live projections.
 
 3. **Session Recording**:
@@ -629,7 +670,7 @@ The project implements a complete pipeline for processing magnetometer data and 
 4. **2D Projection**:
    - Projects 3D pose trails (x, y, z coordinates) onto a 2D grayscale image.
    - Maps Z-values to stroke darkness, creating OCR-ready character images (default: 64x64 pixels).
-   - Saves projected images as PNG files in the `digit_images/` directory.
+   - Saves projected images as PNG files next to their session CSV/JSON sidecars under `data/lab_YYYY-MM-DD/samples/<exact_label>/`.
 
 5. **Character Classification**:
    - Uses EasyOCR (pretrained OCR model) to classify the 2D projected images as digits, letters, or a smaller custom command alphabet.
@@ -663,11 +704,13 @@ Do not pass `--no-classifier` when testing predictions. With `--no-classifier`, 
 
 EasyOCR is relatively slow, so live OCR runs in a background worker. By default it runs only after you stop writing briefly, which keeps the joystick/cursor responsive and avoids spending CPU while the trajectory is still changing. Use `--classifier-mode continuous` to restore repeated live OCR, and increase `--classifier-interval` if your machine lags.
 
-The live classifier panel shows the top prediction, runner-up, and a top-character confidence chart. By default the classifier accepts digits 0-9 and letters A-Z; use `--classifier-labels digits`, `--classifier-labels letters`, or a custom subset such as `--classifier-labels ABCX0123` to narrow the recognition set. The projected magnetometer image has a white background and dark strokes; the EasyOCR wrapper upsamples and autocontrasts the image before recognition.
+The live UI uses a blitted 2D update path for the writing surface, classifier panel, and sensor traces. The 3D axis is kept static during blitting because Matplotlib's `mplot3d` artists are backend-fragile. Performance-sensitive pieces include `--display-window`, the incremental OCR canvas, a precomputed brush kernel, throttled sensor-axis limit updates, and cached joystick text.
+
+The live classifier panel shows the top prediction, runner-up, and a top-character confidence chart. By default the classifier accepts digits 0-9 and letters A-Z; use `--classifier-labels digits`, `--classifier-labels letters`, or a custom subset such as `--classifier-labels ABCXLRUD0123` to narrow the recognition set. For dataset recording, that custom subset should be the full union of the characters you plan to record. The projected magnetometer image has a white background and dark strokes; the EasyOCR wrapper upsamples and autocontrasts the image before recognition.
 
 The final robot command vocabulary does not need all 26 letters. Prefer a small set of characters that are reliable in air-writing and map cleanly to robot tasks. Non-OCR shapes such as a star should be handled by a future gesture/template recognizer rather than EasyOCR.
 
-The live interface now includes two virtual joystick groups on the writing surface. Dwelling on **L** switches to letter detection, dwelling on **R** switches to number detection, and **A/B/C/X/U/D** currently emit robot-command placeholders for the later ROS adapter. The joystick/app-mode logic lives in `colmag/interaction.py` so the UI, OCR, and future robot adapter can stay separate.
+The live interface now includes two virtual joystick groups on the writing surface. Dwelling on **L** switches to letter detection, dwelling on **R** switches to number detection, **D** resets the writing canvas, and **1/2/3/4** confirm one of the four current classifier candidates. The joystick/app-mode logic lives in `colmag/interaction.py` so the UI, OCR, and future robot adapter can stay separate.
 
 The OCR image is filtered before classification: by default a pose sample only becomes ink when the magnet moves fast enough in X/Y. This prevents a resting magnet from becoming a dot while still supporting air-writing. For multi-stroke letters, tune `--writing-max-velocity` so fast repositioning motions are treated as pen-up, then draw actual strokes with slower controlled motion. `--writing-min-closeness` is still available for board/contact experiments, but it is disabled by default.
 
