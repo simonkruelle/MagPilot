@@ -235,6 +235,7 @@ class MagnetometerReader:
         writing_min_velocity=0.01,
         writing_max_velocity=None,
         writing_min_closeness=None,
+        writing_max_z=None,
         joystick_dwell_seconds=1.5,
         letter_labels='letters',
         digit_labels='digits',
@@ -262,6 +263,8 @@ class MagnetometerReader:
         run_id=None,
         # ROS bridge
         ros=False,
+        # UI
+        clean_view=False,
     ):
         self.serial_port = None
         self.is_running = False
@@ -388,6 +391,8 @@ class MagnetometerReader:
         self.writing_min_velocity = writing_min_velocity
         self.writing_max_velocity = writing_max_velocity
         self.writing_min_closeness = writing_min_closeness
+        self.writing_max_z = writing_max_z
+        self.clean_view = clean_view
         self.joystick = VirtualJoystick.default(self.projection_extent)
         self.app_controller = AppController(
             self.joystick,
@@ -1509,6 +1514,9 @@ class MagnetometerReader:
         else:
             close = closeness >= self.writing_min_closeness
 
+        if self.writing_max_z is not None:
+            close &= np.abs(pose_z) <= self.writing_max_z
+
         return finite & moving & close, speed, closeness
 
     def draw_pose_samples_on_image(self, image, pose_x, pose_y, pose_z, sample_mask=None):
@@ -2228,71 +2236,79 @@ class MagnetometerReader:
 
     def plot_data(self):
         """Create real-time plot of Bx, By, Bz for the selected sensor."""
-        fig = plt.figure(figsize=(18, 10))
-        fig.suptitle(
-            f'Real-time Magnetometer Data - Sensor {self.plot_sensor} | '
-            f'Projection: {self.image_size}x{self.image_size}, last {self.trail_length} samples',
-            fontsize=14
-        )
+        if self.clean_view:
+            fig = plt.figure(figsize=(12, 8))
+            grid = fig.add_gridspec(1, 2, width_ratios=[2.2, 1.0])
+            ax5 = fig.add_subplot(grid[0, 0])
+            ax6 = fig.add_subplot(grid[0, 1])
+            ax1 = ax2 = ax3 = ax4 = None
+        else:
+            fig = plt.figure(figsize=(18, 10))
+            fig.suptitle(
+                f'Real-time Magnetometer Data - Sensor {self.plot_sensor} | '
+                f'Projection: {self.image_size}x{self.image_size}, last {self.trail_length} samples',
+                fontsize=14
+            )
+            grid = fig.add_gridspec(
+                2,
+                4,
+                width_ratios=[0.9, 1.8, 1.8, 1.0],
+                height_ratios=[0.85, 1.7],
+            )
+            ax1 = fig.add_subplot(grid[0, 0])
+            ax2 = fig.add_subplot(grid[0, 1])
+            ax3 = fig.add_subplot(grid[0, 2])
+            ax4 = fig.add_subplot(grid[1, 0], projection='3d')
+            ax5 = fig.add_subplot(grid[1, 1:3])
+            ax6 = fig.add_subplot(grid[:, 3])
 
-        grid = fig.add_gridspec(
-            2,
-            4,
-            width_ratios=[0.9, 1.8, 1.8, 1.0],
-            height_ratios=[0.85, 1.7],
-        )
-        ax1 = fig.add_subplot(grid[0, 0])
-        ax2 = fig.add_subplot(grid[0, 1])
-        ax3 = fig.add_subplot(grid[0, 2])
-        ax4 = fig.add_subplot(grid[1, 0], projection='3d')
-        ax5 = fig.add_subplot(grid[1, 1:3])
-        ax6 = fig.add_subplot(grid[:, 3])
+        if not self.clean_view:
+            # Bx plot
+            ax1.set_title(f'Sensor {self.plot_sensor} - Bx')
+            ax1.set_xlabel('Time (samples)')
+            ax1.set_ylabel('Magnetic Field')
+            ax1.grid(True)
+            line_bx, = ax1.plot([], [], 'b-', label='Bx', linewidth=2)
+            ax1.legend(loc='upper right')
 
-        # Bx plot
-        ax1.set_title(f'Sensor {self.plot_sensor} - Bx')
-        ax1.set_xlabel('Time (samples)')
-        ax1.set_ylabel('Magnetic Field')
-        ax1.grid(True)
-        line_bx, = ax1.plot([], [], 'b-', label='Bx', linewidth=2)
-        ax1.legend(loc='upper right')
+            # By plot
+            ax2.set_title(f'Sensor {self.plot_sensor} - By')
+            ax2.set_xlabel('Time (samples)')
+            ax2.set_ylabel('Magnetic Field')
+            ax2.grid(True)
+            line_by, = ax2.plot([], [], 'g-', label='By', linewidth=2)
+            ax2.legend(loc='upper right')
 
-        # By plot
-        ax2.set_title(f'Sensor {self.plot_sensor} - By')
-        ax2.set_xlabel('Time (samples)')
-        ax2.set_ylabel('Magnetic Field')
-        ax2.grid(True)
-        line_by, = ax2.plot([], [], 'g-', label='By', linewidth=2)
-        ax2.legend(loc='upper right')
+            # Bz plot
+            ax3.set_title(f'Sensor {self.plot_sensor} - Bz')
+            ax3.set_xlabel('Time (samples)')
+            ax3.set_ylabel('Magnetic Field')
+            ax3.grid(True)
+            line_bz, = ax3.plot([], [], 'r-', label='Bz', linewidth=2)
+            ax3.legend(loc='upper right')
 
-        # Bz plot
-        ax3.set_title(f'Sensor {self.plot_sensor} - Bz')
-        ax3.set_xlabel('Time (samples)')
-        ax3.set_ylabel('Magnetic Field')
-        ax3.grid(True)
-        line_bz, = ax3.plot([], [], 'r-', label='Bz', linewidth=2)
-        ax3.legend(loc='upper right')
-
-        # 3D magnet trajectory plot from pose coordinates
-        ax4.set_title('Magnet Trajectory from Pose X/Y/Z')
-        ax4.set_xlabel('X')
-        ax4.set_ylabel('Y')
-        ax4.set_zlabel('Z')
-        ax4.grid(True)
-        ax4.view_init(elev=30, azim=135)
-        try:
-            ax4.set_box_aspect([1, 1, 1])
-        except Exception:
-            pass
-        ax4.set_xlim(-self.projection_extent, self.projection_extent)
-        ax4.set_ylim(-self.projection_extent, self.projection_extent)
-        ax4.set_zlim(-POSE_LIMIT, POSE_LIMIT)
-
-        # Pre-create persistent 3D artists (avoids expensive clear+redraw every frame)
-        hover_scatter = ax4.scatter([], [], [], c='#bbbbbb', s=60, alpha=0.35, label='Hover/lift')
-        writing_scatter = ax4.scatter([], [], [], c=[], cmap='plasma', s=150, edgecolors='k', linewidths=0.6, label='Writing')
-        trajectory_line, = ax4.plot([], [], [], color='#333333', alpha=0.45, linewidth=1.2)
-        current_pos_scatter = ax4.scatter([], [], [], c='red', s=120, label='Current position')
-        ax4.legend(loc='best', fontsize='small')
+            # 3D magnet trajectory
+            ax4.set_title('Magnet Trajectory from Pose X/Y/Z')
+            ax4.set_xlabel('X')
+            ax4.set_ylabel('Y')
+            ax4.set_zlabel('Z')
+            ax4.grid(True)
+            ax4.view_init(elev=30, azim=135)
+            try:
+                ax4.set_box_aspect([1, 1, 1])
+            except Exception:
+                pass
+            ax4.set_xlim(-self.projection_extent, self.projection_extent)
+            ax4.set_ylim(-self.projection_extent, self.projection_extent)
+            ax4.set_zlim(-POSE_LIMIT, POSE_LIMIT)
+            hover_scatter = ax4.scatter([], [], [], c='#bbbbbb', s=60, alpha=0.35, label='Hover/lift')
+            writing_scatter = ax4.scatter([], [], [], c=[], cmap='plasma', s=150, edgecolors='k', linewidths=0.6, label='Writing')
+            trajectory_line, = ax4.plot([], [], [], color='#333333', alpha=0.45, linewidth=1.2)
+            current_pos_scatter = ax4.scatter([], [], [], c='red', s=120, label='Current position')
+            ax4.legend(loc='best', fontsize='small')
+        else:
+            line_bx = line_by = line_bz = None
+            hover_scatter = writing_scatter = trajectory_line = current_pos_scatter = None
 
         # Live 2D projection preview for character-classifier style inference.
         projection_image = np.ones((self.image_size, self.image_size), dtype=float)
@@ -2394,7 +2410,7 @@ class MagnetometerReader:
         # tight_layout once at init, not per-frame
         plt.tight_layout()
 
-        sensor_trace_artists = () if self.input_source == 'touchpad' else (
+        sensor_trace_artists = () if (self.input_source == 'touchpad' or self.clean_view) else (
             line_bx,
             line_by,
             line_bz,
@@ -2434,17 +2450,17 @@ class MagnetometerReader:
                 current_classifier_axis_labels = axis_labels
 
         def init_plot():
-            line_bx.set_data([], [])
-            line_by.set_data([], [])
-            line_bz.set_data([], [])
+            if not self.clean_view:
+                line_bx.set_data([], [])
+                line_by.set_data([], [])
+                line_bz.set_data([], [])
+                hover_scatter._offsets3d = (np.array([]), np.array([]), np.array([]))
+                writing_scatter._offsets3d = (np.array([]), np.array([]), np.array([]))
+                trajectory_line.set_data([], [])
+                trajectory_line.set_3d_properties([])
+                current_pos_scatter._offsets3d = (np.array([]), np.array([]), np.array([]))
             image_artist.set_data(projection_image)
             cursor_artist.set_offsets(np.empty((0, 2)))
-            # 3D artists start empty
-            hover_scatter._offsets3d = (np.array([]), np.array([]), np.array([]))
-            writing_scatter._offsets3d = (np.array([]), np.array([]), np.array([]))
-            trajectory_line.set_data([], [])
-            trajectory_line.set_3d_properties([])
-            current_pos_scatter._offsets3d = (np.array([]), np.array([]), np.array([]))
             return blit_artists
 
         # Fix 6: Cache axis limits to avoid 6× matplotlib layout recalculations per frame.
@@ -2458,20 +2474,18 @@ class MagnetometerReader:
             if not data:
                 return blit_artists
 
-            if self.input_source != 'touchpad':
+            if self.input_source != 'touchpad' and not self.clean_view:
                 # Extract Bx, By, Bz for selected sensor
                 sensor_idx = self.plot_sensor - 1
                 bx_data = [row[1 + sensor_idx*3] for row in data]
                 by_data = [row[1 + sensor_idx*3 + 1] for row in data]
                 bz_data = [row[1 + sensor_idx*3 + 2] for row in data]
 
-                # Update line plots
                 x_vals = list(range(len(bx_data)))
                 line_bx.set_data(x_vals, bx_data)
                 line_by.set_data(x_vals, by_data)
                 line_bz.set_data(x_vals, bz_data)
 
-                # Fix 6: Throttle axis limits — only update when data exceeds cached bounds by >10%.
                 for ax_index, (ax, data_vals) in enumerate([(ax1, bx_data), (ax2, by_data), (ax3, bz_data)]):
                     if data_vals:
                         n = len(data_vals)
@@ -2479,13 +2493,11 @@ class MagnetometerReader:
                         y_max = max(data_vals)
                         prev_xmax = _cached_xlim[ax_index]
                         prev_ymin, prev_ymax = _cached_ylim[ax_index]
-                        # Compute target limits (same formula as before)
                         if y_min == y_max:
                             pad = abs(y_min) * 0.1 or 1.0
                             y_lo, y_hi = y_min - pad, y_max + pad
                         else:
                             y_lo, y_hi = y_min * 1.1, y_max * 1.1
-                        # Only call set_xlim/set_ylim if bounds have expanded by >10%
                         x_changed = n > prev_xmax * 1.1 or (prev_xmax == 0.0 and n > 0)
                         y_changed = (
                             y_lo < prev_ymin * 0.9 or y_hi > prev_ymax * 1.1
@@ -3063,6 +3075,10 @@ def main():
                        help='Optional maximum XY pose velocity for writing; faster moves become repositioning (default: disabled)')
     parser.add_argument('--writing-min-closeness', type=float, default=None,
                        help='Optional normalized Z closeness gate for board/contact mode, 0..1 (default: disabled for air-writing)')
+    parser.add_argument('--writing-max-z', type=float, default=None,
+                       help='Do not draw when |pose_z| exceeds this value in meters (e.g. 0.05 = 5 cm); useful to ignore magnet when held far from sensor')
+    parser.add_argument('--clean', action='store_true',
+                       help='Clean view: show only the drawing canvas + classifier panel (hides raw sensor graphs)')
 
     # === New mode flags ===
     parser.add_argument('--record-data', action='store_true',
@@ -3109,6 +3125,8 @@ def main():
         parser.error("--writing-max-velocity must be greater than or equal to --writing-min-velocity")
     if args.writing_min_closeness is not None and not 0.0 <= args.writing_min_closeness <= 1.0:
         parser.error("--writing-min-closeness must be between 0 and 1")
+    if args.writing_max_z is not None and args.writing_max_z <= 0:
+        parser.error("--writing-max-z must be positive (e.g. 0.05 for 5 cm)")
     if args.touchpad_sample_rate <= 0:
         parser.error("--touchpad-sample-rate must be positive")
     if not 0.0 <= args.touchpad_ink_strength <= 1.0:
@@ -3140,6 +3158,8 @@ def main():
         and not writing_min_velocity_was_explicit
     ):
         args.writing_min_velocity = 0.08
+    if args.input_source == 'serial' and not writing_min_velocity_was_explicit:
+        args.writing_min_velocity = 0.04
     display_window_was_explicit = any(
         arg == '--display-window' or arg.startswith('--display-window=')
         for arg in sys.argv[1:]
@@ -3227,10 +3247,17 @@ def main():
             if args.writing_min_closeness is not None
             else ", Z gate off"
         )
+        max_z_gate = (
+            f", |Z|<={args.writing_max_z}m"
+            if args.writing_max_z is not None
+            else ""
+        )
         print(
             "Writing Filter: "
-            f"{velocity_range}{z_gate}"
+            f"{velocity_range}{z_gate}{max_z_gate}"
         )
+    if args.clean:
+        print("View: clean (canvas + classifier only)")
     print("-" * 40)
 
     reader = MagnetometerReader(
@@ -3268,6 +3295,7 @@ def main():
         writing_min_velocity=args.writing_min_velocity,
         writing_max_velocity=args.writing_max_velocity,
         writing_min_closeness=args.writing_min_closeness,
+        writing_max_z=args.writing_max_z,
         joystick_dwell_seconds=args.joystick_dwell_seconds,
         letter_labels=args.letter_labels,
         digit_labels=args.digit_labels,
@@ -3278,6 +3306,7 @@ def main():
         output_dir=args.output_dir,
         run_id=args.run_id,
         ros=args.ros,
+        clean_view=args.clean,
     )
     reader.run(csv_filename=csv_filename, baudrate=args.baudrate)
 
