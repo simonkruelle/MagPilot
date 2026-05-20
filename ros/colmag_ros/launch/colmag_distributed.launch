@@ -1,0 +1,81 @@
+<launch>
+  <!--
+    colmag_distributed.launch — full distributed pipeline
+
+    Node topology:
+      colmag_sensor_node     reads serial → /colmag/sensor_data, /colmag/pose
+      colmag_classifier_node subscribes to /colmag/pose
+                             → /colmag/classifier, /colmag/confidence
+      colmag_joystick_node   subscribes to /colmag/pose + classifier
+                             → /colmag/command
+      colmag_robot_node      subscribes to /colmag/command
+                             → robot actions (implement execute_command())
+      rosbridge_websocket    WebSocket bridge so the Mac visualiser can
+                             subscribe/publish without a native ROS install
+
+    Usage:
+      roslaunch colmag_ros colmag_distributed.launch
+      # Override serial port:
+      roslaunch colmag_ros colmag_distributed.launch port:=/dev/ttyUSB0
+      # Skip the robot node during development:
+      roslaunch colmag_ros colmag_distributed.launch run_robot:=false
+  -->
+
+  <!-- ── Global arguments ─────────────────────────────────────────────────── -->
+  <arg name="port"         default=""       doc="Serial port (auto-detect if empty)"/>
+  <arg name="baudrate"     default="921600" doc="Serial baud rate"/>
+  <arg name="verbose"      default="false"  doc="Log every packet from sensor_node"/>
+  <arg name="run_robot"    default="true"   doc="Start the robot node"/>
+  <arg name="dry_run"      default="true"   doc="Robot node: log only, do not move"/>
+
+  <!-- ── 1. Sensor node — the ONLY node that reads the serial port ────────── -->
+  <node pkg="colmag_ros"
+        type="colmag_sensor_node.py"
+        name="colmag_sensor_node"
+        output="screen">
+    <param name="port"     value="$(arg port)"/>
+    <param name="baudrate" value="$(arg baudrate)"/>
+    <param name="verbose"  value="$(arg verbose)"/>
+  </node>
+
+  <!-- ── 2. Classifier node — swap this to use your own model ────────────── -->
+  <node pkg="colmag_ros"
+        type="colmag_classifier_node.py"
+        name="colmag_classifier_node"
+        output="screen">
+    <param name="image_size"        value="64"/>
+    <param name="projection_extent" value="0.05"/>
+    <param name="idle_seconds"      value="0.8"/>
+    <param name="min_velocity"      value="0.04"/>
+    <param name="min_ink_samples"   value="8"/>
+    <!-- Uncomment to suppress ink when magnet is farther than 5 cm: -->
+    <!-- <param name="writing_max_z"  value="0.05"/> -->
+  </node>
+
+  <!-- ── 3. Joystick node — swap this to change the interaction model ─────── -->
+  <node pkg="colmag_ros"
+        type="colmag_joystick_node.py"
+        name="colmag_joystick_node"
+        output="screen">
+    <param name="dwell_seconds"     value="1.5"/>
+    <param name="projection_extent" value="0.05"/>
+    <param name="letter_labels"     value="ABCDEFGHIJKLMNOPQRSTUVWXYZ"/>
+    <param name="digit_labels"      value="0123456789"/>
+  </node>
+
+  <!-- ── 4. Robot node — implement execute_command() here ────────────────── -->
+  <node pkg="colmag_ros"
+        type="colmag_robot_node.py"
+        name="colmag_robot_node"
+        output="screen"
+        if="$(arg run_robot)">
+    <param name="dry_run"  value="$(arg dry_run)"/>
+    <!-- <param name="robot_ip" value="192.168.1.100"/> -->
+  </node>
+
+  <!-- ── rosbridge WebSocket — lets the Mac visualiser connect over port 9090 -->
+  <include file="$(find rosbridge_server)/launch/rosbridge_websocket.launch">
+    <arg name="port" value="9090"/>
+  </include>
+
+</launch>
