@@ -12,5 +12,6 @@ catkin_package()
 
 catkin_install_python(PROGRAMS
   scripts/colmag_node.py
+  scripts/colmag_listener.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
