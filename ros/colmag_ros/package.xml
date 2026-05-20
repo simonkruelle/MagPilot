@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>colmag_ros</name>
+  <version>0.1.0</version>
+  <description>ROS 1 nodes for the COLMAG magnetometer-based gesture interface.</description>
+
+  <maintainer email="simon.kruelle@gmail.com">Simon Kruelle</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>rospy</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+</package>

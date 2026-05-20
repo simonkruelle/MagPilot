@@ -45,6 +45,61 @@ except ImportError as exc:
 else:
     SERIAL_IMPORT_ERROR = None
 
+# ROS 1 publishing support — optional, gracefully absent when ROS is not installed.
+try:
+    import rospy
+    from std_msgs.msg import String, Float64, Float64MultiArray
+    from geometry_msgs.msg import PoseStamped
+    _ROS_AVAILABLE = True
+except ImportError:
+    _ROS_AVAILABLE = False
+
+
+class _RosBridge:
+    """Thin wrapper that publishes colmag events to ROS 1 topics."""
+
+    TOPICS = {
+        'sensor_data': ('/colmag/sensor_data', 'Float64MultiArray', 5),
+        'pose':        ('/colmag/pose',         'PoseStamped',       5),
+        'command':     ('/colmag/command',      'String',            10),
+        'classifier':  ('/colmag/classifier',   'String',            5),
+        'confidence':  ('/colmag/confidence',   'Float64',           5),
+    }
+
+    def __init__(self, node_name='colmag_node'):
+        if not _ROS_AVAILABLE:
+            raise RuntimeError('rospy not available — install ROS Noetic inside the Docker container')
+        rospy.init_node(node_name, anonymous=False, disable_signals=True)
+        self._pub_sensor = rospy.Publisher('/colmag/sensor_data', Float64MultiArray, queue_size=5)
+        self._pub_pose   = rospy.Publisher('/colmag/pose',         PoseStamped,        queue_size=5)
+        self._pub_cmd    = rospy.Publisher('/colmag/command',      String,             queue_size=10)
+        self._pub_label  = rospy.Publisher('/colmag/classifier',   String,             queue_size=5)
+        self._pub_conf   = rospy.Publisher('/colmag/confidence',   Float64,            queue_size=5)
+        print('[ROS] colmag_node registered with ROS Master')
+        print('[ROS] Topics: /colmag/{sensor_data, pose, command, classifier, confidence}')
+
+    def publish_sensor(self, mag_data, pose_data):
+        msg = Float64MultiArray()
+        msg.data = list(mag_data) + list(pose_data)
+        self._pub_sensor.publish(msg)
+
+        pose_msg = PoseStamped()
+        pose_msg.header.stamp    = rospy.Time.now()
+        pose_msg.header.frame_id = 'colmag_base'
+        pose_msg.pose.position.x = float(pose_data[0])
+        pose_msg.pose.position.y = float(pose_data[1])
+        pose_msg.pose.position.z = float(pose_data[2])
+        pose_msg.pose.orientation.w = 1.0
+        self._pub_pose.publish(pose_msg)
+
+    def publish_command(self, command):
+        self._pub_cmd.publish(String(data=command))
+        print(f'[ROS] /colmag/command → "{command}"')
+
+    def publish_classifier(self, label, confidence):
+        self._pub_label.publish(String(data=label))
+        self._pub_conf.publish(Float64(data=confidence))
+
 SERIAL_EXCEPTION = serial.SerialException if serial is not None else Exception
 
 PACKET_SIZE = 218
@@ -126,6 +181,8 @@ class MagnetometerReader:
         validation_mode=False,
         output_dir=None,
         run_id=None,
+        # ROS bridge
+        ros=False,
     ):
         self.serial_port = None
         self.is_running = False
@@ -231,6 +288,7 @@ class MagnetometerReader:
         self.action_feedback_button = None
         self.action_feedback_until = 0.0
         self.touchpad_pen_enabled = True
+        self.ros_bridge = _RosBridge() if ros else None
         self.classifier_thread = None
         self.classifier_stop_event = threading.Event()
         self.classifier_input_event = threading.Event()
@@ -754,6 +812,8 @@ class MagnetometerReader:
         if event.classifier_labels is not None:
             self.set_classifier_labels(event.classifier_labels)
         if event.command:
+            if self.ros_bridge:
+                self.ros_bridge.publish_command(event.command)
             if event.command.startswith('choice:'):
                 self.confirm_classifier_candidate(event.command, event.button.name)
             elif event.command == 'canvas:reset':
@@ -1044,6 +1104,9 @@ class MagnetometerReader:
                                         # cannot stall the UI data copy.
                                         if self.csv_writer:
                                             self.csv_writer.writerow(row_data)
+
+                                        if self.ros_bridge:
+                                            self.ros_bridge.publish_sensor(mag_data, pose_data)
 
                                         self.packet_count += 1
 
@@ -2520,6 +2583,11 @@ class MagnetometerReader:
                         f"Prediction: {result_labels[top_two[0]]} "
                         f"({probabilities[top_two[0]] * 100:.1f}%)"
                     )
+                    if self.ros_bridge:
+                        self.ros_bridge.publish_classifier(
+                            result_labels[top_two[0]],
+                            float(probabilities[top_two[0]]),
+                        )
                 else:
                     prediction_text = f"Prediction: -- ({classifier_status})"
                 if len(top_two) > 1 and probabilities[top_two[1]] > 0.0:
@@ -2920,6 +2988,8 @@ def main():
     # === New mode flags ===
     parser.add_argument('--record-data', action='store_true',
                        help='Explicitly enable saving CSV/PNG/JSON session files (default: off, live view only)')
+    parser.add_argument('--ros', action='store_true',
+                       help='Publish sensor data, pose and commands to ROS 1 topics (requires rospy / ROS Noetic)')
     parser.add_argument('--dry-run', action='store_true',
                        help='Skip sensor/touchpad setup, create output layout + manifest, and exit')
     parser.add_argument('--validation-mode', action='store_true',
@@ -3128,6 +3198,7 @@ def main():
         validation_mode=args.validation_mode,
         output_dir=args.output_dir,
         run_id=args.run_id,
+        ros=args.ros,
     )
     reader.run(csv_filename=csv_filename, baudrate=args.baudrate)
 

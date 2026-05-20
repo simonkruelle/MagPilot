@@ -1,0 +1,18 @@
+<launch>
+  <!-- colmag magnetometer gesture interface
+       Usage: roslaunch colmag_ros colmag.launch [port:=/dev/ttyUSB0] [verbose:=true]
+  -->
+
+  <arg name="port"     default=""       doc="Serial port (auto-detect if empty)"/>
+  <arg name="baudrate" default="921600" doc="Serial baud rate"/>
+  <arg name="verbose"  default="false"  doc="Log every packet"/>
+
+  <node pkg="colmag_ros"
+        type="colmag_node.py"
+        name="colmag_node"
+        output="screen">
+    <param name="port"     value="$(arg port)"/>
+    <param name="baudrate" value="$(arg baudrate)"/>
+    <param name="verbose"  value="$(arg verbose)"/>
+  </node>
+</launch>
