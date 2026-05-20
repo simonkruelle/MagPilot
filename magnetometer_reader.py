@@ -93,32 +93,23 @@ class _RosBridge:
         elif _ROSLIBPY_AVAILABLE:
             self._mode = 'roslibpy'
             self._client = roslibpy.Ros(host=self._ROSBRIDGE_HOST, port=self._ROSBRIDGE_PORT)
-            self._client.run()
-            if not self._client.is_connected:
-                raise RuntimeError(
-                    f'roslibpy could not connect to rosbridge at '
-                    f'{self._ROSBRIDGE_HOST}:{self._ROSBRIDGE_PORT}.\n'
-                    f'Inside Docker run:\n'
-                    f'  roslaunch rosbridge_server rosbridge_websocket.launch'
-                )
-            for name, msg_type in [
-                ('sensor', 'std_msgs/Float64MultiArray'),
-                ('pose',   'geometry_msgs/PoseStamped'),
-                ('cmd',    'std_msgs/String'),
-                ('label',  'std_msgs/String'),
-                ('conf',   'std_msgs/Float64'),
-            ]:
-                topics = {
-                    'sensor': '/colmag/sensor_data',
-                    'pose':   '/colmag/pose',
-                    'cmd':    '/colmag/command',
-                    'label':  '/colmag/classifier',
-                    'conf':   '/colmag/confidence',
-                }
-                t = roslibpy.Topic(self._client, topics[name], msg_type)
+            # run_in_thread() connects asynchronously — app starts immediately,
+            # publishes are silently dropped until the bridge is up.
+            threading.Thread(target=self._client.run_forever, daemon=True).start()
+            topic_defs = {
+                'sensor': ('/colmag/sensor_data', 'std_msgs/Float64MultiArray'),
+                'pose':   ('/colmag/pose',         'geometry_msgs/PoseStamped'),
+                'cmd':    ('/colmag/command',      'std_msgs/String'),
+                'label':  ('/colmag/classifier',   'std_msgs/String'),
+                'conf':   ('/colmag/confidence',   'std_msgs/Float64'),
+            }
+            for name, (topic, msg_type) in topic_defs.items():
+                t = roslibpy.Topic(self._client, topic, msg_type)
                 t.advertise()
                 self._pubs[name] = t
-            print(f'[ROS] roslibpy connected to rosbridge at {self._ROSBRIDGE_HOST}:{self._ROSBRIDGE_PORT}')
+            print(f'[ROS] roslibpy connecting to rosbridge at {self._ROSBRIDGE_HOST}:{self._ROSBRIDGE_PORT}...')
+            print(f'[ROS] Make sure Docker container has rosbridge running:')
+            print(f'[ROS]   roslaunch rosbridge_server rosbridge_websocket.launch')
 
         else:
             raise RuntimeError(
@@ -141,6 +132,8 @@ class _RosBridge:
             self._pubs[name].publish(roslibpy.Message(data))
 
     def publish_sensor(self, mag_data, pose_data):
+        if not self._ros_connected():
+            return
         values = list(mag_data) + list(pose_data)
         if self._mode == 'rospy':
             msg = Float64MultiArray()
@@ -164,7 +157,12 @@ class _RosBridge:
                 },
             }))
 
+    def _ros_connected(self):
+        return self._mode == 'rospy' or (self._client and self._client.is_connected)
+
     def publish_command(self, command):
+        if not self._ros_connected():
+            return
         if self._mode == 'rospy':
             self._pub_cmd.publish(String(data=command))
         else:
@@ -172,6 +170,8 @@ class _RosBridge:
         print(f'[ROS] /colmag/command → "{command}"')
 
     def publish_classifier(self, label, confidence):
+        if not self._ros_connected():
+            return
         if self._mode == 'rospy':
             self._pub_label.publish(String(data=label))
             self._pub_conf.publish(Float64(data=confidence))
@@ -3008,7 +3008,7 @@ def main():
                        help='Calibration JSON from calibrate_touchpad_magnetics.py for touchpad synthetic magnetics')
     parser.add_argument('--touchpad-speed-log', type=str, default=None,
                        help='Optional CSV path for touchpad speed calibration samples')
-    parser.add_argument('--touchpad-speed-report-interval', type=float, default=1.0,
+    parser.add_argument('--touchpad-speed-report-interval', type=float, default=0.0,
                        help='Seconds between touchpad speed calibration printouts; use 0 to disable (default: 1.0)')
     parser.add_argument('--display-window', type=int, default=2000,
                        help='Recent samples to show in live plots (default: 2000 serial, 240 touchpad). '
