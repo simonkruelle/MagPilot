@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y \
     ros-noetic-std-msgs \
     ros-noetic-geometry-msgs \
     ros-noetic-sensor-msgs \
+    ros-noetic-rosbridge-suite \
     && rm -rf /var/lib/apt/lists/*
 
 # Python deps for the colmag project (no matplotlib/GUI in the node itself)

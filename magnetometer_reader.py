@@ -45,60 +45,139 @@ except ImportError as exc:
 else:
     SERIAL_IMPORT_ERROR = None
 
-# ROS 1 publishing support — optional, gracefully absent when ROS is not installed.
+# ROS 1 publishing support.
+# Inside Docker/ROS: uses native rospy.
+# On Mac (no ROS): falls back to roslibpy over rosbridge WebSocket.
 try:
     import rospy
     from std_msgs.msg import String, Float64, Float64MultiArray
     from geometry_msgs.msg import PoseStamped
-    _ROS_AVAILABLE = True
+    _ROSPY_AVAILABLE = True
 except ImportError:
-    _ROS_AVAILABLE = False
+    _ROSPY_AVAILABLE = False
+
+try:
+    import roslibpy
+    _ROSLIBPY_AVAILABLE = True
+except ImportError:
+    _ROSLIBPY_AVAILABLE = False
 
 
 class _RosBridge:
-    """Thin wrapper that publishes colmag events to ROS 1 topics."""
+    """Publishes colmag events to ROS 1 topics.
 
-    TOPICS = {
-        'sensor_data': ('/colmag/sensor_data', 'Float64MultiArray', 5),
-        'pose':        ('/colmag/pose',         'PoseStamped',       5),
-        'command':     ('/colmag/command',      'String',            10),
-        'classifier':  ('/colmag/classifier',   'String',            5),
-        'confidence':  ('/colmag/confidence',   'Float64',           5),
-    }
+    Uses native rospy when available (inside Docker/ROS environment).
+    Falls back to roslibpy WebSocket bridge when running on Mac without ROS.
+    The rosbridge WebSocket server must be running in the Docker container:
+        roslaunch rosbridge_server rosbridge_websocket.launch
+    """
+
+    _ROSBRIDGE_HOST = 'localhost'
+    _ROSBRIDGE_PORT = 9090
 
     def __init__(self, node_name='colmag_node'):
-        if not _ROS_AVAILABLE:
-            raise RuntimeError('rospy not available — install ROS Noetic inside the Docker container')
-        rospy.init_node(node_name, anonymous=False, disable_signals=True)
-        self._pub_sensor = rospy.Publisher('/colmag/sensor_data', Float64MultiArray, queue_size=5)
-        self._pub_pose   = rospy.Publisher('/colmag/pose',         PoseStamped,        queue_size=5)
-        self._pub_cmd    = rospy.Publisher('/colmag/command',      String,             queue_size=10)
-        self._pub_label  = rospy.Publisher('/colmag/classifier',   String,             queue_size=5)
-        self._pub_conf   = rospy.Publisher('/colmag/confidence',   Float64,            queue_size=5)
-        print('[ROS] colmag_node registered with ROS Master')
+        self._mode = None
+        self._client = None  # roslibpy client
+        self._pubs = {}       # roslibpy publishers
+
+        if _ROSPY_AVAILABLE:
+            self._mode = 'rospy'
+            rospy.init_node(node_name, anonymous=False, disable_signals=True)
+            self._pub_sensor = rospy.Publisher('/colmag/sensor_data', Float64MultiArray, queue_size=5)
+            self._pub_pose   = rospy.Publisher('/colmag/pose',         PoseStamped,        queue_size=5)
+            self._pub_cmd    = rospy.Publisher('/colmag/command',      String,             queue_size=10)
+            self._pub_label  = rospy.Publisher('/colmag/classifier',   String,             queue_size=5)
+            self._pub_conf   = rospy.Publisher('/colmag/confidence',   Float64,            queue_size=5)
+            print('[ROS] native rospy — node registered with ROS Master')
+
+        elif _ROSLIBPY_AVAILABLE:
+            self._mode = 'roslibpy'
+            self._client = roslibpy.Ros(host=self._ROSBRIDGE_HOST, port=self._ROSBRIDGE_PORT)
+            self._client.run()
+            if not self._client.is_connected:
+                raise RuntimeError(
+                    f'roslibpy could not connect to rosbridge at '
+                    f'{self._ROSBRIDGE_HOST}:{self._ROSBRIDGE_PORT}.\n'
+                    f'Inside Docker run:\n'
+                    f'  roslaunch rosbridge_server rosbridge_websocket.launch'
+                )
+            for name, msg_type in [
+                ('sensor', 'std_msgs/Float64MultiArray'),
+                ('pose',   'geometry_msgs/PoseStamped'),
+                ('cmd',    'std_msgs/String'),
+                ('label',  'std_msgs/String'),
+                ('conf',   'std_msgs/Float64'),
+            ]:
+                topics = {
+                    'sensor': '/colmag/sensor_data',
+                    'pose':   '/colmag/pose',
+                    'cmd':    '/colmag/command',
+                    'label':  '/colmag/classifier',
+                    'conf':   '/colmag/confidence',
+                }
+                t = roslibpy.Topic(self._client, topics[name], msg_type)
+                t.advertise()
+                self._pubs[name] = t
+            print(f'[ROS] roslibpy connected to rosbridge at {self._ROSBRIDGE_HOST}:{self._ROSBRIDGE_PORT}')
+
+        else:
+            raise RuntimeError(
+                'Neither rospy nor roslibpy is available.\n'
+                'Run:  pip install roslibpy'
+            )
+
         print('[ROS] Topics: /colmag/{sensor_data, pose, command, classifier, confidence}')
 
-    def publish_sensor(self, mag_data, pose_data):
-        msg = Float64MultiArray()
-        msg.data = list(mag_data) + list(pose_data)
-        self._pub_sensor.publish(msg)
+    def _pub(self, name, msg_type, data):
+        if self._mode == 'rospy':
+            {
+                'sensor': self._pub_sensor,
+                'pose':   self._pub_pose,
+                'cmd':    self._pub_cmd,
+                'label':  self._pub_label,
+                'conf':   self._pub_conf,
+            }[name].publish(data)
+        else:
+            self._pubs[name].publish(roslibpy.Message(data))
 
-        pose_msg = PoseStamped()
-        pose_msg.header.stamp    = rospy.Time.now()
-        pose_msg.header.frame_id = 'colmag_base'
-        pose_msg.pose.position.x = float(pose_data[0])
-        pose_msg.pose.position.y = float(pose_data[1])
-        pose_msg.pose.position.z = float(pose_data[2])
-        pose_msg.pose.orientation.w = 1.0
-        self._pub_pose.publish(pose_msg)
+    def publish_sensor(self, mag_data, pose_data):
+        values = list(mag_data) + list(pose_data)
+        if self._mode == 'rospy':
+            msg = Float64MultiArray()
+            msg.data = values
+            self._pub_sensor.publish(msg)
+            pose_msg = PoseStamped()
+            pose_msg.header.stamp    = rospy.Time.now()
+            pose_msg.header.frame_id = 'colmag_base'
+            pose_msg.pose.position.x = float(pose_data[0])
+            pose_msg.pose.position.y = float(pose_data[1])
+            pose_msg.pose.position.z = float(pose_data[2])
+            pose_msg.pose.orientation.w = 1.0
+            self._pub_pose.publish(pose_msg)
+        else:
+            self._pubs['sensor'].publish(roslibpy.Message({'data': values}))
+            self._pubs['pose'].publish(roslibpy.Message({
+                'header': {'frame_id': 'colmag_base'},
+                'pose': {
+                    'position': {'x': float(pose_data[0]), 'y': float(pose_data[1]), 'z': float(pose_data[2])},
+                    'orientation': {'w': 1.0, 'x': 0.0, 'y': 0.0, 'z': 0.0},
+                },
+            }))
 
     def publish_command(self, command):
-        self._pub_cmd.publish(String(data=command))
+        if self._mode == 'rospy':
+            self._pub_cmd.publish(String(data=command))
+        else:
+            self._pubs['cmd'].publish(roslibpy.Message({'data': command}))
         print(f'[ROS] /colmag/command → "{command}"')
 
     def publish_classifier(self, label, confidence):
-        self._pub_label.publish(String(data=label))
-        self._pub_conf.publish(Float64(data=confidence))
+        if self._mode == 'rospy':
+            self._pub_label.publish(String(data=label))
+            self._pub_conf.publish(Float64(data=confidence))
+        else:
+            self._pubs['label'].publish(roslibpy.Message({'data': label}))
+            self._pubs['conf'].publish(roslibpy.Message({'data': confidence}))
 
 SERIAL_EXCEPTION = serial.SerialException if serial is not None else Exception
 
