@@ -57,10 +57,10 @@ class ColmagJoystickNode:
         rospy.init_node('colmag_joystick_node', anonymous=False)
 
         # ── Parameters ────────────────────────────────────────────────────────
-        dwell_seconds  = rospy.get_param('~dwell_seconds',     1.5)
-        extent         = rospy.get_param('~projection_extent', 0.05)
-        letter_labels  = rospy.get_param('~letter_labels',     'ABCDEFGHIJKLMNOPQRSTUVWXYZ')
-        digit_labels   = rospy.get_param('~digit_labels',      '0123456789')
+        dwell_seconds  = float(rospy.get_param('~dwell_seconds',     1.5))
+        extent         = float(rospy.get_param('~projection_extent', 0.05))
+        letter_labels  = str(rospy.get_param('~letter_labels',     'ABCDEFGHIJKLMNOPQRSTUVWXYZ'))
+        digit_labels   = str(rospy.get_param('~digit_labels',      '0123456789'))
 
         # ── Virtual joystick state machine ────────────────────────────────────
         if _COLMAG_AVAILABLE:

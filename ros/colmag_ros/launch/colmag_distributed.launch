@@ -59,8 +59,8 @@
         output="screen">
     <param name="dwell_seconds"     value="1.5"/>
     <param name="projection_extent" value="0.05"/>
-    <param name="letter_labels"     value="ABCDEFGHIJKLMNOPQRSTUVWXYZ"/>
-    <param name="digit_labels"      value="0123456789"/>
+    <param name="letter_labels"     value="ABCDEFGHIJKLMNOPQRSTUVWXYZ" type="str"/>
+    <param name="digit_labels"      value="0123456789"                  type="str"/>
   </node>
 
   <!-- ── 4. Robot node — implement execute_command() here ────────────────── -->
