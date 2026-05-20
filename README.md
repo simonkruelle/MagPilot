@@ -473,104 +473,148 @@ This project includes a Python program for reading magnetometer data from a seri
 
 ### Files
 
-- `magnetometer_reader.py` - Main program for reading and processing magnetometer data
-- `csv_visualizer.py` - Script for visualizing recorded CSV data with multiple plot types
-- `test_components.py` - Test script to verify program components
-- `requirements.txt` - Python dependencies
+- `magnetometer_reader.py` — Main program for reading, visualizing, and classifying magnetometer data
+- `csv_visualizer.py` — Script for visualizing recorded CSV data with multiple plot types
+- `test_components.py` — Test script to verify program components
+- `requirements.txt` — Python dependencies
+- `ros/` — ROS 1 Noetic Docker setup and `colmag_ros` catkin package (see ROS section below)
 
 ### Setup
 
-1. Activate your conda environment:
+1. Create and activate a Python virtual environment:
    ```bash
-   conda activate simon
+   python3 -m venv venv
+   source venv/bin/activate
    ```
 
-2. Install dependencies (if not already installed):
+2. Install dependencies:
    ```bash
    pip install -r requirements.txt
+   ```
+
+   For ROS WebSocket publishing on Mac (without a native ROS install):
+   ```bash
+   pip install roslibpy
    ```
 
 ### Running the Program
 
 1. Connect your magnetometer hardware to a serial port
-2. Run the program with optional parameters:
+2. Run the program (recommended lab command):
    ```bash
-   python magnetometer_reader.py --sensor 5 --csv experiment1.csv
+   python magnetometer_reader.py --clean --writing-max-z 0.05
    ```
 
 #### Command Line Options
 
+**Input / serial**
+
 - `--sensor, -s`: Sensor number to plot (1-16, default: 1)
 - `--baudrate, -b`: Serial baudrate (default: 921600)
+- `--input-source`: `serial` for the real sensor or `touchpad` for the Mac trackpad simulator (default: serial)
+
+**CSV / output**
+
 - `--csv, -c`: Explicit continuous raw CSV output filename (default: off unless `--record-data`)
 - `--no-csv`: Disable CSV logging for maximum live read rate
-- `--input-source`: `serial` for the real sensor or `touchpad` for synthetic rows (default: serial)
-- `--touchpad-ink-mode`: `velocity` draws from movement like the magnet, `pen` draws only while clicking/holding space (default: velocity)
-- `--touchpad-magnetic-calibration`: Calibration JSON from `calibrate_touchpad_magnetics.py` for more realistic synthetic touchpad magnetic fields
+
+**Touchpad simulator**
+
+- `--touchpad-ink-mode`: `velocity` draws from movement (default), `pen` draws only while clicking/holding space
+- `--touchpad-magnetic-calibration`: Calibration JSON from `calibrate_touchpad_magnetics.py` for realistic synthetic fields
+- `--touchpad-sample-rate`: Samples per second (default: 100)
+- `--touchpad-ink-strength`: 0.0–1.0 opacity of touchpad ink (default: 1.0)
+
+**Projection image**
+
 - `--trail-length`: Number of recent pose samples used for the 3D trail and 2D character image (default: 250)
 - `--image-size`: Projection image size in pixels (default: 64)
 - `--image-dir`: Directory for projected character PNGs (default: digit_images)
 - `--z-close-mode`: How Z maps to stroke darkness; `max` means larger Z is darker (default)
+
+**Classifier**
+
 - `--no-classifier`: Run without loading the real-time EasyOCR character classifier
 - `--classifier-gpu`: Use GPU for EasyOCR if available
-- `--classifier-labels`: Character set for EasyOCR recognition: `alphanumeric`, `digits`, `letters`, or a custom subset such as `ABCXLRUD0123` (default: alphanumeric). For lab recordings, use the full union of every character you may write so the confidence chart is not spread over unused labels.
+- `--classifier-labels`: Character set: `alphanumeric`, `digits`, `letters`, or a custom subset such as `ABCXLRUD0123` (default: alphanumeric)
 - `--classifier-interval`: Minimum seconds between background OCR requests (default: 0.75)
-- `--classifier-mode`: Run live OCR after a writing pause (`on-idle`) or continuously at `--classifier-interval` (default: on-idle)
-- `--classifier-idle-seconds`: Writing pause duration before OCR runs in `on-idle` mode (default: 0.8)
+- `--classifier-mode`: `on-idle` runs OCR after a writing pause; `continuous` runs at `--classifier-interval` (default: on-idle)
+- `--classifier-idle-seconds`: Writing pause before OCR fires in `on-idle` mode (default: 0.8)
 - `--classifier-min-ink-samples`: Minimum ink samples required before live OCR can run (default: 8)
-- `--letter-labels`: Label set used after holding virtual **L** for letter mode (default: letters)
-- `--digit-labels`: Label set used after holding virtual **R** for number mode (default: digits)
+- `--letter-labels`: Label set for letter mode via virtual joystick **L** (default: letters)
+- `--digit-labels`: Label set for digit mode via virtual joystick **R** (default: digits)
 - `--joystick-dwell-seconds`: Seconds the cursor must dwell inside a virtual button to press it (default: 1.5)
-- `--no-writing-filter`: Disable writing/hover filtering and draw every pose sample into the OCR image
-- `--writing-min-velocity`: Minimum XY pose velocity for a sample to count as writing (default: 0.01)
-- `--writing-max-velocity`: Optional maximum XY pose velocity; faster moves are treated as repositioning/pen-up (default: disabled)
-- `--writing-min-closeness`: Optional normalized Z closeness gate for board/contact mode, 0..1 (default: disabled for air-writing)
 
-#### New Mode Flags (Lab Preparation)
+**Writing filter**
 
-These flags control what happens when you run the program:
+- `--no-writing-filter`: Draw every pose sample (no velocity/Z gating)
+- `--writing-min-velocity`: Minimum XY pose velocity to count as writing. Auto-set to **0.04** for serial (real sensor) and **0.08** for touchpad if not explicitly passed
+- `--writing-max-velocity`: Optional upper velocity cap; faster moves become pen-up (default: disabled)
+- `--writing-min-closeness`: Normalized Z closeness gate 0..1 for contact mode (default: disabled)
+- `--writing-max-z`: **Do not draw when |pose_z| exceeds this value in meters.** E.g. `0.05` suppresses ink when the magnet is more than 5 cm from the sensor — essential for clean air-writing with the real sensor
 
-- `--record-data`: Explicitly enable saving a continuous raw CSV plus per-session CSV/PNG/JSON artifacts. Without this flag, the program runs in **live view only** — sessions can be started/stopped for live classification, but no files are written to disk unless `--csv` is explicitly passed.
-- `--dry-run`: Skip sensor and touchpad hardware setup entirely. Creates `output_dir`, `raw/`, `samples/`, and a placeholder `manifest.json`, then exits. Perfect for verifying paths and permissions before connecting hardware.
-- `--validation-mode`: Connect to the real sensor but do NOT save any files. Prints packet health stats (packet rate, bad packet ratio) for 60 seconds. Run this at the start of every lab session to verify the sensor link is healthy.
-- `--output-dir`: Base directory for recorded session data. Defaults to `data/lab_YYYY-MM-DD/` using today's date, so each lab day gets its own folder automatically.
-- `--run-id`: Optional prefix for session filenames (e.g., `run_001`). Useful when recording multiple runs in the same lab session.
+**View**
+
+- `--clean`: **Clean view** — show only the drawing canvas + classifier panel; hides raw Bx/By/Bz traces and 3D trajectory graph. Reduces CPU load on the real sensor setup
+
+**ROS**
+
+- `--ros`: Publish sensor data, pose, and OCR results to ROS 1 topics. Uses native `rospy` inside Docker, or `roslibpy` WebSocket bridge when running on Mac
+
+**Mode flags**
+
+- `--record-data`: Explicitly enable saving CSV/PNG/JSON session files (default: live view only)
+- `--dry-run`: Skip hardware setup, create output layout + manifest, then exit
+- `--validation-mode`: Connect to sensor, print packet health stats for 60 s, no files saved
+- `--output-dir`: Base output directory (default: `data/lab_YYYY-MM-DD/`)
+- `--run-id`: Optional prefix for session filenames (e.g. `run_001`)
 
 **Mode selection rules:**
+
 | Mode Flag | Sensor Connects? | Files Saved? | Use Case |
 |-----------|-----------------|-------------|----------|
-| (none) | ✓ | ✗, unless `--csv` is explicit | Live view, test classifier, practice |
-| `--record-data` | ✓ | ✓ | Real data capture for training/analysis |
-| `--dry-run` | ✗ | layout + manifest only | Verify output paths and permissions |
-| `--validation-mode` | ✓ | ✗ | Check sensor health before recording |
+| (none) | ✓ | ✗ (unless `--csv`) | Live view, test classifier, practice |
+| `--record-data` | ✓ | ✓ | Real data capture for training |
+| `--dry-run` | ✗ | layout + manifest only | Verify paths before hardware |
+| `--validation-mode` | ✓ | ✗ | Check sensor health |
 
 #### Session Recording Controls
 
-The program supports recording separate character drawing sessions:
+**Serial / real-sensor mode:**
 
-- **0-9**: Start recording that digit
-- **A-Z**: Start recording that letter (lowercase **s** and **q** are reserved for controls; uppercase **S** and **Q** record letters)
-- **-**: Start a `control_blank` recording
-- **=**: Start a `control_still` recording
-- **s**: Stop current recording session and save CSV + projected PNG
-- **q**: Quit program
+| Key | Action |
+|-----|--------|
+| `0` – `9` | Start recording that digit |
+| `A` – `Z` | Start recording that letter |
+| `-` | Start `control_blank` (no magnet, stationary) |
+| `=` | Start `control_still` (magnet held still) |
+| `s` | Stop & save current session |
+| `q` | Quit |
 
-With `--record-data`, each session creates a matched CSV, grayscale PNG, and JSON sidecar under `data/lab_YYYY-MM-DD/samples/<exact_label>/`. The run-level `manifest.json` records paths, settings, command line, raw CSV status, and git metadata.
+**Touchpad simulator mode (additional controls):**
+
+| Key | Action |
+|-----|--------|
+| `A` – `Z` (excl. p/s/q) | Start recording that letter |
+| `p` / `s` / `q` | Record letter **P** / **S** / **Q** |
+| `Shift+P` | Toggle pen on/off |
+| `Shift+S` | Stop & save current session |
+| `Shift+Q` | Quit |
+| `Shift+L` | Switch to letters OCR mode |
+| `Shift+D` | Switch to digits OCR mode |
+| `Shift+R` | Reset canvas |
+| Space / click | Draw (pen mode) |
+
+With `--record-data`, each session creates a matched CSV, grayscale PNG, and JSON sidecar under `data/lab_YYYY-MM-DD/samples/<label>/`. The run-level `manifest.json` records paths, settings, command line, and git metadata.
 
 #### Examples
 
 ```bash
-# Plot sensor 3 with default settings
-python magnetometer_reader.py -s 3
+# Recommended lab command: clean view, suppress ink when magnet > 5 cm away
+python magnetometer_reader.py --clean --writing-max-z 0.05
 
-# Use custom baudrate and output file
-python magnetometer_reader.py --sensor 7 --baudrate 115200 --csv test_data.csv
-
-# Default settings (plots sensor 1)
-python magnetometer_reader.py
-
-# Dry run — test the data layout without any hardware
-python magnetometer_reader.py --dry-run --record-data --run-id dry_test
+# Same but also publish classifier results to ROS
+python magnetometer_reader.py --clean --writing-max-z 0.05 --ros
 
 # Validation mode — check sensor health, no files saved
 python magnetometer_reader.py --validation-mode
@@ -578,11 +622,14 @@ python magnetometer_reader.py --validation-mode
 # Record data with structured output (auto date-based directory)
 python magnetometer_reader.py --record-data --output-dir data/lab_2026-05-20 --run-id run_001
 
-# Record with touchpad simulator for offline practice
-python magnetometer_reader.py --input-source touchpad --record-data --output-dir data/practice_2026-05-18
+# Record using the touchpad simulator for offline practice
+python magnetometer_reader.py --input-source touchpad --record-data --output-dir data/practice_2026-05-20
 
 # Touchpad with click-to-write instead of velocity-to-write
 python magnetometer_reader.py --input-source touchpad --touchpad-ink-mode pen
+
+# Dry run — test the data layout without any hardware
+python magnetometer_reader.py --dry-run --record-data --run-id dry_test
 ```
 
 ### Session Recording Workflow
@@ -592,6 +639,8 @@ python magnetometer_reader.py --input-source touchpad --touchpad-ink-mode pen
 ```bash
 python magnetometer_reader.py \
   --input-source serial \
+  --clean \
+  --writing-max-z 0.05 \
   --record-data \
   --output-dir data/lab_$(date +%Y-%m-%d)/ \
   --run-id run_001
@@ -602,7 +651,7 @@ python magnetometer_reader.py \
 | Key          | Action                                    |
 |--------------|-------------------------------------------|
 | `0` – `9`   | Start recording that digit                |
-| `A` – `Z`   | Start recording that letter (a–z also works; `s` and `q` are reserved) |
+| `A` – `Z`   | Start recording that letter               |
 | `-`          | Start `control_blank` (no magnet, stationary) |
 | `=`          | Start `control_still` (magnet held still) |
 | `s`          | Stop & save current session               |
@@ -695,6 +744,72 @@ python magnetometer_reader.py \
 
 This calibrates per-channel scale and offset — not a full physics model, but makes touchpad
 magnetic rows much more realistic for CSV saving and downstream pipeline testing.
+
+## ROS 1 Integration
+
+The project publishes live sensor data and OCR results to ROS 1 Noetic topics. This allows a robot (or any ROS node) to listen for gesture commands without needing to run the Python visualizer itself.
+
+### Topics published
+
+| Topic | Type | Content |
+|-------|------|---------|
+| `/colmag/command` | `std_msgs/String` | UI commands (`canvas:reset`, `letter_detection`, `number_detection`, `choice:0` …) |
+| `/colmag/classifier` | `std_msgs/String` | Top predicted character label |
+| `/colmag/confidence` | `std_msgs/Float64` | Confidence of top prediction (0–1) |
+| `/colmag/sensor_data` | `std_msgs/Float64MultiArray` | Raw Bx/By/Bz (48 floats) + pose (6 floats) |
+| `/colmag/pose` | `geometry_msgs/PoseStamped` | Computed XYZ position of the magnet |
+
+### Running inside Docker (ROS Noetic — native rospy)
+
+A Docker setup is provided under `ros/` for running a standalone ROS node on any machine (including Apple Silicon).
+
+```bash
+cd ros/
+
+# First-time setup — builds the Docker image and catkin workspace
+bash docker_setup.sh
+
+# Open a shell in the container
+bash docker_connect.sh
+
+# Inside the container — start rosbridge + listen for commands
+roslaunch rosbridge_server rosbridge_websocket.launch &
+rosrun colmag_ros colmag_listener.py
+```
+
+### Running on Mac (roslibpy WebSocket bridge)
+
+If you have no local ROS install, `magnetometer_reader.py` automatically falls back to **roslibpy**, which communicates with the Docker container over a WebSocket:
+
+```bash
+pip install roslibpy
+
+# In the Docker container (one terminal):
+roslaunch rosbridge_server rosbridge_websocket.launch
+
+# On the Mac (another terminal):
+python magnetometer_reader.py --clean --writing-max-z 0.05 --ros
+```
+
+The Mac process connects to `localhost:9090` (the rosbridge port, forwarded by OrbStack/Docker). All five topics become available inside the container immediately.
+
+### Testing the listener
+
+`ros/colmag_ros/scripts/colmag_listener.py` is a minimal test subscriber. Run it inside the container to verify the full pipeline:
+
+```bash
+rosrun colmag_ros colmag_listener.py
+```
+
+It prints a human-readable message whenever a command arrives, e.g.:
+
+```
+[INFO] *** CONFIRMED: "A" (94.3%) — robot would execute this command ***
+[INFO] Mode switched: letters OCR
+[INFO] Canvas reset
+```
+
+---
 
 ## Data Processing Pipeline
 
