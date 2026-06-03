@@ -1,0 +1,15 @@
+.git/
+.pytest_cache/
+__pycache__/
+*.pyc
+
+data/
+digit_images/
+outputs/
+
+venv/
+.venv/
+letter_recog_arm/
+
+ClassesSlides/
+*.pdf

@@ -475,27 +475,62 @@ This project includes a Python program for reading magnetometer data from a seri
 
 - `magnetometer_reader.py` — Main program for reading, visualizing, and classifying magnetometer data
 - `csv_visualizer.py` — Script for visualizing recorded CSV data with multiple plot types
+- `install_linux.sh` — Linux bootstrap script for system packages, virtualenv, and Python dependencies
 - `test_components.py` — Test script to verify program components
 - `requirements.txt` — Python dependencies
 - `ros/` — ROS 1 Noetic Docker setup and `colmag_ros` catkin package (see ROS section below)
 
-### Setup
+### Linux PC Setup
 
-1. Create and activate a Python virtual environment:
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate
-   ```
+For a fresh Ubuntu/Linux workstation, use the helper script from the repository root:
 
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+```bash
+# Optional but recommended on a fresh apt-based Linux install
+bash install_linux.sh --system-deps
 
-   For ROS WebSocket publishing on Mac (without a native ROS install):
-   ```bash
-   pip install roslibpy
-   ```
+# Later runs can skip apt and only refresh the Python environment
+bash install_linux.sh
+
+source venv/bin/activate
+```
+
+The script creates `venv/`, installs `requirements.txt`, and prints the smoke-test commands. If you prefer manual setup:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  build-essential git libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 \
+  python3 python3-dev python3-pip python3-tk python3-venv
+
+python3 -m venv venv
+source venv/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -r requirements.txt
+```
+
+Run these hardware-free checks before connecting the sensor:
+
+```bash
+python -m py_compile magnetometer_reader.py colmag/interaction.py
+python test_virtual_joystick.py
+python test_writing_filter.py
+python magnetometer_reader.py --input-source touchpad --no-csv --classifier-labels ABCXLRUD0123
+```
+
+The first EasyOCR run may download pretrained model weights. That is expected.
+
+### macOS Setup
+
+The same virtual-environment flow works on macOS:
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -r requirements.txt
+```
+
+For ROS WebSocket publishing on Mac, keep using the provided Docker/OrbStack ROS container and run the visualizer on macOS with `--ros`.
 
 ### Running the Program
 
@@ -511,7 +546,7 @@ This project includes a Python program for reading magnetometer data from a seri
 
 - `--sensor, -s`: Sensor number to plot (1-16, default: 1)
 - `--baudrate, -b`: Serial baudrate (default: 921600)
-- `--input-source`: `serial` for the real sensor or `touchpad` for the Mac trackpad simulator (default: serial)
+- `--input-source`: `serial` for the real sensor or `touchpad`/`trackpad` for the Mac trackpad simulator (default: serial)
 
 **CSV / output**
 
@@ -537,12 +572,13 @@ This project includes a Python program for reading magnetometer data from a seri
 - `--no-classifier`: Run without loading the real-time EasyOCR character classifier
 - `--classifier-gpu`: Use GPU for EasyOCR if available
 - `--classifier-labels`: Character set: `alphanumeric`, `digits`, `letters`, or a custom subset such as `ABCXLRUD0123` (default: alphanumeric)
-- `--classifier-interval`: Minimum seconds between background OCR requests (default: 0.75)
-- `--classifier-mode`: `on-idle` runs OCR after a writing pause; `continuous` runs at `--classifier-interval` (default: on-idle)
+- `--load-classifier-at-start` / `--lazy-classifier`: Load EasyOCR during startup by default, or defer it until first use
+- `--classifier-interval`: Minimum seconds between background OCR requests (default: 0.35)
+- `--classifier-mode`: `continuous` runs at `--classifier-interval`; `on-idle` runs OCR after a writing pause (default: continuous)
 - `--classifier-idle-seconds`: Writing pause before OCR fires in `on-idle` mode (default: 0.8)
 - `--classifier-min-ink-samples`: Minimum ink samples required before live OCR can run (default: 8)
-- `--letter-labels`: Label set for letter mode via virtual joystick **L** (default: letters)
-- `--digit-labels`: Label set for digit mode via virtual joystick **R** (default: digits)
+- `--letter-labels`: Label set for letter mode via virtual joystick **Letters** (default: letters)
+- `--digit-labels`: Label set for digit mode via virtual joystick **Digits** (default: digits)
 - `--joystick-dwell-seconds`: Seconds the cursor must dwell inside a virtual button to press it (default: 1.5)
 
 **Writing filter**
@@ -555,7 +591,8 @@ This project includes a Python program for reading magnetometer data from a seri
 
 **View**
 
-- `--clean`: **Clean view** — show only the drawing canvas + classifier panel; hides raw Bx/By/Bz traces and 3D trajectory graph. Reduces CPU load on the real sensor setup
+- `--clean`: **Clean view** — show only the drawing canvas + classifier panel; hides raw Bx/By/Bz traces and 3D trajectory graph. Reduces CPU load on the real sensor setup. This is enabled automatically for touchpad/trackpad input.
+- `--full-view`: Force the raw Bx/By/Bz traces and 3D trajectory graph to show even in touchpad/trackpad mode.
 
 **ROS**
 
@@ -601,8 +638,9 @@ This project includes a Python program for reading magnetometer data from a seri
 | `Shift+S` | Stop & save current session |
 | `Shift+Q` | Quit |
 | `Shift+L` | Switch to letters OCR mode |
-| `Shift+D` | Switch to digits OCR mode |
-| `Shift+R` | Reset canvas |
+| `Shift+R` | Switch to digits OCR mode |
+| `Shift+U` | Switch to signs mode |
+| `Shift+D` | Reset canvas |
 | Space / click | Draw (pen mode) |
 
 With `--record-data`, each session creates a matched CSV, grayscale PNG, and JSON sidecar under `data/lab_YYYY-MM-DD/samples/<label>/`. The run-level `manifest.json` records paths, settings, command line, and git metadata.
@@ -624,6 +662,9 @@ python magnetometer_reader.py --record-data --output-dir data/lab_2026-05-20 --r
 
 # Record using the touchpad simulator for offline practice
 python magnetometer_reader.py --input-source touchpad --record-data --output-dir data/practice_2026-05-20
+
+# `trackpad` is accepted as an alias for `touchpad`; touchpad/trackpad defaults to clean view
+python magnetometer_reader.py --input-source trackpad
 
 # Touchpad with click-to-write instead of velocity-to-write
 python magnetometer_reader.py --input-source touchpad --touchpad-ink-mode pen
@@ -753,7 +794,7 @@ The project publishes live sensor data and OCR results to ROS 1 Noetic topics. T
 
 | Topic | Type | Content |
 |-------|------|---------|
-| `/colmag/command` | `std_msgs/String` | UI commands (`canvas:reset`, `letter_detection`, `number_detection`, `choice:0` …) |
+| `/colmag/command` | `std_msgs/String` | UI commands (`canvas:reset`, `letter_detection`, `number_detection`, `symbol_detection`, `choice:0` …) |
 | `/colmag/classifier` | `std_msgs/String` | Top predicted character label |
 | `/colmag/confidence` | `std_msgs/Float64` | Confidence of top prediction (0–1) |
 | `/colmag/sensor_data` | `std_msgs/Float64MultiArray` | Raw Bx/By/Bz (48 floats) + pose (6 floats) |
@@ -762,20 +803,62 @@ The project publishes live sensor data and OCR results to ROS 1 Noetic topics. T
 ### Running inside Docker (ROS Noetic — native rospy)
 
 A Docker setup is provided under `ros/` for running a standalone ROS node on any machine (including Apple Silicon).
+The image installs the same project-level Python dependencies from `requirements.txt`, so the ROS nodes and the full classifier stack are available inside the container after a rebuild.
 
 ```bash
-cd ros/
-
 # First-time setup — builds the Docker image and catkin workspace
-bash docker_setup.sh
+bash ros/docker_setup.sh
 
 # Open a shell in the container
-bash docker_connect.sh
+bash ros/docker_connect.sh
 
 # Inside the container — start rosbridge + listen for commands
 roslaunch rosbridge_server rosbridge_websocket.launch &
 rosrun colmag_ros colmag_listener.py
 ```
+
+If you already have the `colmag_ros` OrbStack container running, it is not changed until you rebuild it. To temporarily add the Python dependencies into that running container without rebuilding the image:
+
+```bash
+docker exec colmag_ros python3 -m pip install -r /colmag/requirements.txt
+```
+
+For cross-machine builds, `ros/docker_setup.sh` uses Docker's host platform by default. Override only when needed:
+
+```bash
+DOCKER_PLATFORM=linux/arm64 bash ros/docker_setup.sh
+```
+
+### Linux PC + Gazebo / Robot Simulation
+
+The `colmag_ros` Docker image is meant for ROS nodes and rosbridge. It does **not** vendor a Gazebo robot simulation. For Gazebo work on a Linux PC, the cleanest path is:
+
+1. Install or clone the robot simulation stack separately, for example a Franka/Gazebo/MoveIt workspace used by the lab.
+2. Start the Gazebo/MoveIt launch file from that workspace.
+3. Start the COLMAG ROS nodes in the same ROS graph.
+4. Implement the mapping from confirmed labels to simulated robot actions in `ros/colmag_ros/scripts/colmag_robot_node.py`.
+
+Typical terminal layout on Linux:
+
+```bash
+# Terminal 1: robot simulation workspace
+source /opt/ros/noetic/setup.bash
+source ~/franka_sim_ws/devel/setup.bash
+roslaunch <robot_sim_package> <gazebo_or_moveit_launch>.launch
+
+# Terminal 2: COLMAG ROS container or native colmag_ws
+bash ros/docker_setup.sh
+bash ros/docker_connect.sh
+export ROS_MASTER_URI=http://127.0.0.1:11311
+export ROS_IP=$(hostname -I | awk '{print $1}')
+roslaunch colmag_ros colmag_distributed.launch run_robot:=true dry_run:=true
+
+# Terminal 3: optional local visualizer
+source venv/bin/activate
+python magnetometer_reader.py --input-source touchpad --ros --classifier-labels ABCXLRUD0123
+```
+
+Keep `dry_run:=true` until the robot node only publishes safe simulated actions. Flip it to `false` after `execute_command()` has been wired to the simulator API you actually want to use.
 
 ### Running on Mac (roslibpy WebSocket bridge)
 
@@ -866,15 +949,15 @@ python magnetometer_reader.py --no-csv
 
 Do not pass `--no-classifier` when testing predictions. With `--no-classifier`, the virtual joystick still switches modes and queues the active label set, but the right classifier panel will stay disabled because EasyOCR was intentionally not loaded.
 
-EasyOCR is relatively slow, so live OCR runs in a background worker. By default it runs only after you stop writing briefly, which keeps the joystick/cursor responsive and avoids spending CPU while the trajectory is still changing. Use `--classifier-mode continuous` to restore repeated live OCR, and increase `--classifier-interval` if your machine lags.
+EasyOCR is relatively slow, so live OCR runs in a background worker. By default it loads at startup and runs continuously every `0.35s` in both serial/magnet and trackpad modes. Use `--lazy-classifier` if you want a faster program start, `--classifier-mode on-idle` if you only want OCR after a writing pause, and increase `--classifier-interval` if your machine lags.
 
 The live UI uses a blitted 2D update path for the writing surface, classifier panel, and sensor traces. The 3D axis is kept static during blitting because Matplotlib's `mplot3d` artists are backend-fragile. Performance-sensitive pieces include `--display-window`, the incremental OCR canvas, a precomputed brush kernel, throttled sensor-axis limit updates, and cached joystick text.
 
 The live classifier panel shows the top prediction, runner-up, and a top-character confidence chart. By default the classifier accepts digits 0-9 and letters A-Z; use `--classifier-labels digits`, `--classifier-labels letters`, or a custom subset such as `--classifier-labels ABCXLRUD0123` to narrow the recognition set. For dataset recording, that custom subset should be the full union of the characters you plan to record. The projected magnetometer image has a white background and dark strokes; the EasyOCR wrapper upsamples and autocontrasts the image before recognition.
 
-The final robot command vocabulary does not need all 26 letters. Prefer a small set of characters that are reliable in air-writing and map cleanly to robot tasks. Non-OCR shapes such as a star should be handled by a future gesture/template recognizer rather than EasyOCR.
+The final robot command vocabulary does not need all 26 letters. Prefer a small set of characters that are reliable in air-writing and map cleanly to robot tasks. Non-OCR shapes such as heart, star, circle, cube, rectangle, and diamond should be handled by a future gesture/template recognizer rather than EasyOCR.
 
-The live interface now includes two virtual joystick groups on the writing surface. Dwelling on **L** switches to letter detection, dwelling on **R** switches to number detection, **D** resets the writing canvas, and **1/2/3/4** confirm one of the four current classifier candidates. The joystick/app-mode logic lives in `colmag/interaction.py` so the UI, OCR, and future robot adapter can stay separate.
+The live interface now includes two virtual joystick groups on the writing surface. Dwelling on **Letters** switches to letter detection, **Digits** switches to number detection, **Reset** clears the writing canvas, **Signs** enters the future shape-recognition mode, and **1/2/3/4** confirm one of the four current classifier candidates. The joystick/app-mode logic lives in `colmag/interaction.py` so the UI, OCR, and future robot adapter can stay separate.
 
 The OCR image is filtered before classification: by default a pose sample only becomes ink when the magnet moves fast enough in X/Y. This prevents a resting magnet from becoming a dot while still supporting air-writing. For multi-stroke letters, tune `--writing-max-velocity` so fast repositioning motions are treated as pen-up, then draw actual strokes with slower controlled motion. `--writing-min-closeness` is still available for board/contact experiments, but it is disabled by default.
 

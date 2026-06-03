@@ -19,6 +19,7 @@ Topics published:
     Values:
       'letter_detection'    — user activated letter OCR mode
       'number_detection'    — user activated digit OCR mode
+      'symbol_detection'    — user activated future signs/shape mode
       'canvas:reset'        — canvas cleared
       'choice:0' … 'choice:3' — user confirmed candidate 1-4
 

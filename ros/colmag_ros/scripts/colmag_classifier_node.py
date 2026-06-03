@@ -155,16 +155,16 @@ class ColmagClassifierNode:
         )
         self.ink_count += 1
 
-    # ── Command callback (canvas reset) ───────────────────────────────────────
+    # ── Command callback (canvas/mode reset) ─────────────────────────────────
 
     def on_command(self, msg):
-        if msg.data == 'canvas:reset':
+        if msg.data in ('canvas:reset', 'letter_detection', 'number_detection', 'symbol_detection'):
             with self.canvas_lock:
                 self.canvas[:] = 1.0
                 self.ink_count = 0
                 self.last_submitted_ink = -1
                 self.writing = False
-            rospy.loginfo('Canvas reset')
+            rospy.loginfo(f'Canvas reset for command: {msg.data}')
 
     # ── Timer: idle detection → classify ──────────────────────────────────────
 

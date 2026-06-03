@@ -36,6 +36,8 @@ def on_command(msg):
         rospy.loginfo('Mode switched: letters OCR')
     elif cmd == 'number_detection':
         rospy.loginfo('Mode switched: digits OCR')
+    elif cmd == 'symbol_detection':
+        rospy.loginfo('Mode switched: signs / shape-recognition placeholder')
     elif cmd == 'canvas:reset':
         rospy.loginfo('Canvas reset')
     elif cmd.startswith('choice:'):

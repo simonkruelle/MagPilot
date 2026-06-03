@@ -17,6 +17,7 @@ Topics subscribed:
 Command strings you will receive:
   'letter_detection'     — user switched to letter OCR mode
   'number_detection'     — user switched to digit OCR mode
+  'symbol_detection'     — user switched to future signs/shape mode
   'canvas:reset'         — canvas was cleared
   'choice:0'             — user confirmed the top classifier candidate
   'choice:1' … 'choice:3' — user confirmed runner-up candidates
@@ -82,6 +83,8 @@ class ColmagRobotNode:
             rospy.loginfo('Mode → letters OCR')
         elif cmd == 'number_detection':
             rospy.loginfo('Mode → digits OCR')
+        elif cmd == 'symbol_detection':
+            rospy.loginfo('Mode → signs / shape-recognition placeholder')
         elif cmd == 'canvas:reset':
             rospy.loginfo('Canvas reset')
         elif cmd.startswith('choice:'):

@@ -91,7 +91,7 @@ def main():
     touch_image = touch_reader.rows_to_digit_image(touch_rows)
     assert touch_image.min() < 0.25
 
-    button = next(button for button in touch_reader.joystick.buttons if button.name == 'L')
+    button = next(button for button in touch_reader.joystick.buttons if button.name == 'Letters')
     button_rows = [
         make_touch_row(start + timedelta(seconds=0.0), button.x, button.y, 0.5, True),
         make_touch_row(start + timedelta(seconds=0.1), button.x + 0.001, button.y, 0.5, True),

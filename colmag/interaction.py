@@ -9,6 +9,7 @@ class InputMode(str, Enum):
     MENU = 'menu'
     LETTERS = 'letters'
     DIGITS = 'digits'
+    SIGNS = 'signs'
     ROBOT = 'robot'
 
 
@@ -51,10 +52,10 @@ class VirtualJoystick:
 
         return cls(
             [
-                VirtualButton('U', left_x, vertical, radius, 'robot:up'),
-                VirtualButton('D', left_x, -vertical, radius, 'canvas:reset'),
-                VirtualButton('L', left_x - horizontal, 0.0, radius, 'mode:letters'),
-                VirtualButton('R', left_x + horizontal, 0.0, radius, 'mode:digits'),
+                VirtualButton('Signs', left_x, vertical, radius, 'mode:signs'),
+                VirtualButton('Reset', left_x, -vertical, radius, 'canvas:reset'),
+                VirtualButton('Letters', left_x - horizontal, 0.0, radius, 'mode:letters'),
+                VirtualButton('Digits', left_x + horizontal, 0.0, radius, 'mode:digits'),
                 VirtualButton('1', right_x, vertical, radius, 'choice:0'),
                 VirtualButton('2', right_x + horizontal, 0.0, radius, 'choice:1'),
                 VirtualButton('3', right_x, -vertical, radius, 'choice:2'),
@@ -147,6 +148,10 @@ class AppController:
             classifier_labels = self.digit_labels
             self.classifier_labels = classifier_labels
             command = 'number_detection'
+        elif button.action == 'mode:signs':
+            self.mode = InputMode.SIGNS
+            self.classifier_labels = None
+            command = 'symbol_detection'
         elif button.action.startswith('robot:'):
             self.mode = InputMode.ROBOT
             command = button.action

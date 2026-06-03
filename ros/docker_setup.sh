@@ -10,15 +10,28 @@ PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CONTAINER_NAME="colmag_ros"
 IMAGE_NAME="colmag_ros:noetic"
 ROS_WS="/catkin_ws"
+DOCKER_PLATFORM="${DOCKER_PLATFORM:-}"
+
+BUILD_PLATFORM_ARGS=()
+RUN_PLATFORM_ARGS=()
+if [ -n "$DOCKER_PLATFORM" ]; then
+    BUILD_PLATFORM_ARGS=(--platform "$DOCKER_PLATFORM")
+    RUN_PLATFORM_ARGS=(--platform "$DOCKER_PLATFORM")
+fi
 
 echo "=== colmag ROS 1 Docker Setup ==="
 echo "Project: $PROJECT_DIR"
 echo "Container: $CONTAINER_NAME"
+if [ -n "$DOCKER_PLATFORM" ]; then
+    echo "Platform: $DOCKER_PLATFORM"
+else
+    echo "Platform: Docker host default"
+fi
 echo ""
 
 # Build the image
 echo "[1/3] Building Docker image ($IMAGE_NAME)..."
-docker build --platform linux/arm64 -t "$IMAGE_NAME" "$(dirname "$0")"
+docker build "${BUILD_PLATFORM_ARGS[@]}" -f "$PROJECT_DIR/ros/Dockerfile" -t "$IMAGE_NAME" "$PROJECT_DIR"
 
 # Remove existing container if present
 if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
@@ -30,7 +43,7 @@ fi
 echo "[2/3] Creating container '$CONTAINER_NAME'..."
 docker run -dit \
     --name "$CONTAINER_NAME" \
-    --platform linux/arm64 \
+    "${RUN_PLATFORM_ARGS[@]}" \
     --network host \
     -v "$PROJECT_DIR:/colmag" \
     -v "$PROJECT_DIR/ros/colmag_ros:$ROS_WS/src/colmag_ros" \

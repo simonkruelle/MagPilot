@@ -191,6 +191,7 @@ CLASSIFIER_LABEL_PRESETS = {
     'letters': tuple('ABCDEFGHIJKLMNOPQRSTUVWXYZ'),
     'alphanumeric': DEFAULT_CLASSIFIER_LABELS,
 }
+SYMBOL_LABELS = ('heart', 'star', 'circle', 'cube', 'rectangle', 'diamond')
 DATA_MANIFEST_SCHEMA_VERSION = 1
 
 RECORDING_TARGETS = (
@@ -209,6 +210,8 @@ def top_label_indices(scores, count):
 
 
 def display_labels_for(labels):
+    if labels is None:
+        return tuple()
     if isinstance(labels, str):
         return CLASSIFIER_LABEL_PRESETS.get(labels, tuple(labels.upper()))
     return tuple(labels)
@@ -229,7 +232,7 @@ class MagnetometerReader:
         enable_classifier=True,
         classifier_gpu=False,
         classifier_labels='alphanumeric',
-        lazy_classifier=True,
+        lazy_classifier=False,
         classifier_cpu_threads=1,
         enable_writing_filter=True,
         writing_min_velocity=0.01,
@@ -239,8 +242,8 @@ class MagnetometerReader:
         joystick_dwell_seconds=1.5,
         letter_labels='letters',
         digit_labels='digits',
-        classifier_interval=0.75,
-        classifier_mode='on-idle',
+        classifier_interval=0.35,
+        classifier_mode='continuous',
         classifier_idle_seconds=0.8,
         classifier_min_ink_samples=8,
         input_source='serial',
@@ -909,6 +912,19 @@ class MagnetometerReader:
             elif event.command == 'number_detection':
                 self._set_key_feedback("Mode: digits")
                 print(f"Virtual joystick: {event.button.name} -> {event.command}")
+            elif event.command == 'symbol_detection':
+                self.latest_prediction_text = "Prediction: signs need shape recognizer"
+                self.latest_runner_up_text = "Runner-up: --"
+                self.classifier_candidates = []
+                self.prediction_history.clear()
+                self.reset_live_classification_session()
+                with self.classifier_state_lock:
+                    self.classifier_latest_result = None
+                    self.classifier_latest_error = None
+                    if self.classifier is not None:
+                        self.classifier_status_text = "OCR idle"
+                self._set_key_feedback("Mode: signs")
+                print(f"Virtual joystick: {event.button.name} -> {event.command}")
             else:
                 self._set_key_feedback(f"{event.button.name}: {event.command.split(':', 1)[-1]}")
                 print(f"Virtual joystick: {event.button.name} -> {event.command}")
@@ -955,7 +971,9 @@ class MagnetometerReader:
             if self.classifier is not None:
                 self.classifier_status_text = "OCR idle"
 
-        if self.enable_classifier and self.app_controller.mode.value in ('letters', 'digits'):
+        if self.app_controller.mode.value == 'signs':
+            self.latest_prediction_text = "Prediction: signs need shape recognizer"
+        elif self.enable_classifier and self.app_controller.mode.value in ('letters', 'digits'):
             self.latest_prediction_text = "Prediction: waiting for writing"
         else:
             self.latest_prediction_text = self.classifier_unloaded_prediction_text()
@@ -981,6 +999,25 @@ class MagnetometerReader:
         if rows:
             self.mark_classification_start(rows[-1][0])
         print(f"Touchpad mode: {mode_name} classification active")
+
+    def activate_signs_mode(self):
+        """Switch to the non-OCR symbols placeholder mode."""
+        self.app_controller.mode = InputMode.SIGNS
+        self.app_controller.classifier_labels = None
+        self.app_controller.last_command = 'symbol_detection'
+        self.classifier_candidates = []
+        self.prediction_history.clear()
+        self.reset_live_classification_session()
+        with self.classifier_state_lock:
+            self.classifier_latest_result = None
+            self.classifier_latest_error = None
+            if self.classifier is not None:
+                self.classifier_status_text = "OCR idle"
+        self.latest_prediction_text = "Prediction: signs need shape recognizer"
+        self.latest_runner_up_text = "Runner-up: --"
+        if self.ros_bridge:
+            self.ros_bridge.publish_command('symbol_detection')
+        print("Touchpad mode: signs active")
 
     def list_ports(self):
         """List all available serial ports."""
@@ -1885,14 +1922,17 @@ class MagnetometerReader:
         def on_key_press(event):
             raw_key = event.key or ''
             key = raw_key.lower()
-            # Shift+L/D/R = mode/reset controls (keep lowercase free for recording)
+            # Shift+L/R/U/D = mode/reset controls (keep lowercase free for recording)
             if self.input_source == 'touchpad' and raw_key in ('L', 'shift+l'):
                 self.activate_classifier_mode('letters')
                 self._set_key_feedback("Mode: letters")
-            elif self.input_source == 'touchpad' and raw_key in ('D', 'shift+d'):
+            elif self.input_source == 'touchpad' and raw_key in ('R', 'shift+r'):
                 self.activate_classifier_mode('digits')
                 self._set_key_feedback("Mode: digits")
-            elif self.input_source == 'touchpad' and raw_key in ('R', 'shift+r'):
+            elif self.input_source == 'touchpad' and raw_key in ('U', 'shift+u'):
+                self.activate_signs_mode()
+                self._set_key_feedback("Mode: signs")
+            elif self.input_source == 'touchpad' and raw_key in ('D', 'shift+d'):
                 self.reset_writing_canvas()
                 self._set_key_feedback("Canvas reset")
             elif self.input_source == 'touchpad' and key in (' ', 'space'):
@@ -2121,6 +2161,12 @@ class MagnetometerReader:
 
         button_artists = {}
         for button in self.joystick.buttons:
+            if button.action.startswith('choice:'):
+                label_fontsize = 10
+            elif len(button.name) >= 6:
+                label_fontsize = 7
+            else:
+                label_fontsize = 9
             circle = patches.Circle(
                 (button.x, button.y),
                 button.radius,
@@ -2137,7 +2183,7 @@ class MagnetometerReader:
                 button.name,
                 ha='center',
                 va='center',
-                fontsize=10 if button.action.startswith('choice:') else 11,
+                fontsize=label_fontsize,
                 weight='bold',
                 zorder=5,
             )
@@ -2203,6 +2249,8 @@ class MagnetometerReader:
             if button.action == 'mode:letters' and self.app_controller.mode.value == 'letters':
                 facecolor = '#d8ecff'
             elif button.action == 'mode:digits' and self.app_controller.mode.value == 'digits':
+                facecolor = '#d8ecff'
+            elif button.action == 'mode:signs' and self.app_controller.mode.value == 'signs':
                 facecolor = '#d8ecff'
             elif button.action.startswith('choice:'):
                 try:
@@ -2328,7 +2376,7 @@ class MagnetometerReader:
         ax5.set_yticks([])
         if self.input_source == 'touchpad':
             _hint_line1 = "Shift+S = save   Shift+Q = quit   |   A-Z / 0-9 / - / = = record   p/s/q = letter P/S/Q"
-            _hint_line2 = "Space / click = draw   Shift+P = pen   |   Shift+L = letters OCR   Shift+D = digits OCR   Shift+R = reset"
+            _hint_line2 = "Space / click = draw   Shift+P = pen   |   Shift+L = letters   Shift+R = digits   Shift+U = signs   Shift+D = reset"
             _hint_lines = [_hint_line1, _hint_line2]
         else:
             _hint_lines = ["s = stop & save   q = quit   |   A-Z = letter   0-9 = digit   - = blank   = = still"]
@@ -2548,6 +2596,7 @@ class MagnetometerReader:
                 if interface_event is not None:
                     clear_canvas_requested = (
                         interface_event.command == 'canvas:reset'
+                        or interface_event.command == 'symbol_detection'
                         or interface_event.classifier_labels is not None
                     )
                     self.handle_interface_event(interface_event)
@@ -2572,7 +2621,11 @@ class MagnetometerReader:
                 if self.app_controller.active_button
                 else "--"
             )
-            active_classifier_labels = display_labels_for(self.classifier_labels)
+            active_classifier_labels = (
+                SYMBOL_LABELS
+                if self.app_controller.mode.value == 'signs'
+                else display_labels_for(self.classifier_labels)
+            )
             labels_text = ''.join(active_classifier_labels)
             if len(labels_text) > 12:
                 labels_text = labels_text[:12] + "..."
@@ -2698,7 +2751,18 @@ class MagnetometerReader:
                     bar.set_width(float(probabilities[index]))
                     bar.set_color('#2f5f9f' if index == top_two[0] and probabilities[index] > 0.0 else '#7c9cc8')
 
-            if self.classifier is not None and self.app_controller.mode.value not in ('letters', 'digits'):
+            if self.app_controller.mode.value == 'signs':
+                prediction_text = "Prediction: signs need shape recognizer"
+                runner_up_text = "Runner-up: --"
+                self.classifier_candidates = []
+                update_classifier_axis_labels(
+                    SYMBOL_LABELS,
+                    list(range(min(display_count, len(SYMBOL_LABELS)))),
+                )
+                for bar in prob_bars:
+                    bar.set_width(0.0)
+                    bar.set_color('#7c9cc8')
+            elif self.classifier is not None and self.app_controller.mode.value not in ('letters', 'digits'):
                 prediction_text = f"Prediction: paused ({self.app_controller.mode.value} mode)"
                 runner_up_text = "Runner-up: --"
             elif self.enable_classifier and self.classifier is None and self.classifier_loading:
@@ -2944,8 +3008,9 @@ class MagnetometerReader:
                     print("  Mouse/touchpad : hover to move cursor, movement draws ink")
                 print(f"  Touchpad dwell : {self.app_controller.detector.dwell_seconds:.1f}s to activate a button")
                 print("  Shift+L        : switch to letters OCR mode")
-                print("  Shift+D        : switch to digits OCR mode")
-                print("  Shift+R        : reset writing canvas")
+                print("  Shift+R        : switch to digits OCR mode")
+                print("  Shift+U        : switch to signs mode")
+                print("  Shift+D        : reset writing canvas")
                 print("  Shift+P        : toggle pen on/off")
                 print("  Shift+S        : stop & save current recording")
                 print("  Shift+Q        : quit")
@@ -3002,8 +3067,8 @@ def main():
                             'Default is off in live mode, or output_dir/raw/<run_id>_raw.csv with --record-data')
     parser.add_argument('--no-csv', action='store_true',
                        help='Disable CSV logging for maximum live read rate')
-    parser.add_argument('--input-source', choices=['serial', 'touchpad'], default='serial',
-                       help='Input source: real serial magnetometer or synthetic touchpad rows (default: serial)')
+    parser.add_argument('--input-source', choices=['serial', 'touchpad', 'trackpad'], default='serial',
+                       help='Input source: real serial magnetometer or synthetic touchpad/trackpad rows (default: serial)')
     parser.add_argument('--touchpad-z', type=float, default=0.02,
                        help='Synthetic Pose_z value used in --input-source touchpad mode (default: 0.02)')
     parser.add_argument('--touchpad-sample-rate', type=float, default=100.0,
@@ -3021,7 +3086,7 @@ def main():
     parser.add_argument('--touchpad-speed-log', type=str, default=None,
                        help='Optional CSV path for touchpad speed calibration samples')
     parser.add_argument('--touchpad-speed-report-interval', type=float, default=0.0,
-                       help='Seconds between touchpad speed calibration printouts; use 0 to disable (default: 1.0)')
+                       help='Seconds between touchpad speed calibration printouts; use 0 to disable (default: 0.0/off)')
     parser.add_argument('--display-window', type=int, default=2000,
                        help='Recent samples to show in live plots (default: 2000 serial, 240 touchpad). '
                             'Lower = less data to render per frame = less lag.')
@@ -3049,22 +3114,26 @@ def main():
                        help='Use GPU for EasyOCR if available')
     parser.add_argument('--classifier-labels', default='alphanumeric',
                        help='EasyOCR label set: digits, letters, alphanumeric, or a custom subset such as ABCXLRUD0123 (default: alphanumeric)')
-    parser.add_argument('--load-classifier-at-start', action='store_true',
-                       help='Load EasyOCR during startup instead of lazily on the first completed drawing')
+    parser.add_argument('--load-classifier-at-start', dest='load_classifier_at_start',
+                       action='store_true', default=True,
+                       help='Load EasyOCR during startup (default)')
+    parser.add_argument('--lazy-classifier', dest='load_classifier_at_start',
+                       action='store_false',
+                       help='Load EasyOCR only on first use')
     parser.add_argument('--classifier-cpu-threads', type=int, default=1,
                        help='CPU threads used by torch/OpenCV inside EasyOCR; 1 keeps the UI responsive (default: 1)')
-    parser.add_argument('--classifier-interval', type=float, default=0.75,
-                       help='Minimum seconds between background OCR requests (default: 0.75)')
-    parser.add_argument('--classifier-mode', choices=['on-idle', 'continuous'], default='on-idle',
-                       help='When to run live OCR: after a writing pause or continuously at --classifier-interval (default: on-idle)')
+    parser.add_argument('--classifier-interval', type=float, default=0.35,
+                       help='Minimum seconds between background OCR requests (default: 0.35)')
+    parser.add_argument('--classifier-mode', choices=['on-idle', 'continuous'], default='continuous',
+                       help='When to run live OCR: after a writing pause or continuously at --classifier-interval (default: continuous)')
     parser.add_argument('--classifier-idle-seconds', type=float, default=0.8,
                        help='Writing pause duration before OCR runs in on-idle mode (default: 0.8)')
     parser.add_argument('--classifier-min-ink-samples', type=int, default=8,
                        help='Minimum ink samples required before live OCR can run (default: 8)')
     parser.add_argument('--letter-labels', default='letters',
-                       help='Label set used after holding virtual L for letter mode (default: letters)')
+                       help='Label set used after holding virtual Letters for letter mode (default: letters)')
     parser.add_argument('--digit-labels', default='digits',
-                       help='Label set used after holding virtual R for number mode (default: digits)')
+                       help='Label set used after holding virtual Digits for number mode (default: digits)')
     parser.add_argument('--joystick-dwell-seconds', type=float, default=1.5,
                        help='Seconds the cursor must dwell inside a virtual button to press it (default: 1.5)')
     parser.add_argument('--no-writing-filter', action='store_true',
@@ -3079,6 +3148,8 @@ def main():
                        help='Do not draw when |pose_z| exceeds this value in meters (e.g. 0.05 = 5 cm); useful to ignore magnet when held far from sensor')
     parser.add_argument('--clean', action='store_true',
                        help='Clean view: show only the drawing canvas + classifier panel (hides raw sensor graphs)')
+    parser.add_argument('--full-view', action='store_true',
+                       help='Show raw sensor graphs/3D trajectory even in touchpad mode')
 
     # === New mode flags ===
     parser.add_argument('--record-data', action='store_true',
@@ -3096,6 +3167,11 @@ def main():
 
     argcomplete.autocomplete(parser)
     args = parser.parse_args()
+
+    if args.input_source == 'trackpad':
+        args.input_source = 'touchpad'
+    if args.input_source == 'touchpad' and not args.full_view:
+        args.clean = True
 
     if args.trail_length <= 0:
         parser.error("--trail-length must be positive")
@@ -3166,22 +3242,20 @@ def main():
     )
     if args.input_source == 'touchpad' and not display_window_was_explicit:
         args.display_window = 240
-    classifier_mode_was_explicit = any(
-        arg == '--classifier-mode' or arg.startswith('--classifier-mode=')
-        for arg in sys.argv[1:]
+    load_classifier_at_start = (
+        args.load_classifier_at_start
+        and not args.no_classifier
+        and not args.dry_run
+        and not args.validation_mode
     )
-    classifier_interval_was_explicit = any(
-        arg == '--classifier-interval' or arg.startswith('--classifier-interval=')
-        for arg in sys.argv[1:]
-    )
-    if args.input_source == 'touchpad' and not classifier_mode_was_explicit:
-        args.classifier_mode = 'continuous'
-    if (
-        args.input_source == 'touchpad'
-        and args.classifier_mode == 'continuous'
-        and not classifier_interval_was_explicit
-    ):
-        args.classifier_interval = 0.35
+    if args.no_classifier:
+        classifier_load_text = "disabled"
+    elif args.load_classifier_at_start and (args.dry_run or args.validation_mode):
+        classifier_load_text = "startup skipped in dry/validation"
+    elif load_classifier_at_start:
+        classifier_load_text = "startup"
+    else:
+        classifier_load_text = "lazy"
 
     print(f"Magnetometer Data Reader")
     if args.dry_run:
@@ -3228,12 +3302,13 @@ def main():
     print(
         f"Character Classifier: {'disabled' if args.no_classifier else 'EasyOCR'} "
         f"({args.classifier_labels}, mode={args.classifier_mode}, "
-        f"interval={args.classifier_interval}s, lazy={not args.load_classifier_at_start})"
+        f"interval={args.classifier_interval}s, load={classifier_load_text})"
     )
     print(
         "Virtual Joystick: "
-        f"L -> letters ({args.letter_labels}), "
-        f"R -> numbers ({args.digit_labels}), "
+        f"Letters -> letters ({args.letter_labels}), "
+        f"Digits -> numbers ({args.digit_labels}), "
+        f"Signs -> shape placeholder, Reset -> clear canvas, "
         f"dwell={args.joystick_dwell_seconds}s"
     )
     if args.no_writing_filter:
@@ -3273,7 +3348,7 @@ def main():
         enable_classifier=not args.no_classifier,
         classifier_gpu=args.classifier_gpu,
         classifier_labels=args.classifier_labels,
-        lazy_classifier=not args.load_classifier_at_start,
+        lazy_classifier=not load_classifier_at_start,
         classifier_cpu_threads=args.classifier_cpu_threads,
         classifier_interval=args.classifier_interval,
         classifier_mode=args.classifier_mode,
