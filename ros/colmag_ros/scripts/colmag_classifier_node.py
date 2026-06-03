@@ -106,7 +106,7 @@ class ColmagClassifierNode:
         except ImportError:
             rospy.logwarn(
                 'EasyOCR not installed — classification is disabled. '
-                'Install inside Docker with:  pip3 install easyocr'
+                'Rebuild Docker with: INSTALL_EASYOCR=1 bash ros/docker_setup.sh'
             )
         except Exception as exc:
             rospy.logwarn(f'EasyOCR failed to load: {exc}')

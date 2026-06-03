@@ -6,6 +6,9 @@ find_package(catkin REQUIRED COMPONENTS
   std_msgs
   geometry_msgs
   sensor_msgs
+  trajectory_msgs
+  control_msgs
+  actionlib
 )
 
 catkin_package()

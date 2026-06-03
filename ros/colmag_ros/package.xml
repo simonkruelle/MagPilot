@@ -13,4 +13,8 @@
   <depend>std_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>sensor_msgs</depend>
+  <!-- colmag_robot_node.py sends FollowJointTrajectory goals to drive the arm -->
+  <depend>trajectory_msgs</depend>
+  <depend>control_msgs</depend>
+  <depend>actionlib</depend>
 </package>

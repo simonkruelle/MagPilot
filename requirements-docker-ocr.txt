@@ -1,0 +1,13 @@
+# Docker-only OCR stack for ROS Noetic's Python 3.8 image.
+#
+# Use CPU-only PyTorch wheels so Docker does not download CUDA packages.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+torch==2.2.2+cpu
+torchvision==0.17.2+cpu
+
+easyocr==1.7.2
+numpy>=1.24,<2
+opencv-python-headless>=4.8,<4.11
+pillow>=10,<11
+scikit-image>=0.21,<0.22

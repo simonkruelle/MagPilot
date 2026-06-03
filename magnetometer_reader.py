@@ -194,6 +194,21 @@ CLASSIFIER_LABEL_PRESETS = {
 SYMBOL_LABELS = ('heart', 'star', 'circle', 'cube', 'rectangle', 'diamond')
 DATA_MANIFEST_SCHEMA_VERSION = 1
 
+# Gesture → robot action legend shown beside the canvas in the clean view.
+# Mirrors NAMED_POSES in ros/colmag_ros/scripts/colmag_robot_node.py — keep the
+# two in sync if you change the robot's preprogrammed motions.
+ROBOT_ACTION_LEGEND = (
+    ('A', 'wave'),
+    ('0 / X', 'home / reset'),
+    ('L', 'rotate base left'),
+    ('R', 'rotate base right'),
+    ('U', 'reach up'),
+    ('D', 'reach down'),
+    ('B', 'bow forward'),
+    ('C', 'curl in'),
+    ('1 / 2 / 3', 'counting poses'),
+)
+
 RECORDING_TARGETS = (
     tuple(f'digit_{d}' for d in '0123456789') +
     tuple(f'letter_{c}' for c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ') +
@@ -2282,13 +2297,33 @@ class MagnetometerReader:
                 label_artist.set_text(label_text)
                 self._cached_button_texts[button.name] = label_text
 
+    def _draw_robot_action_legend(self, ax):
+        """Render the gesture → robot action legend panel beside the canvas."""
+        ax.axis('off')
+        ax.set_title('Robot actions', fontsize=12, fontweight='bold', pad=12)
+        n = len(ROBOT_ACTION_LEGEND)
+        y0, y_end = 0.94, 0.10
+        dy = (y0 - y_end) / max(n - 1, 1)
+        for i, (label, action) in enumerate(ROBOT_ACTION_LEGEND):
+            y = y0 - i * dy
+            ax.text(0.04, y, label, transform=ax.transAxes,
+                    fontsize=11, fontweight='bold', va='center', ha='left',
+                    family='monospace', color='#1a5fb4')
+            ax.text(0.42, y, action, transform=ax.transAxes,
+                    fontsize=9, va='center', ha='left', color='#222222')
+        ax.text(0.04, 0.01, 'write a character →\ndwell to confirm',
+                transform=ax.transAxes, fontsize=8, va='top', ha='left',
+                style='italic', color='#666666')
+
     def plot_data(self):
         """Create real-time plot of Bx, By, Bz for the selected sensor."""
         if self.clean_view:
-            fig = plt.figure(figsize=(12, 8))
-            grid = fig.add_gridspec(1, 2, width_ratios=[2.2, 1.0])
-            ax5 = fig.add_subplot(grid[0, 0])
-            ax6 = fig.add_subplot(grid[0, 1])
+            fig = plt.figure(figsize=(14, 8))
+            grid = fig.add_gridspec(1, 3, width_ratios=[0.9, 2.2, 1.0])
+            ax_legend = fig.add_subplot(grid[0, 0])
+            ax5 = fig.add_subplot(grid[0, 1])
+            ax6 = fig.add_subplot(grid[0, 2])
+            self._draw_robot_action_legend(ax_legend)
             ax1 = ax2 = ax3 = ax4 = None
         else:
             fig = plt.figure(figsize=(18, 10))

@@ -25,8 +25,10 @@
   <arg name="port"         default=""       doc="Serial port (auto-detect if empty)"/>
   <arg name="baudrate"     default="921600" doc="Serial baud rate"/>
   <arg name="verbose"      default="false"  doc="Log every packet from sensor_node"/>
-  <arg name="run_robot"    default="true"   doc="Start the robot node"/>
-  <arg name="dry_run"      default="true"   doc="Robot node: log only, do not move"/>
+  <arg name="run_robot"       default="true"   doc="Start the robot node"/>
+  <arg name="dry_run"         default="true"   doc="Robot node: log only, do not move"/>
+  <arg name="arm_id"          default="fr3"    doc="Robot node: joint prefix '&lt;arm_id&gt;_joint1..7' (fr3 or panda)"/>
+  <arg name="arm_controller"  default="effort_joint_trajectory_controller" doc="Robot node: JointTrajectoryController to drive"/>
 
   <!-- ── 1. Sensor node — the ONLY node that reads the serial port ────────── -->
   <node pkg="colmag_ros"
@@ -69,7 +71,9 @@
         name="colmag_robot_node"
         output="screen"
         if="$(arg run_robot)">
-    <param name="dry_run"  value="$(arg dry_run)"/>
+    <param name="dry_run"         value="$(arg dry_run)"/>
+    <param name="arm_id"          value="$(arg arm_id)"/>
+    <param name="arm_controller"  value="$(arg arm_controller)"/>
     <!-- <param name="robot_ip" value="192.168.1.100"/> -->
   </node>
 
