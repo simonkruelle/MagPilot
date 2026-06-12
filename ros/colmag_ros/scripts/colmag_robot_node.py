@@ -62,25 +62,11 @@ except ImportError:
     _TRAJ_AVAILABLE = False
 
 
-# Joint-space poses for the 7-DOF Franka arm (Panda and FR3 share the joint
-# layout: joint1..joint7 in radians).  HOME matches the launch file's default
-# elbow-bend pose.  Values are kept conservative so they are valid on both arms.
+# Joint-space home for the 7-DOF Franka arm (Panda and FR3 share the layout:
+# joint1..joint7 in radians). HOME matches the launch file's default elbow-bend
+# pose. The motion methods below build their waypoints around it; all joint
+# values are kept well inside both the Panda and FR3 limits.
 HOME_POSE = [0.0, -0.785398163, 0.0, -2.35619449, 0.0, 1.57079632679, 0.785398163397]
-
-NAMED_POSES = {
-    '0': HOME_POSE,                                          # reset / home
-    'X': HOME_POSE,                                          # cancel → home
-    'B': [0.00,  0.35, 0.00, -2.10, 0.00, 2.45, 0.785],      # bow forward
-    'C': [0.00, -0.30, 0.00, -1.30, 0.00, 1.05, 0.785],      # curl in
-    'L': [0.70, -0.785, 0.00, -2.356, 0.00, 1.571, 0.785],   # rotate base left
-    'R': [-0.70, -0.785, 0.00, -2.356, 0.00, 1.571, 0.785],  # rotate base right
-    'U': [0.00, -1.20, 0.00, -1.70, 0.00, 1.40, 0.785],      # reach up
-    'D': [0.00, -0.30, 0.00, -2.70, 0.00, 1.90, 0.785],      # reach down
-    '1': [0.00, -0.60, 0.00, -2.20, 0.00, 1.60, 0.785],      # counting pose 1
-    '2': [0.00, -0.40, 0.00, -2.00, 0.00, 1.60, 0.785],      # counting pose 2
-    '3': [0.00, -0.20, 0.00, -1.80, 0.00, 1.60, 0.785],      # counting pose 3
-}
-# 'A' is handled specially below as a waving motion (multi-point trajectory).
 
 
 class ColmagRobotNode:
@@ -95,6 +81,18 @@ class ColmagRobotNode:
         self.move_duration = float(rospy.get_param('~move_duration', 3.0))
 
         self.joint_names = ['{}_joint{}'.format(self.arm_id, i) for i in range(1, 8)]
+
+        # ── Gesture → motion map ──────────────────────────────────────────────
+        # Edit this (and the motion methods below) to change the robot's tricks.
+        self._motions = {
+            '0': self._home,        'X': self._home,         # reset / cancel
+            'A': self._wave,        'B': self._bow,          # wave, bow
+            'C': self._celebrate,   'D': self._dab,          # fist pumps, dab
+            'U': self._stretch_up,                            # reach tall
+            'L': self._point_left,  'R': self._point_right,  # point left / right
+            '1': self._nod_yes,     '2': self._shake_no,     # yes / no
+            '3': self._cheer,                                 # victory sweep
+        }
 
         # ── Classifier state ──────────────────────────────────────────────────
         self.last_label      = None
@@ -169,27 +167,22 @@ class ColmagRobotNode:
 
     def execute_command(self, label):
         """
-        Execute a preprogrammed robot action for the confirmed character label.
+        Run the preprogrammed motion mapped to a confirmed character label.
 
-        Extend NAMED_POSES (or replace this method) to map labels to your own
-        actions: MoveIt goals, real-robot API calls, gripper commands, etc.
+        Edit self._motions (in __init__) and the motion methods below to change
+        the repertoire, or replace this with MoveIt / real-robot API calls.
 
         Args:
             label: The confirmed character, e.g. 'A', '3', 'X'
         """
-        if label == 'A':
-            rospy.loginfo('Action "A" → wave')
-            self._wave()
+        motion = self._motions.get(label)
+        if motion is None:
+            rospy.logwarn('No motion mapped for "%s" — small nod instead.', label)
+            self._nod_yes()
             return
-
-        pose = NAMED_POSES.get(label)
-        if pose is None:
-            rospy.logwarn('No preprogrammed action mapped for label "%s" — small nod.', label)
-            self._nod()
-            return
-
-        rospy.loginfo('Action "%s" → move to joint pose', label)
-        self._send_trajectory([(pose, self.move_duration)])
+        rospy.loginfo('Action "%s" → %s', label,
+                      motion.__name__.lstrip('_').replace('_', ' '))
+        motion()
 
     # ── Motion primitives ───────────────────────────────────────────────────────
 
@@ -220,30 +213,98 @@ class ColmagRobotNode:
             goal.trajectory.points.append(pt)
         goal.trajectory.header.stamp = rospy.Time.now()
 
+        # Fire-and-forget: the controller plays the whole trajectory in Gazebo on
+        # its own. We don't block on the result because franka_gazebo's effort
+        # controller tends to settle just outside the tight goal tolerance, so
+        # waiting would stall (and log spurious "did not finish" warnings). Not
+        # waiting also lets the next confirmed gesture preempt the current motion.
         self.traj_client.send_goal(goal)
-        finished = self.traj_client.wait_for_result(rospy.Duration(points[-1][1] + 5.0))
-        if not finished:
-            rospy.logwarn('Trajectory did not finish in time.')
-        return finished
+        return True
+
+    # ── Preprogrammed motions ───────────────────────────────────────────────────
+    # Each method builds a list of (joint_positions, time_from_start_seconds)
+    # waypoints and sends them as one trajectory. Larger time gaps = calmer
+    # motion. All joint values stay inside both Panda and FR3 limits.
+
+    @staticmethod
+    def _pose(**joints):
+        """HOME pose with joint overrides, e.g. _pose(j1=0.8, j6=2.0).
+
+        Keys are j1..j7 (1-indexed joints).
+        """
+        pose = list(HOME_POSE)
+        for key, value in joints.items():
+            pose[int(key[1:]) - 1] = value
+        return pose
+
+    def _home(self):
+        """Return to the neutral elbow-bend pose."""
+        self._send_trajectory([(HOME_POSE, 2.5)])
 
     def _wave(self):
-        """Raise the arm and wave the wrist (joint7) side to side, then home."""
-        ready = [0.0, -0.6, 0.0, -1.6, 0.0, 1.4, 0.785]
-        left  = list(ready); left[6]  = 1.6
-        right = list(ready); right[6] = -0.2
+        """Raise the arm and wave the hand (wrist roll) side to side. 👋"""
+        ready = self._pose(j2=-0.7, j4=-1.3, j6=1.2)
+        a = list(ready); a[6] = 1.6
+        b = list(ready); b[6] = -0.1
         self._send_trajectory([
-            (ready,     2.0),
-            (left,      3.0),
-            (right,     4.0),
-            (left,      5.0),
-            (HOME_POSE, 7.0),
+            (ready, 1.6), (a, 2.3), (b, 3.0), (a, 3.7), (b, 4.4), (HOME_POSE, 6.0),
         ])
 
-    def _nod(self):
-        """Small wrist nod (joint6) around home — fallback for unmapped labels."""
-        up   = list(HOME_POSE); up[5]   = HOME_POSE[5] - 0.25
-        down = list(HOME_POSE); down[5] = HOME_POSE[5] + 0.25
-        self._send_trajectory([(up, 1.5), (down, 3.0), (HOME_POSE, 4.5)])
+    def _bow(self):
+        """A polite bow forward, hold, then straighten up. 🙇"""
+        bow = self._pose(j2=0.5, j4=-2.0, j6=2.4)
+        self._send_trajectory([(bow, 2.2), (bow, 3.1), (HOME_POSE, 5.1)])
+
+    def _nod_yes(self):
+        """Nod the wrist up and down: yes. ✅"""
+        down = self._pose(j6=1.95)
+        up   = self._pose(j6=1.20)
+        self._send_trajectory([
+            (down, 0.9), (up, 1.7), (down, 2.5), (up, 3.3), (HOME_POSE, 4.3),
+        ])
+
+    def _shake_no(self):
+        """Swing the base left/right: no. ❌"""
+        left  = self._pose(j1=0.45)
+        right = self._pose(j1=-0.45)
+        self._send_trajectory([
+            (left, 0.9), (right, 1.7), (left, 2.5), (right, 3.3), (HOME_POSE, 4.3),
+        ])
+
+    def _celebrate(self):
+        """Arm up, a couple of quick fist pumps. 💪"""
+        up   = self._pose(j2=-1.00, j4=-1.1, j6=1.0)
+        pump = self._pose(j2=-1.35, j4=-1.1, j6=1.0)
+        self._send_trajectory([
+            (up, 1.4), (pump, 1.9), (up, 2.4), (pump, 2.9), (up, 3.4), (HOME_POSE, 5.0),
+        ])
+
+    def _cheer(self):
+        """Arm raised high, sweeping side to side like a victory wave. 🙌"""
+        up    = self._pose(j2=-1.2, j4=-0.9, j6=0.9)
+        left  = list(up); left[0]  = 0.5
+        right = list(up); right[0] = -0.5
+        self._send_trajectory([
+            (up, 1.6), (left, 2.4), (right, 3.2), (left, 4.0), (HOME_POSE, 5.6),
+        ])
+
+    def _dab(self):
+        """Strike a dab — arm up and across — hold, then recover. 😎"""
+        dab = [-0.7, -0.9, 0.5, -0.7, 0.6, 1.0, 0.4]
+        self._send_trajectory([(dab, 1.8), (dab, 2.7), (HOME_POSE, 4.7)])
+
+    def _stretch_up(self):
+        """Reach straight up tall, hold, return. 🙆"""
+        tall = self._pose(j2=-1.45, j4=-0.45, j6=1.0)
+        self._send_trajectory([(tall, 2.3), (tall, 3.2), (HOME_POSE, 5.3)])
+
+    def _point_left(self):
+        """Rotate the base to point left. 👈"""
+        self._send_trajectory([(self._pose(j1=0.8), 2.5)])
+
+    def _point_right(self):
+        """Rotate the base to point right. 👉"""
+        self._send_trajectory([(self._pose(j1=-0.8), 2.5)])
 
     def run(self):
         rospy.spin()

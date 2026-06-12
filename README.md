@@ -85,17 +85,20 @@ canvas.
 
 | Gesture | Action | Gesture | Action |
 |:------:|:-------|:------:|:-------|
-| `A` | wave | `L` | rotate base left |
-| `0` / `X` | home / reset | `R` | rotate base right |
-| `B` | bow forward | `U` | reach up |
-| `C` | curl in | `D` | reach down |
-| `1` `2` `3` | counting poses | *(other)* | small nod |
+| `A` | wave 👋 | `1` | nod — yes ✅ |
+| `B` | bow 🙇 | `2` | shake — no ❌ |
+| `C` | fist pumps 💪 | `3` | cheer 🙌 |
+| `D` | dab 😎 | `L` / `R` | point left / right |
+| `U` | stretch up 🙆 | `0` / `X` | home |
+| *(other)* | small nod | | |
 
-The map lives in `NAMED_POSES` at the top of
+The map lives in `self._motions` and the `_wave` / `_bow` / `_dab` / … motion
+methods in
 [`ros/colmag_ros/scripts/colmag_robot_node.py`](ros/colmag_ros/scripts/colmag_robot_node.py).
-Edit it to change motions, or replace `execute_command()` with MoveIt
-`move_group` goals (build with `INSTALL_MOVEIT=1`) or real-robot API calls. Keep
-the legend in `magnetometer_reader.py` (`ROBOT_ACTION_LEGEND`) in sync.
+Each motion is just a list of `(joint_positions, time)` waypoints — add your own,
+or replace `execute_command()` with MoveIt `move_group` goals (build with
+`INSTALL_MOVEIT=1`) or real-robot API calls. Keep the legend in
+`magnetometer_reader.py` (`ROBOT_ACTION_LEGEND`) in sync.
 
 ---
 

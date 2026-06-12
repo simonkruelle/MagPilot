@@ -199,14 +199,15 @@ DATA_MANIFEST_SCHEMA_VERSION = 1
 # two in sync if you change the robot's preprogrammed motions.
 ROBOT_ACTION_LEGEND = (
     ('A', 'wave'),
-    ('0 / X', 'home / reset'),
-    ('L', 'rotate base left'),
-    ('R', 'rotate base right'),
-    ('U', 'reach up'),
-    ('D', 'reach down'),
-    ('B', 'bow forward'),
-    ('C', 'curl in'),
-    ('1 / 2 / 3', 'counting poses'),
+    ('B', 'bow'),
+    ('C', 'fist pumps'),
+    ('D', 'dab'),
+    ('U', 'stretch up'),
+    ('L / R', 'point L / R'),
+    ('1', 'nod (yes)'),
+    ('2', 'shake (no)'),
+    ('3', 'cheer'),
+    ('0 / X', 'home'),
 )
 
 RECORDING_TARGETS = (
@@ -372,6 +373,9 @@ class MagnetometerReader:
             'last_sample_x': 0.0,
             'last_sample_y': 0.0,
             'last_sample_pen_down': False,
+            # Set when the cursor (re-)enters the canvas, so the next sample starts
+            # a fresh stroke instead of drawing a line from the old/edge position.
+            'reentered': True,
         }
         self.touchpad_speed_samples = deque(maxlen=5000)
         self.touchpad_last_speed = 0.0
@@ -410,6 +414,12 @@ class MagnetometerReader:
         self.writing_max_velocity = writing_max_velocity
         self.writing_min_closeness = writing_min_closeness
         self.writing_max_z = writing_max_z
+        # Edge guard (see writing_sample_mask): within this fraction of the canvas
+        # half-extent from a border, only ink strokes slower than
+        # writing_min_velocity * writing_edge_speed_factor. Set the fraction to 0
+        # to disable. Stops the "line from the edge" on cursor entry.
+        self.writing_edge_margin_frac = 0.12
+        self.writing_edge_speed_factor = 4.0
         self.clean_view = clean_view
         self.joystick = VirtualJoystick.default(self.projection_extent)
         self.app_controller = AppController(
@@ -1561,6 +1571,24 @@ class MagnetometerReader:
         if self.writing_max_velocity is not None:
             moving &= speed <= self.writing_max_velocity
 
+        # Edge guard: near the canvas boundary, require a higher speed threshold —
+        # i.e. reject *fast* strokes there. This kills the line that gets drawn
+        # when the cursor flicks in from the edge on entry, while still inking
+        # deliberate (slower) writing near the border. Tunable via the two
+        # constants below.
+        if self.input_source != 'serial' and self.writing_edge_margin_frac > 0.0:
+            extent = self.projection_extent
+            margin = self.writing_edge_margin_frac * extent
+            near_edge = (
+                (np.abs(pose_x) >= extent - margin)
+                | (np.abs(pose_y) >= extent - margin)
+            )
+            edge_speed_cap = max(
+                self.writing_min_velocity * self.writing_edge_speed_factor,
+                1e-6,
+            )
+            moving &= ~(near_edge & (speed > edge_speed_cap))
+
         if self.writing_min_closeness is None:
             close = np.ones(len(pose_z), dtype=bool)
         else:
@@ -1913,6 +1941,10 @@ class MagnetometerReader:
 
             x = float(np.clip(event.xdata, -self.projection_extent, self.projection_extent))
             y = float(np.clip(event.ydata, -self.projection_extent, self.projection_extent))
+            if not self.touchpad_state['inside']:
+                # Cursor just came back inside — start a fresh stroke so we don't
+                # draw a line from the previous (edge/outside) position.
+                self.touchpad_state['reentered'] = True
             self.touchpad_state['x'] = x
             self.touchpad_state['y'] = y
             self.touchpad_state['inside'] = True
@@ -2007,7 +2039,10 @@ class MagnetometerReader:
         current_y = self.touchpad_state['y']
         current_pen_down = bool(self.touchpad_state['pen_down'])
 
-        if force or last_sample_at <= 0.0:
+        if force or last_sample_at <= 0.0 or self.touchpad_state.get('reentered'):
+            # Fresh start (boot or cursor re-entry): one sample at the current
+            # point, with no interpolation back to a stale/edge position.
+            self.touchpad_state['reentered'] = False
             sample_specs = [(now, current_x, current_y, current_pen_down)]
         else:
             elapsed = max(0.0, now - last_sample_at)
@@ -2185,10 +2220,10 @@ class MagnetometerReader:
             circle = patches.Circle(
                 (button.x, button.y),
                 button.radius,
-                facecolor='#f5f5f5',
-                edgecolor='#222222',
-                linewidth=1.8,
-                alpha=0.82,
+                facecolor='#ffffff',
+                edgecolor='#d2d2d7',
+                linewidth=1.3,
+                alpha=0.97,
                 zorder=4,
             )
             ax.add_patch(circle)
@@ -2199,7 +2234,8 @@ class MagnetometerReader:
                 ha='center',
                 va='center',
                 fontsize=label_fontsize,
-                weight='bold',
+                weight='medium',
+                color='#1d1d1f',
                 zorder=5,
             )
             button_artists[button.name] = {
@@ -2210,10 +2246,10 @@ class MagnetometerReader:
         cursor_artist = ax.scatter(
             [],
             [],
-            c='#d62728',
-            edgecolors='#111111',
-            linewidths=0.8,
-            s=90,
+            c='#ff3b30',          # Apple red
+            edgecolors='#ffffff',  # white ring
+            linewidths=1.4,
+            s=110,
             zorder=6,
         )
         interface_text = ax.text(
@@ -2235,13 +2271,13 @@ class MagnetometerReader:
             va='top',
             ha='center',
             fontsize=13,
-            weight='bold',
-            color='#1b7f3a',
+            weight='medium',
+            color='#1d7a3e',
             bbox={
-                'boxstyle': 'round,pad=0.35',
-                'facecolor': '#e8f7ee',
-                'edgecolor': '#1b7f3a',
-                'alpha': 0.94,
+                'boxstyle': 'round,pad=0.4',
+                'facecolor': '#e9f9ef',
+                'edgecolor': '#34c759',  # Apple green
+                'alpha': 0.96,
             },
             zorder=8,
         )
@@ -2259,14 +2295,14 @@ class MagnetometerReader:
             artist_group = button_artists[button.name]
             artist = artist_group['circle']
             label_artist = artist_group['label']
-            facecolor = '#f5f5f5'
+            facecolor = '#ffffff'
             label_text = button.name
             if button.action == 'mode:letters' and self.app_controller.mode.value == 'letters':
-                facecolor = '#d8ecff'
+                facecolor = '#e3f0ff'
             elif button.action == 'mode:digits' and self.app_controller.mode.value == 'digits':
-                facecolor = '#d8ecff'
+                facecolor = '#e3f0ff'
             elif button.action == 'mode:signs' and self.app_controller.mode.value == 'signs':
-                facecolor = '#d8ecff'
+                facecolor = '#e3f0ff'
             elif button.action.startswith('choice:'):
                 try:
                     candidate_index = int(button.action.split(':', 1)[1])
@@ -2275,20 +2311,20 @@ class MagnetometerReader:
                 if 0 <= candidate_index < len(self.classifier_candidates):
                     candidate_label, candidate_confidence = self.classifier_candidates[candidate_index]
                     label_text = f"{button.name}\n{candidate_label}"
-                    facecolor = '#fff3bf' if candidate_confidence > 0.0 else '#f5f5f5'
+                    facecolor = '#fff3c4' if candidate_confidence > 0.0 else '#ffffff'
             elif button.action.startswith('canvas:'):
-                facecolor = '#fde2e2' if button.name == last_button else '#ffe8e8'
+                facecolor = '#ffdede' if button.name == last_button else '#ffeded'
             elif button.action.startswith('robot:') and button.name == last_button:
-                facecolor = '#d8f3dc'
+                facecolor = '#d6f5e3'
 
             if button.name == active_button:
-                facecolor = '#ffd166'
+                facecolor = '#ffd60a'   # Apple yellow — dwell in progress
 
             if (
                 self.action_feedback_button == button.name
                 and time.monotonic() < self.action_feedback_until
             ):
-                facecolor = '#40b872'
+                facecolor = '#34c759'   # Apple green — confirmed
 
             artist.set_facecolor(facecolor)
             # Only call set_text() when text actually changes (avoids text re-layout each frame)
@@ -2317,6 +2353,33 @@ class MagnetometerReader:
 
     def plot_data(self):
         """Create real-time plot of Bx, By, Bz for the selected sensor."""
+        # ── Clean, Apple-like theme ─────────────────────────────────────────────
+        # Applied key-by-key and guarded so it works across matplotlib versions
+        # (Noetic's system matplotlib is older and rejects some newer rc keys).
+        _apple_theme = {
+            'font.family': 'sans-serif',
+            'font.sans-serif': ['SF Pro Text', 'SF Pro Display', 'Helvetica Neue',
+                                'Helvetica', 'Arial', 'DejaVu Sans'],
+            'figure.facecolor': '#f5f5f7',   # Apple light-gray backdrop
+            'axes.facecolor': '#ffffff',     # white panels float on the backdrop
+            'axes.edgecolor': '#d2d2d7',
+            'axes.linewidth': 0.8,
+            'axes.titlesize': 13,
+            'axes.titlecolor': '#1d1d1f',
+            'axes.labelsize': 9,
+            'axes.labelcolor': '#6e6e73',
+            'axes.grid': False,
+            'text.color': '#1d1d1f',
+            'xtick.color': '#86868b',
+            'ytick.color': '#86868b',
+            'xtick.labelsize': 8,
+            'ytick.labelsize': 8,
+        }
+        for _key, _val in _apple_theme.items():
+            try:
+                plt.rcParams[_key] = _val
+            except (KeyError, ValueError):
+                pass  # rc key not supported by this matplotlib version
         if self.clean_view:
             fig = plt.figure(figsize=(14, 8))
             grid = fig.add_gridspec(1, 3, width_ratios=[0.9, 2.2, 1.0])
@@ -2406,7 +2469,7 @@ class MagnetometerReader:
             alpha=0.58,
             zorder=1,
         )
-        ax5.set_title('Virtual Joystick + Writing Surface')
+        ax5.set_title('Writing Surface', fontweight='medium')
         ax5.set_xticks([])
         ax5.set_yticks([])
         if self.input_source == 'touchpad':
@@ -2444,15 +2507,19 @@ class MagnetometerReader:
         classifier_header_rows = 2.8
         y_positions = np.arange(display_count) + classifier_header_rows
         current_classifier_axis_labels = [classifier_labels[index] for index in display_indices]
-        ax6.set_title('EasyOCR Character Classifier')
+        ax6.set_title('Classifier', fontweight='medium')
         ax6.set_xlim(0.0, 1.0)
         ax6.set_ylim(-0.5, display_count + classifier_header_rows - 0.5)
         ax6.set_yticks(y_positions)
-        ax6.set_yticklabels(current_classifier_axis_labels, fontsize=8)
+        ax6.set_yticklabels(current_classifier_axis_labels, fontsize=9)
         ax6.tick_params(axis='y', which='both', left=False, labelleft=True, pad=2)
+        ax6.tick_params(axis='x', which='both', bottom=False)
         ax6.invert_yaxis()
         ax6.set_xlabel('Confidence')
-        prob_bars = ax6.barh(y_positions, np.zeros(display_count), color='#7c9cc8')
+        for _spine in ('top', 'right', 'left'):
+            ax6.spines[_spine].set_visible(False)
+        prob_bars = ax6.barh(y_positions, np.zeros(display_count),
+                             color='#e5e5ea', height=0.72)
         prob_bar_artists = list(prob_bars)
         info_text = ax6.text(
             0.98,
@@ -2748,12 +2815,12 @@ class MagnetometerReader:
                 else:
                     self.classifier_candidates = []
                 active_display_count = min(display_count, len(result_labels))
-                # Sort all labels by probability descending so top predictions appear first
-                sorted_by_prob = sorted(
-                    range(len(result_labels)),
-                    key=lambda i: -float(probabilities[i]),
-                )
-                display_indices = sorted_by_prob[:active_display_count]
+                # Keep labels in a FIXED order. Previously they were re-sorted by
+                # probability every frame, which changed the y-axis tick labels and
+                # forced a full fig.canvas.draw() on each classification — that was
+                # the flashing. With a stable order, only the (blitted) bar widths
+                # and the highlight colour update, so the panel refreshes smoothly.
+                display_indices = list(range(active_display_count))
 
                 self.update_joystick_artists(button_artists)
 
@@ -2781,10 +2848,10 @@ class MagnetometerReader:
 
                 for bar in prob_bars:
                     bar.set_width(0.0)
-                    bar.set_color('#7c9cc8')
+                    bar.set_color('#e5e5ea')
                 for bar, index in zip(prob_bars, display_indices):
                     bar.set_width(float(probabilities[index]))
-                    bar.set_color('#2f5f9f' if index == top_two[0] and probabilities[index] > 0.0 else '#7c9cc8')
+                    bar.set_color('#0a84ff' if index == top_two[0] and probabilities[index] > 0.0 else '#e5e5ea')
 
             if self.app_controller.mode.value == 'signs':
                 prediction_text = "Prediction: signs need shape recognizer"
@@ -2796,7 +2863,7 @@ class MagnetometerReader:
                 )
                 for bar in prob_bars:
                     bar.set_width(0.0)
-                    bar.set_color('#7c9cc8')
+                    bar.set_color('#e5e5ea')
             elif self.classifier is not None and self.app_controller.mode.value not in ('letters', 'digits'):
                 prediction_text = f"Prediction: paused ({self.app_controller.mode.value} mode)"
                 runner_up_text = "Runner-up: --"
@@ -2864,6 +2931,10 @@ class MagnetometerReader:
             blit=True,
             cache_frame_data=False,
         )
+        # Keep references so stop() (e.g. from the Ctrl+C handler) can halt the
+        # animation and close the window, letting plt.show() return.
+        self._animation = ani
+        self._figure = fig
         plt.show()
 
     def signal_handler(self, signum, frame):
@@ -2874,6 +2945,21 @@ class MagnetometerReader:
     def stop(self):
         """Stop reading and close all resources."""
         self.is_running = False
+
+        # Halt the live animation and close the GUI so plt.show() returns and the
+        # process can exit. The SIGINT handler calls stop(); without closing the
+        # figure, plt.show()'s event loop keeps blocking and Ctrl+C appears to do
+        # nothing.
+        try:
+            animation = getattr(self, '_animation', None)
+            if animation is not None and getattr(animation, 'event_source', None):
+                animation.event_source.stop()
+        except Exception:
+            pass
+        try:
+            plt.close('all')
+        except Exception:
+            pass
 
         if self.read_thread and self.read_thread.is_alive():
             self.read_thread.join(timeout=2)
