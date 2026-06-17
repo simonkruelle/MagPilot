@@ -116,7 +116,7 @@ RUN if [ "$INSTALL_GAZEBO" = "1" ]; then \
     fi
 
 RUN if [ "$INSTALL_GAZEBO" = "1" ]; then \
-        set -eux; \
+        set -ex; \
         . /opt/ros/noetic/setup.sh && \
         test -d /opt/franka_ros_ws/src/franka_ros && \
         cd /opt/franka_ros_ws && \
