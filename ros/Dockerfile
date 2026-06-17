@@ -1,5 +1,7 @@
 FROM ros:noetic-robot
 
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 ARG INSTALL_EASYOCR=1
 ARG INSTALL_FULL_PYTHON_DEPS=0
 ARG INSTALL_GAZEBO=0
@@ -11,7 +13,8 @@ ARG FRANKA_ROS_VERSION=0.10.2
 # Matplotlib UI to run when the container has a forwarded display.
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
-    MPLCONFIGDIR=/tmp/colmag-matplotlib-cache
+    MPLCONFIGDIR=/tmp/colmag-matplotlib-cache \
+    ROS_PYTHON_VERSION=3
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -55,6 +58,7 @@ RUN if [ "$INSTALL_EASYOCR" = "1" ] || [ "$INSTALL_FULL_PYTHON_DEPS" = "1" ]; th
 # by franka_gazebo, otherwise you get "Failed to create robot simulation
 # interface loader"), then builds pinned libfranka/franka_ros from source.
 RUN if [ "$INSTALL_GAZEBO" = "1" ]; then \
+        set -eux; \
         apt-get update && apt-get install -y --no-install-recommends \
             cmake \
             git \
@@ -64,6 +68,13 @@ RUN if [ "$INSTALL_GAZEBO" = "1" ]; then \
             python3-rosdep \
             ros-noetic-gazebo-ros-pkgs \
             ros-noetic-gazebo-ros-control && \
+        rm -rf /var/lib/apt/lists/*; \
+    else \
+        echo "Skipping Gazebo. Set INSTALL_GAZEBO=1 to add Gazebo + Franka."; \
+    fi
+
+RUN if [ "$INSTALL_GAZEBO" = "1" ]; then \
+        set -eux; \
         git clone --depth 1 --branch "$LIBFRANKA_VERSION" \
             https://github.com/frankarobotics/libfranka.git /tmp/libfranka && \
         cmake -S /tmp/libfranka -B /tmp/libfranka/build \
@@ -73,21 +84,39 @@ RUN if [ "$INSTALL_GAZEBO" = "1" ]; then \
             -DCMAKE_INSTALL_PREFIX=/usr/local && \
         cmake --build /tmp/libfranka/build --target install -j"$(nproc)" && \
         ldconfig && \
-        rm -rf /tmp/libfranka && \
-        mkdir -p /opt/franka_ros_ws/src && \
-        git clone --depth 1 --branch "$FRANKA_ROS_VERSION" \
-            https://github.com/frankarobotics/franka_ros.git /opt/franka_ros_ws/src/franka_ros && \
-        rosdep init 2>/dev/null || true && \
-        rosdep update && \
-        rosdep install --from-paths /opt/franka_ros_ws/src --ignore-src -r -y \
-            --rosdistro noetic --skip-keys="libfranka" && \
-        rm -rf /var/lib/apt/lists/*; \
+        grep -R "PACKAGE_VERSION" /usr/local/lib/cmake/Franka/FrankaConfigVersion.cmake && \
+        rm -rf /tmp/libfranka; \
     else \
-        echo "Skipping Gazebo. Set INSTALL_GAZEBO=1 to add Gazebo + Franka."; \
+        echo "Skipping libfranka source build."; \
     fi
 
 RUN if [ "$INSTALL_GAZEBO" = "1" ]; then \
+        set -eux; \
+        mkdir -p /opt/franka_ros_ws/src && \
+        git clone --depth 1 --branch "$FRANKA_ROS_VERSION" \
+            https://github.com/frankarobotics/franka_ros.git /opt/franka_ros_ws/src/franka_ros && \
+        test -f /opt/franka_ros_ws/src/franka_ros/franka_control/package.xml && \
+        git -C /opt/franka_ros_ws/src/franka_ros rev-parse --short HEAD; \
+    else \
+        echo "Skipping franka_ros source checkout."; \
+    fi
+
+RUN if [ "$INSTALL_GAZEBO" = "1" ]; then \
+        set -eux; \
+        test -d /opt/franka_ros_ws/src/franka_ros && \
+        (rosdep init 2>/dev/null || true) && \
+        rosdep update && \
+        rosdep install --from-paths /opt/franka_ros_ws/src/franka_ros --ignore-src -r -y \
+            --rosdistro noetic --skip-keys="libfranka" && \
+        rm -rf /var/lib/apt/lists/*; \
+    else \
+        echo "Skipping franka_ros rosdep install."; \
+    fi
+
+RUN if [ "$INSTALL_GAZEBO" = "1" ]; then \
+        set -eux; \
         . /opt/ros/noetic/setup.sh && \
+        test -d /opt/franka_ros_ws/src/franka_ros && \
         cd /opt/franka_ros_ws && \
         catkin_make -DCMAKE_BUILD_TYPE=Release -DFranka_DIR=/usr/local/lib/cmake/Franka; \
     else \

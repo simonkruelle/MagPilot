@@ -127,6 +127,38 @@ roslaunch colmag_ros fr3.launch headless:=true controller:=effort_joint_trajecto
 </details>
 
 <details>
+<summary><b>Simulation movement smoke test (Gazebo, no gestures yet)</b></summary>
+
+Run this before touching the real robot. It uses the same tiny trajectory script
+as the real FR3 smoke test, but targets Gazebo's
+`effort_joint_trajectory_controller`.
+
+```bash
+cd /catkin_ws
+catkin_make
+source devel/setup.bash
+```
+
+```bash
+# Terminal 1 — spawn the simulated FR3
+roslaunch colmag_ros fr3.launch headless:=false controller:=effort_joint_trajectory_controller
+
+# Terminal 2 — dry-run first
+rosrun colmag_ros fr3_simple_move.py \
+  _dry_run:=true \
+  _arm_id:=fr3 \
+  _arm_controller:=effort_joint_trajectory_controller
+
+# Terminal 2 — move only the simulated robot
+rosrun colmag_ros fr3_simple_move.py \
+  _dry_run:=false \
+  _arm_id:=fr3 \
+  _arm_controller:=effort_joint_trajectory_controller \
+  _delta:=0.08
+```
+</details>
+
+<details>
 <summary><b>Real FR3 smoke test (franka_control, no gestures yet)</b></summary>
 
 Use this before the COLMAG gesture pipeline. It starts `franka_control` for the
