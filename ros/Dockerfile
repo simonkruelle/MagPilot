@@ -66,8 +66,20 @@ RUN if [ "$INSTALL_GAZEBO" = "1" ]; then \
             libpoco-dev \
             pkg-config \
             python3-rosdep \
+            ros-noetic-combined-robot-hw \
+            ros-noetic-controller-interface \
+            ros-noetic-controller-manager \
+            ros-noetic-effort-controllers \
             ros-noetic-gazebo-ros-pkgs \
-            ros-noetic-gazebo-ros-control && \
+            ros-noetic-gazebo-ros-control \
+            ros-noetic-joint-limits-interface \
+            ros-noetic-joint-state-controller \
+            ros-noetic-joint-trajectory-controller \
+            ros-noetic-position-controllers \
+            ros-noetic-realtime-tools \
+            ros-noetic-robot-state-publisher \
+            ros-noetic-transmission-interface \
+            ros-noetic-xacro && \
         rm -rf /var/lib/apt/lists/*; \
     else \
         echo "Skipping Gazebo. Set INSTALL_GAZEBO=1 to add Gazebo + Franka."; \
