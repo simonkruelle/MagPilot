@@ -77,6 +77,8 @@ RUN if [ "$INSTALL_GAZEBO" = "1" ]; then \
         set -eux; \
         git clone --depth 1 --branch "$LIBFRANKA_VERSION" \
             https://github.com/frankarobotics/libfranka.git /tmp/libfranka && \
+        git -C /tmp/libfranka submodule update --init --recursive --depth 1 && \
+        test -f /tmp/libfranka/common/CMakeLists.txt && \
         cmake -S /tmp/libfranka -B /tmp/libfranka/build \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTS=OFF \
