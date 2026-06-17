@@ -8,6 +8,7 @@ ARG INSTALL_GAZEBO=0
 ARG INSTALL_MOVEIT=0
 ARG LIBFRANKA_VERSION=0.13.3
 ARG FRANKA_ROS_VERSION=0.10.2
+ARG BOOST_SML_VERSION=v1.1.11
 
 # System deps. python3-tk and the small X/OpenGL libraries allow the full
 # Matplotlib UI to run when the container has a forwarded display.
@@ -113,6 +114,42 @@ RUN if [ "$INSTALL_GAZEBO" = "1" ]; then \
         git -C /opt/franka_ros_ws/src/franka_ros rev-parse --short HEAD; \
     else \
         echo "Skipping franka_ros source checkout."; \
+    fi
+
+RUN if [ "$INSTALL_GAZEBO" = "1" ]; then \
+        set -eux; \
+        git clone --depth 1 --branch "$BOOST_SML_VERSION" \
+            https://github.com/boost-ext/sml.git /tmp/boost_sml && \
+        mkdir -p /opt/franka_ros_ws/src/boost_sml/include/boost \
+                 /opt/franka_ros_ws/src/boost_sml/include/boost_sml && \
+        cp /tmp/boost_sml/include/boost/sml.hpp \
+            /opt/franka_ros_ws/src/boost_sml/include/boost/sml.hpp && \
+        cp /tmp/boost_sml/include/boost/sml.hpp \
+            /opt/franka_ros_ws/src/boost_sml/include/boost_sml/sml.hpp && \
+        printf '%s\n' \
+            '<?xml version="1.0"?>' \
+            '<package format="2">' \
+            '  <name>boost_sml</name>' \
+            '  <version>1.1.11</version>' \
+            '  <description>Catkin wrapper for the header-only boost-ext/sml library.</description>' \
+            '  <maintainer email="simon.kruelle@gmail.com">COLMAG</maintainer>' \
+            '  <license>BSL-1.0</license>' \
+            '  <buildtool_depend>catkin</buildtool_depend>' \
+            '</package>' \
+            > /opt/franka_ros_ws/src/boost_sml/package.xml && \
+        printf '%s\n' \
+            'cmake_minimum_required(VERSION 3.0.2)' \
+            'project(boost_sml)' \
+            'find_package(catkin REQUIRED)' \
+            'catkin_package(INCLUDE_DIRS include)' \
+            'install(DIRECTORY include/' \
+            '  DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}' \
+            ')' \
+            > /opt/franka_ros_ws/src/boost_sml/CMakeLists.txt && \
+        test -f /opt/franka_ros_ws/src/boost_sml/include/boost_sml/sml.hpp && \
+        rm -rf /tmp/boost_sml; \
+    else \
+        echo "Skipping boost_sml catkin wrapper."; \
     fi
 
 RUN if [ "$INSTALL_GAZEBO" = "1" ]; then \
