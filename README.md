@@ -52,6 +52,11 @@ the Franka **Panda + FR3** simulation, then starts a container named
 `colmag_ros`. The first build downloads a few GB and takes several minutes;
 afterwards it is cached.
 
+The Gazebo image builds the Franka stack from source with pinned versions:
+`libfranka=0.13.3` and `franka_ros=0.10.2`. That keeps the Docker setup aligned
+with an FR3 lab setup on robot system `5.5.0`, where `libfranka 0.13.3` is the
+target client library.
+
 ### 2 · Run the demo — three terminals
 
 Open each terminal with `bash ros/docker_connect.sh`, then run **in order**
@@ -152,7 +157,8 @@ The reader connects to `localhost:9090` and publishes all topics over the bridge
 
 **Panda vs. FR3.** `franka_gazebo` ships only `panda.launch` (the older Franka
 Emika Panda). This repo adds [`fr3.launch`](ros/colmag_ros/launch/fr3.launch) for
-the **Franka Research 3** — `franka_description` ≥ 0.10 includes the FR3 model
+the **Franka Research 3** — `franka_ros 0.10.2` includes an FR3-capable
+`franka_description`
 and both arms share the Gazebo-capable `franka_robot.xacro`, so they simulate
 with the same controllers (joints become `fr3_joint1..7`). Both are 7-DOF Franka
 arms; match the launch to your target hardware for accurate kinematics.
@@ -161,6 +167,12 @@ arms; match the launch to your target hardware for accurate kinematics.
 `effort_joint_trajectory_controller` (defined by franka_gazebo). The robot node
 reconnects lazily, so launch order doesn't matter — as long as the arm is up by
 the time you confirm a character.
+
+**Version pins.** `INSTALL_GAZEBO=1` does not install the unpinned apt Franka
+packages. It builds `libfranka` from tag `0.13.3` and `franka_ros` from tag
+`0.10.2`, then sources `/opt/franka_ros_ws/devel/setup.bash` before this repo's
+catkin workspace. The COLMAG scripts publish ROS messages and trajectory goals,
+so no Python script changes are needed for the `libfranka` API version.
 
 ### GPU acceleration
 
@@ -251,6 +263,8 @@ digit_classifier/          EasyOCR inference wrapper
 | `INSTALL_EASYOCR` | `1` | CPU-only EasyOCR/PyTorch (set `0` for a light ROS-only image) |
 | `INSTALL_GAZEBO` | `0` | Gazebo 11 + `franka_ros` (Panda + FR3) |
 | `INSTALL_MOVEIT` | `0` | MoveIt + `panda_moveit_config` for motion planning |
+| `LIBFRANKA_VERSION` | `0.13.3` | Source tag used when `INSTALL_GAZEBO=1` |
+| `FRANKA_ROS_VERSION` | `0.10.2` | Source tag used when `INSTALL_GAZEBO=1` |
 | `COLMAG_ENABLE_GPU` | `auto` | force GPU on (`1`) / off (`0`) |
 
 ---
@@ -264,6 +278,7 @@ digit_classifier/          EasyOCR inference wrapper
 | Launch fails: *"new node registered with same name"* / *"address already in use"* | A stale `rosmaster`/`gazebo` lingered. Reset cleanly: `docker restart colmag_ros`. |
 | Banner shows `GPU: none (software rendering)` | Install `nvidia-container-toolkit` (see [GPU acceleration](#gpu-acceleration)); the sim still works without it. |
 | Gazebo GUI won't open a window | Run `xhost +local:root` on the host once. |
+| Need to verify the Franka pin | Inside the container: `grep -R PACKAGE_VERSION /usr/local/lib/cmake/Franka/FrankaConfigVersion.cmake`. |
 
 ---
 

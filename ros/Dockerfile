@@ -4,6 +4,8 @@ ARG INSTALL_EASYOCR=1
 ARG INSTALL_FULL_PYTHON_DEPS=0
 ARG INSTALL_GAZEBO=0
 ARG INSTALL_MOVEIT=0
+ARG LIBFRANKA_VERSION=0.13.3
+ARG FRANKA_ROS_VERSION=0.10.2
 
 # System deps. python3-tk and the small X/OpenGL libraries allow the full
 # Matplotlib UI to run when the container has a forwarded display.
@@ -47,21 +49,49 @@ RUN if [ "$INSTALL_EASYOCR" = "1" ] || [ "$INSTALL_FULL_PYTHON_DEPS" = "1" ]; th
         echo "Skipping EasyOCR (INSTALL_EASYOCR=0)."; \
     fi
 
-# Optional: Gazebo 11 + Franka Emika Panda simulation stack.
+# Optional: Gazebo 11 + Franka Emika Panda / FR3 simulation stack.
 # ros:noetic-robot does not ship a simulator, so this is opt-in to keep the
 # default image small. INSTALL_GAZEBO=1 adds Gazebo, gazebo_ros_control (needed
 # by franka_gazebo, otherwise you get "Failed to create robot simulation
-# interface loader"), libfranka and the franka_ros stack — which vendors the
-# Panda URDF/meshes and franka_gazebo's panda.launch.
+# interface loader"), then builds pinned libfranka/franka_ros from source.
 RUN if [ "$INSTALL_GAZEBO" = "1" ]; then \
         apt-get update && apt-get install -y --no-install-recommends \
+            cmake \
+            git \
+            libeigen3-dev \
+            libpoco-dev \
+            pkg-config \
+            python3-rosdep \
             ros-noetic-gazebo-ros-pkgs \
-            ros-noetic-gazebo-ros-control \
-            ros-noetic-libfranka \
-            ros-noetic-franka-ros && \
+            ros-noetic-gazebo-ros-control && \
+        git clone --depth 1 --branch "$LIBFRANKA_VERSION" \
+            https://github.com/frankarobotics/libfranka.git /tmp/libfranka && \
+        cmake -S /tmp/libfranka -B /tmp/libfranka/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTS=OFF \
+            -DBUILD_EXAMPLES=OFF \
+            -DCMAKE_INSTALL_PREFIX=/usr/local && \
+        cmake --build /tmp/libfranka/build --target install -j"$(nproc)" && \
+        ldconfig && \
+        rm -rf /tmp/libfranka && \
+        mkdir -p /opt/franka_ros_ws/src && \
+        git clone --depth 1 --branch "$FRANKA_ROS_VERSION" \
+            https://github.com/frankarobotics/franka_ros.git /opt/franka_ros_ws/src/franka_ros && \
+        rosdep init 2>/dev/null || true && \
+        rosdep update && \
+        rosdep install --from-paths /opt/franka_ros_ws/src --ignore-src -r -y \
+            --rosdistro noetic --skip-keys="libfranka" && \
         rm -rf /var/lib/apt/lists/*; \
     else \
-        echo "Skipping Gazebo. Set INSTALL_GAZEBO=1 to add Gazebo + Panda."; \
+        echo "Skipping Gazebo. Set INSTALL_GAZEBO=1 to add Gazebo + Franka."; \
+    fi
+
+RUN if [ "$INSTALL_GAZEBO" = "1" ]; then \
+        . /opt/ros/noetic/setup.sh && \
+        cd /opt/franka_ros_ws && \
+        catkin_make -DCMAKE_BUILD_TYPE=Release -DFranka_DIR=/usr/local/lib/cmake/Franka; \
+    else \
+        echo "Skipping franka_ros workspace build."; \
     fi
 
 # Optional: MoveIt + panda_moveit_config, so colmag_robot_node.py can send
@@ -82,6 +112,7 @@ WORKDIR /catkin_ws
 
 # Source ROS on every shell
 RUN echo "source /opt/ros/noetic/setup.bash" >> /root/.bashrc
+RUN echo "[ -f /opt/franka_ros_ws/devel/setup.bash ] && source /opt/franka_ros_ws/devel/setup.bash" >> /root/.bashrc
 RUN echo "[ -f /catkin_ws/devel/setup.bash ] && source /catkin_ws/devel/setup.bash" >> /root/.bashrc
 
 CMD ["/bin/bash"]

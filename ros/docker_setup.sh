@@ -17,6 +17,8 @@ INSTALL_EASYOCR="${INSTALL_EASYOCR:-${INSTALL_FULL_PYTHON_DEPS:-1}}"
 INSTALL_FULL_PYTHON_DEPS="${INSTALL_FULL_PYTHON_DEPS:-0}"
 INSTALL_GAZEBO="${INSTALL_GAZEBO:-0}"
 INSTALL_MOVEIT="${INSTALL_MOVEIT:-0}"
+LIBFRANKA_VERSION="${LIBFRANKA_VERSION:-0.13.3}"
+FRANKA_ROS_VERSION="${FRANKA_ROS_VERSION:-0.10.2}"
 ENABLE_GPU="${COLMAG_ENABLE_GPU:-auto}"
 COLMAG_SERIAL_DEVICE="${COLMAG_SERIAL_DEVICE:-}"
 
@@ -95,7 +97,11 @@ echo "=== colmag ROS 1 Docker Setup ==="
 echo "Project: $PROJECT_DIR"
 echo "Container: $CONTAINER_NAME"
 echo "EasyOCR deps: $INSTALL_EASYOCR"
-echo "Gazebo + Panda: $INSTALL_GAZEBO"
+echo "Gazebo + Franka: $INSTALL_GAZEBO"
+if [ "$INSTALL_GAZEBO" = "1" ]; then
+    echo "libfranka: $LIBFRANKA_VERSION"
+    echo "franka_ros: $FRANKA_ROS_VERSION"
+fi
 echo "MoveIt: $INSTALL_MOVEIT"
 echo "GPU: $GPU_MODE"
 if [ -n "$DOCKER_PLATFORM" ]; then
@@ -123,6 +129,8 @@ docker build \
     --build-arg "INSTALL_FULL_PYTHON_DEPS=$INSTALL_FULL_PYTHON_DEPS" \
     --build-arg "INSTALL_GAZEBO=$INSTALL_GAZEBO" \
     --build-arg "INSTALL_MOVEIT=$INSTALL_MOVEIT" \
+    --build-arg "LIBFRANKA_VERSION=$LIBFRANKA_VERSION" \
+    --build-arg "FRANKA_ROS_VERSION=$FRANKA_ROS_VERSION" \
     -f "$PROJECT_DIR/ros/Dockerfile" \
     -t "$IMAGE_NAME" \
     "$PROJECT_DIR"
@@ -168,7 +176,7 @@ docker run -dit \
     -v "$PROJECT_DIR/ros/colmag_ros:$ROS_WS/src/colmag_ros" \
     -v "colmag_easyocr_cache:/root/.EasyOCR" \
     -v "colmag_torch_cache:/root/.cache/torch" \
-    -e "ROS_PACKAGE_PATH=$ROS_WS/src:/opt/ros/noetic/share" \
+    -e "ROS_PACKAGE_PATH=$ROS_WS/src:/opt/franka_ros_ws/src:/opt/ros/noetic/share" \
     "$IMAGE_NAME" \
     /bin/bash
 
@@ -177,6 +185,7 @@ echo "[3/3] Building catkin workspace..."
 docker exec "$CONTAINER_NAME" bash -lc "
     set -e
     source /opt/ros/noetic/setup.bash && \
+    if [ -f /opt/franka_ros_ws/devel/setup.bash ]; then source /opt/franka_ros_ws/devel/setup.bash; fi && \
     cd $ROS_WS && \
     catkin_make
 "
@@ -188,6 +197,9 @@ echo "Run node:   roslaunch colmag_ros colmag.launch"
 echo "EasyOCR:    INSTALL_EASYOCR=1 bash ros/docker_setup.sh"
 echo "Gazebo:     INSTALL_GAZEBO=1 bash ros/docker_setup.sh"
 if [ "$INSTALL_GAZEBO" = "1" ]; then
+    echo "Franka pin: libfranka=$LIBFRANKA_VERSION, franka_ros=$FRANKA_ROS_VERSION"
+    echo "Verify pin (inside the container):"
+    echo "  grep -R PACKAGE_VERSION /usr/local/lib/cmake/Franka/FrankaConfigVersion.cmake"
     echo "Spawn Panda (inside the container, with a forwarded display):"
     echo "  roslaunch franka_gazebo panda.launch interactive_marker:=true \\"
     echo "    controller:=cartesian_impedance_example_controller"
