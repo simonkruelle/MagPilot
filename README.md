@@ -133,6 +133,14 @@ Use this before the COLMAG gesture pipeline. It starts `franka_control` for the
 real FR3, spawns `position_joint_trajectory_controller`, then sends one tiny
 joint-space nudge and returns to the measured starting pose.
 
+Rebuild/source once after pulling new ROS package changes:
+
+```bash
+cd /catkin_ws
+catkin_make
+source devel/setup.bash
+```
+
 ```bash
 # Terminal 1 — connect to the real robot controller
 roslaunch colmag_ros fr3_real.launch robot_ip:=<FR3-IP>
@@ -141,13 +149,23 @@ roslaunch colmag_ros fr3_real.launch robot_ip:=<FR3-IP>
 rosrun colmag_ros fr3_simple_move.py _dry_run:=true _arm_id:=fr3
 
 # Terminal 2 — only after the dry-run looks sane and the robot is ready
-rosrun colmag_ros fr3_simple_move.py _dry_run:=false _arm_id:=fr3
+rosrun colmag_ros fr3_simple_move.py _dry_run:=false _arm_id:=fr3 _delta:=0.04
 ```
 
 Keep the workspace clear and the stop button reachable. The script reads
-`/franka_state_controller/joint_states`, offsets joint 7 by `0.08 rad`, and
+`/franka_state_controller/joint_states`, offsets joint 7 by a small amount, and
 returns to the start pose. Tune with `_joint_index:=7`, `_delta:=0.05`, or
 `_arm_controller:=position_joint_trajectory_controller`.
+
+To watch the real robot state, use RViz in another terminal:
+
+```bash
+rviz
+```
+
+Add `RobotModel` and `TF` displays. Gazebo is a separate simulated robot, not a
+live mirror of the physical FR3, so use Gazebo for rehearsal and RViz for the
+real robot.
 </details>
 
 <details>
