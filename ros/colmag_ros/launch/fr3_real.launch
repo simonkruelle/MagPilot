@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<!--
+  fr3_real.launch — connect ROS to a real Franka Research 3 via franka_control.
+
+  This is intentionally separate from fr3.launch, which is the Gazebo launch.
+  It includes franka_control.launch from franka_ros and then starts a simple
+  JointTrajectoryController for low-risk command-chain smoke tests.
+
+  Usage:
+    roslaunch colmag_ros fr3_real.launch robot_ip:=<FR3-IP>
+-->
+<launch>
+  <arg name="robot_ip" doc="IP address of the real FR3 controller" />
+  <arg name="robot" default="fr3" doc="franka_ros robot model: panda or fr3" />
+  <arg name="arm_id" default="fr3" doc="Joint prefix: fr3_joint1..7" />
+  <arg name="load_gripper" default="false" doc="Set true only if the gripper is attached and needed" />
+  <arg name="controller" default="position_joint_trajectory_controller" doc="Trajectory controller to spawn for smoke tests" />
+  <arg name="xacro_args" default="" doc="Additional xacro args forwarded to franka_control.launch" />
+
+  <include file="$(find franka_control)/launch/franka_control.launch">
+    <arg name="robot_ip" value="$(arg robot_ip)" />
+    <arg name="robot" value="$(arg robot)" />
+    <arg name="arm_id" value="$(arg arm_id)" />
+    <arg name="load_gripper" value="$(arg load_gripper)" />
+    <arg name="xacro_args" value="$(arg xacro_args)" />
+  </include>
+
+  <node pkg="controller_manager"
+        type="spawner"
+        name="$(arg controller)_spawner"
+        output="screen"
+        args="$(arg controller)" />
+</launch>

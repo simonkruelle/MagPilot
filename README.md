@@ -127,6 +127,30 @@ roslaunch colmag_ros fr3.launch headless:=true controller:=effort_joint_trajecto
 </details>
 
 <details>
+<summary><b>Real FR3 smoke test (franka_control, no gestures yet)</b></summary>
+
+Use this before the COLMAG gesture pipeline. It starts `franka_control` for the
+real FR3, spawns `position_joint_trajectory_controller`, then sends one tiny
+joint-space nudge and returns to the measured starting pose.
+
+```bash
+# Terminal 1 — connect to the real robot controller
+roslaunch colmag_ros fr3_real.launch robot_ip:=<FR3-IP>
+
+# Terminal 2 — dry-run first; prints the planned tiny trajectory only
+rosrun colmag_ros fr3_simple_move.py _dry_run:=true _arm_id:=fr3
+
+# Terminal 2 — only after the dry-run looks sane and the robot is ready
+rosrun colmag_ros fr3_simple_move.py _dry_run:=false _arm_id:=fr3
+```
+
+Keep the workspace clear and the stop button reachable. The script reads
+`/franka_state_controller/joint_states`, offsets joint 7 by `0.08 rad`, and
+returns to the start pose. Tune with `_joint_index:=7`, `_delta:=0.05`, or
+`_arm_controller:=position_joint_trajectory_controller`.
+</details>
+
+<details>
 <summary><b>Real magnetometer + robot (hardware path)</b></summary>
 
 `docker_setup.sh` auto-mounts `/dev/ttyUSB*` / `/dev/ttyACM*`. Use the
@@ -247,9 +271,11 @@ ros/
   colmag_ros/              catkin package
     launch/
       fr3.launch                 spawn the FR3 in Gazebo
+      fr3_real.launch            connect to a real FR3 via franka_control
       colmag_distributed.launch  full pipeline (sensor→classifier→joystick→robot)
     scripts/
       colmag_robot_node.py       maps gestures → arm motion (NAMED_POSES)
+      fr3_simple_move.py         tiny real/sim trajectory smoke test
       colmag_sensor_node.py      reads the serial magnetometer
       colmag_classifier_node.py  EasyOCR classification node
       colmag_joystick_node.py    dwell-based command confirmation
