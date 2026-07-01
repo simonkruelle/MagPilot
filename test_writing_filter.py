@@ -97,7 +97,7 @@ def main():
         make_touch_row(start + timedelta(seconds=0.1), button.x + 0.001, button.y, 0.5, True),
     ]
     button_image = touch_reader.rows_to_digit_image(button_rows)
-    assert button_image.min() == 1.0
+    assert button_image.min() < 0.25
 
     mag_values = touch_reader.synthetic_magnetic_values(0.01, -0.01, 0.02)
     assert len(mag_values) == 48

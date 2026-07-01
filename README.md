@@ -30,59 +30,209 @@ recognized by EasyOCR, confirmed with a dwell-based virtual joystick, and
 published as a ROS command. A robot node maps each character to a motion — write
 an **`L`** and the arm rotates its base left; write an **`A`** and it waves.
 
-Everything below runs without any hardware: a touchpad/trackpad stands in for the
+Stages 0-3 below run without any hardware: a touchpad/trackpad stands in for the
 magnetometer, and the Panda/FR3 lives in Gazebo.
 
 ---
 
-## Quick start · Linux + Docker
+## Tomorrow's safe testing pipeline
 
-**Prerequisites:** Docker and an X11 display (standard on Linux desktops). An
-NVIDIA GPU is optional — see [GPU acceleration](#gpu-acceleration).
+Run the same stages in order. Only move to the next stage when the current one
+behaves exactly as expected.
 
-### 1 · Build the image (once)
+| Stage | Environment | Goal | Allowed to move a real robot? |
+|-------|-------------|------|:-----------------------------:|
+| 0 | Docker only | Build and verify EasyOCR imports | No |
+| 1 | Touchpad UI only | Check drawing and OCR without ROS | No |
+| 2 | ROS dry-run | Check `/colmag/command` and robot-node logs | No |
+| 3 | Gazebo FR3 | Move the simulated robot from touchpad commands | No |
+| 4 | Real setup, dry-run | Check magnetometer, ROS networking, command flow | No |
+| 5 | Real FR3, tiny smoke test | One small `fr3_simple_move.py` nudge | Yes, supervised only |
+| 6 | Real COLMAG pipeline | One approved gesture through the full stack | Yes, supervised only |
+
+Stop immediately if the predicted command is wrong, a command repeats
+unexpectedly, the wrong controller/`arm_id` is active, the robot moves in the
+wrong direction, or anyone is inside the robot workspace.
+
+### Stage 0 - build Docker once
+
+**Prerequisites:** Docker and an X11 display on Linux. An NVIDIA GPU is optional;
+Gazebo physics and EasyOCR both work on CPU.
+
+On the host PC:
 
 ```bash
-git clone <this-repo> && cd COLMAG-seminar-SS26
+cd COLMAG-seminar-SS26
+git checkout Simon
+git pull --ff-only
+xhost +local:root
 INSTALL_GAZEBO=1 bash ros/docker_setup.sh
 ```
 
-This builds a ROS Noetic image with the CPU-only EasyOCR stack, Gazebo 11, and
-the Franka **Panda + FR3** simulation, then starts a container named
-`colmag_ros`. The first build downloads a few GB and takes several minutes;
-afterwards it is cached.
+This builds a ROS Noetic image with CPU-only EasyOCR, Gazebo 11, and the Franka
+Panda/FR3 simulation, then starts a container named `colmag_ros`. The first build
+downloads several GB; later builds are cached.
+
+Open a shell in the container:
+
+```bash
+bash ros/docker_connect.sh
+```
+
+Optional EasyOCR warm-up inside the container. This downloads the OCR model into
+the Docker cache volume, so tomorrow's first classifier run should start faster:
+
+```bash
+python3 - <<'PY'
+import torch, easyocr
+print('torch', torch.__version__, 'cuda', torch.cuda.is_available())
+easyocr.Reader(['en'], gpu=False)
+print('EasyOCR model ready')
+PY
+```
+
+### Stage 1 - touchpad + EasyOCR only
+
+Inside the container:
+
+```bash
+python3 magnetometer_reader.py --input-source touchpad --classifier-labels ABCXLRUD0123
+```
+
+Draw a few simple characters (`A`, `L`, `R`, `0`) and confirm that the top OCR
+prediction is stable. This stage does not start ROS and cannot move any robot.
+
+### Stage 2 - ROS dry-run, still no robot
+
+Open three container terminals with `bash ros/docker_connect.sh`.
+
+```bash
+# Terminal 1 - ROS master only
+roscore
+
+# Terminal 2 - robot node in dry-run mode
+rosrun colmag_ros colmag_robot_node.py _dry_run:=true _arm_id:=fr3
+
+# Terminal 3 - touchpad UI publishing ROS topics
+python3 magnetometer_reader.py --input-source touchpad --ros --classifier-labels ABCXLRUD0123
+```
+
+Expected result: when you dwell-confirm the top prediction, Terminal 2 logs
+`CONFIRMED gesture: ... (dry run)`. Nothing moves.
+
+Useful extra check in a fourth terminal:
+
+```bash
+rostopic echo /colmag/command
+```
 
 The Gazebo image builds the Franka stack from source with pinned versions:
 `libfranka=0.13.3` and `franka_ros=0.10.2`. That keeps the Docker setup aligned
 with an FR3 lab setup on robot system `5.5.0`, where `libfranka 0.13.3` is the
 target client library.
 
-### 2 · Run the demo — three terminals
+### Stage 3 - FR3 in Gazebo
 
-Open each terminal with `bash ros/docker_connect.sh`, then run **in order**
-(Terminal 1 starts the ROS master, so it must go first):
+Open three fresh container terminals. Run them in this order:
 
 ```bash
-# Terminal 1 — spawn the FR3 in Gazebo with its trajectory controller
+# Terminal 1 - spawn the FR3 in Gazebo with the trajectory controller
 roslaunch colmag_ros fr3.launch controller:=effort_joint_trajectory_controller
 
-# Terminal 2 — the robot action node (waits for the arm, then drives it)
+# Terminal 2 - robot action node, live only for the simulated arm
 rosrun colmag_ros colmag_robot_node.py _dry_run:=false _arm_id:=fr3
 
-# Terminal 3 — the trackpad writing interface
-python3 magnetometer_reader.py --input-source trackpad --ros --classifier-labels ABCXLRUD0123
+# Terminal 3 - touchpad writing interface
+python3 magnetometer_reader.py --input-source touchpad --ros --classifier-labels ABCXLRUD0123
 ```
 
-### 3 · Write something
+Expected result: dwell-confirming the top prediction sends a trajectory to the
+Gazebo FR3. Test calm commands first: `0`/`X` for home, then `L` or `R`, then
+`A`.
 
-In the Terminal 3 window, **air-write a character** on the trackpad. When the
-top prediction is right, **dwell on the confirm target**. The FR3 in Gazebo
-performs that character's motion. The action legend is shown to the left of the
-canvas.
+Quick health checks:
 
-> Want the Panda instead of the FR3? Use
-> `roslaunch franka_gazebo panda.launch controller:=effort_joint_trajectory_controller`
-> and `_arm_id:=panda` on the robot node.
+```bash
+rostopic hz /franka_state_controller/franka_states
+rostopic list | grep follow_joint_trajectory
+rosservice call /controller_manager/list_controllers
+```
+
+Want the Panda instead of the FR3? Use:
+
+```bash
+roslaunch franka_gazebo panda.launch controller:=effort_joint_trajectory_controller
+rosrun colmag_ros colmag_robot_node.py _dry_run:=false _arm_id:=panda
+```
+
+### Stage 4 - real magnetometer + real ROS, dry-run
+
+Only start this after Stage 3 works. Keep the robot node in dry-run while you
+check the real sensor, ROS master, and command flow.
+
+On the host, rebuild/restart Docker after plugging in the magnetometer so the
+serial device is mounted:
+
+```bash
+INSTALL_GAZEBO=1 bash ros/docker_setup.sh
+```
+
+Inside the container, set the lab ROS network values given by the supervisor:
+
+```bash
+export ROS_MASTER_URI=http://<lab-ros-master-ip>:11311
+export ROS_IP=<this-pc-ip-on-the-robot-network>
+roslaunch colmag_ros colmag_distributed.launch run_robot:=true dry_run:=true arm_id:=fr3 port:=/dev/ttyUSB0
+```
+
+If the magnetometer appears as `/dev/ttyACM0`, use that instead. Expected
+result: the sensor, classifier, joystick, and robot node all run, and the robot
+node logs confirmed gestures as dry-run messages. The real robot must not move.
+
+### Stage 5 - one tiny supervised real-FR3 command
+
+Do this only after Stage 4 is clean and the supervisor confirms:
+
+- the workspace is clear,
+- the emergency stop / enabling device is ready,
+- the correct robot and controller are active,
+- the first motion is allowed to be small.
+
+This stage does **not** use gestures yet. It uses the dedicated smoke-test
+script from the ROS package: it reads the current joint state, offsets one joint
+by a tiny amount, and returns to the starting pose.
+
+```bash
+# Terminal 1 - connect ROS to the real FR3
+roslaunch colmag_ros fr3_real.launch robot_ip:=<FR3-IP>
+
+# Terminal 2 - dry-run first; prints the planned trajectory only
+rosrun colmag_ros fr3_simple_move.py _dry_run:=true _arm_id:=fr3
+
+# Terminal 2 - only after the dry-run and supervisor check are clean
+rosrun colmag_ros fr3_simple_move.py _dry_run:=false _arm_id:=fr3 _delta:=0.04
+```
+
+Stop if anything differs from the dry-run plan.
+
+### Stage 6 - full real COLMAG gesture pipeline
+
+Only start this after Stage 5 succeeds. Keep `fr3_real.launch` running in one
+terminal, then run the full pipeline in another. Use the real trajectory
+controller from `fr3_real.launch`, not the Gazebo effort controller:
+
+```bash
+roslaunch colmag_ros colmag_distributed.launch \
+  run_robot:=true \
+  dry_run:=false \
+  arm_id:=fr3 \
+  arm_controller:=position_joint_trajectory_controller \
+  port:=/dev/ttyUSB0
+```
+
+The first live gesture must be explicitly approved. Review the motion mapped to
+that label in `ros/colmag_ros/scripts/colmag_robot_node.py` before running it on
+the real arm.
 
 ---
 
@@ -201,14 +351,15 @@ real robot.
 </details>
 
 <details>
-<summary><b>Real magnetometer + robot (hardware path)</b></summary>
+<summary><b>Real magnetometer hardware dry-run shortcut</b></summary>
 
 `docker_setup.sh` auto-mounts `/dev/ttyUSB*` / `/dev/ttyACM*`. Use the
 distributed launch, where `sensor_node` reads the serial port and the launch's
-own classifier/joystick nodes produce commands (do **not** also run the reader):
+own classifier/joystick nodes produce commands (do **not** also run the reader).
+Keep `dry_run:=true` until the full Stage 4 checklist passes:
 
 ```bash
-roslaunch colmag_ros colmag_distributed.launch run_robot:=true dry_run:=false
+roslaunch colmag_ros colmag_distributed.launch run_robot:=true dry_run:=true arm_id:=fr3 port:=/dev/ttyUSB0
 ```
 </details>
 
@@ -238,9 +389,10 @@ with the same controllers (joints become `fr3_joint1..7`). Both are 7-DOF Franka
 arms; match the launch to your target hardware for accurate kinematics.
 
 **Controller.** Motions are sent as `FollowJointTrajectory` goals to
-`effort_joint_trajectory_controller` (defined by franka_gazebo). The robot node
-reconnects lazily, so launch order doesn't matter — as long as the arm is up by
-the time you confirm a character.
+`effort_joint_trajectory_controller` in simulation (defined by franka_gazebo).
+Launch Gazebo first during testing because it makes errors easier to see. The
+robot node can reconnect lazily as long as the arm is up before you confirm a
+character.
 
 **Version pins.** `INSTALL_GAZEBO=1` does not install the unpinned apt Franka
 packages. It builds `libfranka` from tag `0.13.3` and `franka_ros` from tag
@@ -279,7 +431,7 @@ EasyOCR uses **CPU-only** PyTorch in the image (to keep it small), so
 
 | Topic | Type | Content |
 |-------|------|---------|
-| `/colmag/command` | `std_msgs/String` | UI commands: `choice:0…3`, `canvas:reset`, `letter_detection`, `number_detection`, `symbol_detection` |
+| `/colmag/command` | `std_msgs/String` | UI commands: `choice:0…3`, `canvas:reset`, `letter_detection`, `number_detection` |
 | `/colmag/classifier` | `std_msgs/String` | Top predicted character |
 | `/colmag/confidence` | `std_msgs/Float64` | Confidence of top prediction (0–1) |
 | `/colmag/pose` | `geometry_msgs/PoseStamped` | Magnet XYZ position |

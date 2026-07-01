@@ -49,14 +49,10 @@ def test_mode_buttons():
     assert event.classifier_labels == '0123'
 
 
-def test_signs_button():
+def test_symbols_are_not_in_default_buttons():
     joystick, controller = make_controller()
-
-    event = fire_button(controller, button_named(joystick, 'Signs'), 0.0)
-    assert controller.mode == InputMode.SIGNS
-    assert event.command == 'symbol_detection'
-    assert event.classifier_labels is None
-    assert controller.classifier_labels is None
+    assert all(button.name != 'Signs' for button in joystick.buttons)
+    assert controller.mode == InputMode.MENU
 
 
 def test_reset_button_keeps_classification_mode():
@@ -90,7 +86,7 @@ def test_choice_buttons_keep_classification_mode():
 
 def test_moving_away_resets_dwell():
     joystick, controller = make_controller()
-    button = button_named(joystick, 'Signs')
+    button = button_named(joystick, 'Letters')
 
     assert controller.update_cursor(button.x, button.y, 0.0) is None
     assert controller.update_cursor(button.x, button.y, 0.6) is None
@@ -100,12 +96,12 @@ def test_moving_away_resets_dwell():
 
     event = controller.update_cursor(button.x, button.y, 1.9)
     assert event is not None
-    assert event.command == 'symbol_detection'
+    assert event.command == 'letter_detection'
 
 
 def main():
     test_mode_buttons()
-    test_signs_button()
+    test_symbols_are_not_in_default_buttons()
     test_reset_button_keeps_classification_mode()
     test_choice_buttons_keep_classification_mode()
     test_moving_away_resets_dwell()

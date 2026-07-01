@@ -52,7 +52,6 @@ class VirtualJoystick:
 
         return cls(
             [
-                VirtualButton('Signs', left_x, vertical, radius, 'mode:signs'),
                 VirtualButton('Reset', left_x, -vertical, radius, 'canvas:reset'),
                 VirtualButton('Letters', left_x - horizontal, 0.0, radius, 'mode:letters'),
                 VirtualButton('Digits', left_x + horizontal, 0.0, radius, 'mode:digits'),

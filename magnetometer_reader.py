@@ -1976,9 +1976,6 @@ class MagnetometerReader:
             elif self.input_source == 'touchpad' and raw_key in ('R', 'shift+r'):
                 self.activate_classifier_mode('digits')
                 self._set_key_feedback("Mode: digits")
-            elif self.input_source == 'touchpad' and raw_key in ('U', 'shift+u'):
-                self.activate_signs_mode()
-                self._set_key_feedback("Mode: signs")
             elif self.input_source == 'touchpad' and raw_key in ('D', 'shift+d'):
                 self.reset_writing_canvas()
                 self._set_key_feedback("Canvas reset")
@@ -2152,18 +2149,12 @@ class MagnetometerReader:
         return None
 
     def joystick_button_mask(self, pose_x, pose_y):
-        """Return samples that are inside virtual buttons and should not become ink."""
-        if len(pose_x) == 0:
-            return np.array([], dtype=bool)
-        return np.array(
-            [
-                self.joystick.button_at(x, y) is not None
-                if np.isfinite(x) and np.isfinite(y)
-                else False
-                for x, y in zip(pose_x, pose_y)
-            ],
-            dtype=bool,
-        )
+        """Return samples hidden from ink because they are UI-only.
+
+        Buttons are now translucent overlays on the writing surface, so moving
+        over them should still leave visible ink underneath.
+        """
+        return np.zeros(len(pose_x), dtype=bool)
 
     def live_pose_rows(self, rows):
         """Return the row window used by live pose, joystick, and OCR views."""
@@ -2195,9 +2186,11 @@ class MagnetometerReader:
         return selected
 
     def setup_joystick_artists(self, ax):
-        """Draw the virtual joystick layer on the projection axis."""
+        """Draw translucent virtual controls over the writing surface."""
         ax.set_xlim(-self.projection_extent, self.projection_extent)
         ax.set_ylim(-self.projection_extent, self.projection_extent)
+        ax.set_xlabel('')
+        ax.set_ylabel('')
         if self.input_source == 'touchpad':
             ax.set_aspect('auto')
             try:
@@ -2206,24 +2199,25 @@ class MagnetometerReader:
                 pass
         else:
             ax.set_aspect('equal', adjustable='box')
-        ax.set_xlabel('')
-        ax.set_ylabel('')
 
         button_artists = {}
         for button in self.joystick.buttons:
             if button.action.startswith('choice:'):
-                label_fontsize = 10
+                label_fontsize = 11
             elif len(button.name) >= 6:
-                label_fontsize = 7
+                label_fontsize = 7.5
             else:
-                label_fontsize = 9
+                label_fontsize = 9.5
+            edgecolor = '#8e8e93'
+            if button.action.startswith('canvas:'):
+                edgecolor = '#b07a1a'
             circle = patches.Circle(
                 (button.x, button.y),
                 button.radius,
-                facecolor='#ffffff',
-                edgecolor='#d2d2d7',
-                linewidth=1.3,
-                alpha=0.97,
+                facecolor='#f2f2f7',
+                edgecolor=edgecolor,
+                linewidth=1.1,
+                alpha=0.34,
                 zorder=4,
             )
             ax.add_patch(circle)
@@ -2235,7 +2229,8 @@ class MagnetometerReader:
                 va='center',
                 fontsize=label_fontsize,
                 weight='medium',
-                color='#1d1d1f',
+                color='#4f5661',
+                alpha=0.68,
                 zorder=5,
             )
             button_artists[button.name] = {
@@ -2295,14 +2290,18 @@ class MagnetometerReader:
             artist_group = button_artists[button.name]
             artist = artist_group['circle']
             label_artist = artist_group['label']
-            facecolor = '#ffffff'
+            facecolor = '#f2f2f7'
+            button_alpha = 0.34
+            label_alpha = 0.68
             label_text = button.name
             if button.action == 'mode:letters' and self.app_controller.mode.value == 'letters':
-                facecolor = '#e3f0ff'
+                facecolor = '#dcecff'
+                button_alpha = 0.46
+                label_alpha = 0.84
             elif button.action == 'mode:digits' and self.app_controller.mode.value == 'digits':
-                facecolor = '#e3f0ff'
-            elif button.action == 'mode:signs' and self.app_controller.mode.value == 'signs':
-                facecolor = '#e3f0ff'
+                facecolor = '#dcecff'
+                button_alpha = 0.46
+                label_alpha = 0.84
             elif button.action.startswith('choice:'):
                 try:
                     candidate_index = int(button.action.split(':', 1)[1])
@@ -2311,22 +2310,33 @@ class MagnetometerReader:
                 if 0 <= candidate_index < len(self.classifier_candidates):
                     candidate_label, candidate_confidence = self.classifier_candidates[candidate_index]
                     label_text = f"{button.name}\n{candidate_label}"
-                    facecolor = '#fff3c4' if candidate_confidence > 0.0 else '#ffffff'
+                    if candidate_confidence > 0.0:
+                        facecolor = '#fff1b8'
+                        button_alpha = 0.44
+                        label_alpha = 0.86
             elif button.action.startswith('canvas:'):
-                facecolor = '#ffdede' if button.name == last_button else '#ffeded'
+                facecolor = '#ffdede' if button.name == last_button else '#f5eded'
+                button_alpha = 0.42 if button.name == last_button else 0.34
             elif button.action.startswith('robot:') and button.name == last_button:
                 facecolor = '#d6f5e3'
+                button_alpha = 0.46
 
             if button.name == active_button:
                 facecolor = '#ffd60a'   # Apple yellow — dwell in progress
+                button_alpha = 0.60
+                label_alpha = 0.96
 
             if (
                 self.action_feedback_button == button.name
                 and time.monotonic() < self.action_feedback_until
             ):
                 facecolor = '#34c759'   # Apple green — confirmed
+                button_alpha = 0.66
+                label_alpha = 0.96
 
             artist.set_facecolor(facecolor)
+            artist.set_alpha(button_alpha)
+            label_artist.set_alpha(label_alpha)
             # Only call set_text() when text actually changes (avoids text re-layout each frame)
             prev_text = self._cached_button_texts.get(button.name)
             if label_text != prev_text:
@@ -2472,9 +2482,21 @@ class MagnetometerReader:
         ax5.set_title('Writing Surface', fontweight='medium')
         ax5.set_xticks([])
         ax5.set_yticks([])
+        ax5.set_facecolor('#ffffff')
+        for spine in ax5.spines.values():
+            spine.set_color('#d2d2d7')
+            spine.set_linewidth(1.0)
         if self.input_source == 'touchpad':
-            _hint_line1 = "Shift+S = save   Shift+Q = quit   |   A-Z / 0-9 / - / = = record   p/s/q = letter P/S/Q"
-            _hint_line2 = "Space / click = draw   Shift+P = pen   |   Shift+L = letters   Shift+R = digits   Shift+U = signs   Shift+D = reset"
+            ax5.set_aspect('auto')
+            try:
+                ax5.set_box_aspect(0.62)
+            except Exception:
+                pass
+        else:
+            ax5.set_aspect('equal', adjustable='box')
+        if self.input_source == 'touchpad':
+            _hint_line1 = "Shift+S save   Shift+Q quit   |   A-Z / 0-9 / - / = record"
+            _hint_line2 = "Space/click draw   Shift+P pen   |   Shift+L letters   Shift+R digits   Shift+D reset"
             _hint_lines = [_hint_line1, _hint_line2]
         else:
             _hint_lines = ["s = stop & save   q = quit   |   A-Z = letter   0-9 = digit   - = blank   = = still"]
@@ -2688,24 +2710,28 @@ class MagnetometerReader:
             )
             image_artist.set_data(digit_image)
             clear_canvas_requested = False
+            now = time.monotonic()
+            interface_event = None
             if len(pose_x) > 0 and np.isfinite(pose_x[-1]) and np.isfinite(pose_y[-1]):
                 cursor_artist.set_offsets([[pose_x[-1], pose_y[-1]]])
                 interface_event = self.app_controller.update_cursor(
                     pose_x[-1],
                     pose_y[-1],
-                    time.monotonic(),
+                    now,
                 )
-                if interface_event is not None:
-                    clear_canvas_requested = (
-                        interface_event.command == 'canvas:reset'
-                        or interface_event.command == 'symbol_detection'
-                        or interface_event.classifier_labels is not None
-                    )
-                    self.handle_interface_event(interface_event)
-                    if interface_event.classifier_labels is not None and pose_rows:
-                        self.mark_classification_start(pose_rows[-1][0])
             else:
                 cursor_artist.set_offsets(np.empty((0, 2)))
+                self.app_controller.update_cursor(999.0, 999.0, now)
+
+            if interface_event is not None:
+                clear_canvas_requested = (
+                    interface_event.command == 'canvas:reset'
+                    or interface_event.command == 'symbol_detection'
+                    or interface_event.classifier_labels is not None
+                )
+                self.handle_interface_event(interface_event)
+                if interface_event.classifier_labels is not None and pose_rows:
+                    self.mark_classification_start(pose_rows[-1][0])
 
             if clear_canvas_requested:
                 self.reset_live_digit_image()
@@ -2714,7 +2740,6 @@ class MagnetometerReader:
                 ocr_mask = np.zeros_like(ocr_mask, dtype=bool)
                 ink_count = 0
 
-            now = time.monotonic()
             self.report_touchpad_speed(now)
             self.update_joystick_artists(button_artists)
             dwell_text = (
@@ -3130,7 +3155,6 @@ class MagnetometerReader:
                 print(f"  Touchpad dwell : {self.app_controller.detector.dwell_seconds:.1f}s to activate a button")
                 print("  Shift+L        : switch to letters OCR mode")
                 print("  Shift+R        : switch to digits OCR mode")
-                print("  Shift+U        : switch to signs mode")
                 print("  Shift+D        : reset writing canvas")
                 print("  Shift+P        : toggle pen on/off")
                 print("  Shift+S        : stop & save current recording")
@@ -3429,7 +3453,7 @@ def main():
         "Virtual Joystick: "
         f"Letters -> letters ({args.letter_labels}), "
         f"Digits -> numbers ({args.digit_labels}), "
-        f"Signs -> shape placeholder, Reset -> clear canvas, "
+        f"Reset -> clear canvas, "
         f"dwell={args.joystick_dwell_seconds}s"
     )
     if args.no_writing_filter:
