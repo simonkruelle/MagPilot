@@ -20,6 +20,7 @@ catkin_install_python(PROGRAMS
   scripts/colmag_joystick_node.py
   scripts/colmag_robot_node.py
   scripts/fr3_simple_move.py
+  scripts/fr3_recover.py
   scripts/colmag_listener.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

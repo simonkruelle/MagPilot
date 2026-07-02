@@ -114,6 +114,11 @@ class ColmagRobotNode:
         if not self.dry_run:
             self._setup_trajectory_client()
 
+        # Trajectories are fire-and-forget (see _send_trajectory), so without
+        # this hook the controller keeps playing the rest of a gesture after
+        # Ctrl-C. Cancelling makes the arm stop and hold where it is.
+        rospy.on_shutdown(self._cancel_on_shutdown)
+
         # ── Subscribers ───────────────────────────────────────────────────────
         rospy.Subscriber('/colmag/command',    String,  self.on_command)
         rospy.Subscriber('/colmag/classifier', String,  self.on_classifier)
@@ -123,6 +128,16 @@ class ColmagRobotNode:
                 else 'LIVE (arm_id={}, controller={}, time_scale={:.1f})'.format(
                     self.arm_id, self.controller, self.time_scale))
         rospy.loginfo('colmag_robot_node ready | mode={}'.format(mode))
+
+    def _cancel_on_shutdown(self):
+        if self.traj_client is None:
+            return
+        try:
+            self.traj_client.cancel_all_goals()
+            rospy.logwarn('Shutdown: cancelled active arm trajectory — the arm '
+                          'stops and holds its current position.')
+        except Exception as exc:
+            rospy.logwarn('Shutdown: could not cancel trajectory: %s', exc)
 
     def _setup_trajectory_client(self):
         if not _TRAJ_AVAILABLE:
@@ -287,16 +302,23 @@ class ColmagRobotNode:
         ])
 
     def _celebrate(self):
-        """Arm up, a couple of quick fist pumps. 💪"""
-        up   = self._pose(j2=-1.00, j4=-1.1, j6=1.0)
-        pump = self._pose(j2=-1.35, j4=-1.1, j6=1.0)
+        """Arm up, a couple of quick elbow pumps. 💪
+
+        Pumps with the elbow (j4), not the shoulder: the old j2 pump swung the
+        wrist ~0.47 m behind the base (FK-checked). Keeping j2 fixed keeps the
+        whole motion inside the same envelope as _wave.
+        """
+        up   = self._pose(j2=-0.7, j4=-1.70, j6=1.0)
+        pump = self._pose(j2=-0.7, j4=-1.25, j6=1.0)
         self._send_trajectory([
             (up, 1.4), (pump, 1.9), (up, 2.4), (pump, 2.9), (up, 3.4), (HOME_POSE, 5.0),
         ])
 
     def _cheer(self):
         """Arm raised high, sweeping side to side like a victory wave. 🙌"""
-        up    = self._pose(j2=-1.2, j4=-0.9, j6=0.9)
+        # j2=-1.2/j4=-0.9 put the wrist ~0.46 m behind the base; this raise
+        # stays in front (same geometry as _wave's ready pose).
+        up    = self._pose(j2=-0.7, j4=-1.3, j6=0.9)
         left  = list(up); left[0]  = 0.5
         right = list(up); right[0] = -0.5
         self._send_trajectory([
@@ -309,8 +331,13 @@ class ColmagRobotNode:
         self._send_trajectory([(dab, 1.8), (dab, 2.7), (HOME_POSE, 4.7)])
 
     def _stretch_up(self):
-        """Reach straight up tall, hold, return. 🙆"""
-        tall = self._pose(j2=-1.45, j4=-0.45, j6=1.0)
+        """Reach straight up tall, hold, return. 🙆
+
+        Upper arm near vertical with the elbow bent forward: reaches higher
+        (wrist z ≈ 1.0 m vs 0.59 m before) and stays entirely in front of the
+        base — the old j2=-1.45/j4=-0.45 pose reached ~0.67 m behind it.
+        """
+        tall = self._pose(j2=-0.2, j4=-0.9, j6=1.0)
         self._send_trajectory([(tall, 2.3), (tall, 3.2), (HOME_POSE, 5.3)])
 
     def _point_left(self):

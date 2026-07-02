@@ -271,6 +271,29 @@ If the magnetometer appears as `/dev/ttyACM0`, use that instead. If a gesture
 misclassifies, fall back to Stage 6 (touchpad) to tell apart sensor problems
 from robot problems.
 
+### Stopping safely and recovering from an E-stop
+
+**Ctrl-C:** the robot node and `fr3_simple_move.py` cancel their running
+trajectory on shutdown, so the arm stops and holds position instead of playing
+the rest of the motion. Stop the pipeline terminal (robot node) first, then
+`fr3_real.launch`. When `fr3_real.launch` exits, the arm holds its pose with
+motors enabled; use Desk to lock/park it.
+
+**Emergency stop / reflex stop:** pressing the activation device (or tripping a
+safety reflex) locks the robot in an error state — it stays locked until the
+error is cleared, even after the button is released. To recover:
+
+```bash
+# 1. Release the activation device.
+# 2. With fr3_real.launch still running:
+rosrun colmag_ros fr3_recover.py
+```
+
+If the arm stays locked, unlock the joints in the Desk web interface (brakes)
+and confirm FCI mode is active, then run the script again. If `fr3_real.launch`
+died (its `franka_control` is a required process), just restart the launch — a
+fresh connection also clears the error.
+
 ---
 
 ## Gesture → robot action
@@ -516,6 +539,7 @@ ros/
     scripts/
       colmag_robot_node.py       maps gestures → arm motion (NAMED_POSES)
       fr3_simple_move.py         tiny real/sim trajectory smoke test
+      fr3_recover.py             clear the Franka error state after E-stop/reflex
       colmag_sensor_node.py      reads the serial magnetometer
       colmag_classifier_node.py  EasyOCR classification node
       colmag_joystick_node.py    dwell-based command confirmation

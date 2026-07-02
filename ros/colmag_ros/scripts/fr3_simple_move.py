@@ -156,6 +156,16 @@ class SimpleFr3Move:
         goal.trajectory.points = [hold] + out_leg + back_leg
         return goal, target
 
+    def _cancel_on_shutdown(self):
+        client = getattr(self, "_client", None)
+        if client is None:
+            return
+        try:
+            client.cancel_all_goals()
+            rospy.logwarn("Shutdown: cancelled trajectory — the arm stops and holds position.")
+        except Exception as exc:
+            rospy.logwarn("Shutdown: could not cancel trajectory: %s", exc)
+
     def run(self):
         start = self._current_positions()
         goal, target = self._trajectory_goal(start)
@@ -172,6 +182,11 @@ class SimpleFr3Move:
         client = actionlib.SimpleActionClient(action_ns, FollowJointTrajectoryAction)
         if not client.wait_for_server(rospy.Duration(10.0)):
             raise RuntimeError("Trajectory action server not available: {}".format(action_ns))
+
+        # On Ctrl-C, cancel the goal so the controller does not keep playing the
+        # rest of the trajectory; the arm stops and holds position.
+        self._client = client
+        rospy.on_shutdown(self._cancel_on_shutdown)
 
         rospy.logwarn("Sending small real-robot trajectory in 2 seconds. Keep the E-stop reachable.")
         rospy.sleep(2.0)
