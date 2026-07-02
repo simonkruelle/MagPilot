@@ -38,6 +38,7 @@
   <arg name="dry_run"         default="true"   doc="Robot node: log only, do not move"/>
   <arg name="arm_id"          default="fr3"    doc="Robot node: joint prefix '&lt;arm_id&gt;_joint1..7' (fr3 or panda)"/>
   <arg name="arm_controller"  default="effort_joint_trajectory_controller" doc="Robot node: JointTrajectoryController to drive"/>
+  <arg name="time_scale"      default="2.0"    doc="Robot node: multiplies all motion waypoint times; 1.0 restores the original Gazebo-tuned speed"/>
 
   <!-- ── 1. Sensor node — the ONLY node that reads the serial port ────────── -->
   <node pkg="colmag_ros"
@@ -86,6 +87,7 @@
     <param name="dry_run"         value="$(arg dry_run)"/>
     <param name="arm_id"          value="$(arg arm_id)"/>
     <param name="arm_controller"  value="$(arg arm_controller)"/>
+    <param name="time_scale"      value="$(arg time_scale)"/>
     <!-- <param name="robot_ip" value="192.168.1.100"/> -->
   </node>
 

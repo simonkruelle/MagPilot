@@ -38,6 +38,11 @@ Parameters:
   ~arm_id          (str,  default 'fr3')                           — joint name prefix: '<arm_id>_joint1..7' (use 'panda' for the Panda)
   ~arm_controller  (str,  default 'effort_joint_trajectory_controller') — JointTrajectoryController to drive
   ~move_duration   (float, default 3.0)                           — seconds for a single-pose move
+  ~time_scale      (float, default 2.0)                           — multiplies all waypoint times. The motion timings
+                                                                    below were tuned in Gazebo; at 1.0 'wave' and
+                                                                    'celebrate' exceed FR3 joint velocity/acceleration
+                                                                    limits and trigger reflex stops on the real arm.
+                                                                    2.0 keeps every motion under ~70% of the limits.
 
 Usage:
   rosrun colmag_ros colmag_robot_node.py
@@ -79,6 +84,12 @@ class ColmagRobotNode:
         self.arm_id        = rospy.get_param('~arm_id', 'fr3')
         self.controller    = rospy.get_param('~arm_controller', 'effort_joint_trajectory_controller')
         self.move_duration = float(rospy.get_param('~move_duration', 3.0))
+        self.time_scale    = float(rospy.get_param('~time_scale', 2.0))
+        if self.time_scale <= 0.0:
+            raise ValueError('~time_scale must be > 0')
+        if self.time_scale < 1.0:
+            rospy.logwarn('~time_scale=%.2f is faster than the Gazebo-tuned timings; '
+                          'expect reflex stops on a real arm.', self.time_scale)
 
         self.joint_names = ['{}_joint{}'.format(self.arm_id, i) for i in range(1, 8)]
 
@@ -109,7 +120,8 @@ class ColmagRobotNode:
         rospy.Subscriber('/colmag/confidence', Float64, self.on_confidence)
 
         mode = ('DRY RUN (no robot actions)' if self.dry_run
-                else 'LIVE (arm_id={}, controller={})'.format(self.arm_id, self.controller))
+                else 'LIVE (arm_id={}, controller={}, time_scale={:.1f})'.format(
+                    self.arm_id, self.controller, self.time_scale))
         rospy.loginfo('colmag_robot_node ready | mode={}'.format(mode))
 
     def _setup_trajectory_client(self):
@@ -191,6 +203,9 @@ class ColmagRobotNode:
 
         Args:
             points: list of (positions[7], time_from_start_seconds) tuples.
+                    Times are multiplied by ~time_scale before sending, so the
+                    motion methods below stay written in their original
+                    Gazebo-tuned timings.
         Returns:
             True if the goal completed, False otherwise (incl. dry-run/no server).
         """
@@ -209,7 +224,7 @@ class ColmagRobotNode:
             pt = JointTrajectoryPoint()
             pt.positions     = list(positions)
             pt.velocities    = [0.0] * len(self.joint_names)
-            pt.time_from_start = rospy.Duration(t)
+            pt.time_from_start = rospy.Duration(t * self.time_scale)
             goal.trajectory.points.append(pt)
         goal.trajectory.header.stamp = rospy.Time.now()
 
