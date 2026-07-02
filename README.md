@@ -48,7 +48,8 @@ behaves exactly as expected.
 | 3 | Gazebo FR3 | Move the simulated robot from touchpad commands | No |
 | 4 | Real setup, dry-run | Check magnetometer, ROS networking, command flow | No |
 | 5 | Real FR3, tiny smoke test | One small `fr3_simple_move.py` nudge | Yes, supervised only |
-| 6 | Real COLMAG pipeline | One approved gesture through the full stack | Yes, supervised only |
+| 6 | Real FR3 + touchpad | One approved gesture, touchpad input (known-good from Stage 3) | Yes, supervised only |
+| 7 | Real FR3 + magnetometer | The full COLMAG stack on real hardware | Yes, supervised only |
 
 Stop immediately if the predicted command is wrong, a command repeats
 unexpectedly, the wrong controller/`arm_id` is active, the robot moves in the
@@ -182,7 +183,7 @@ Inside the container, set the lab ROS network values given by the supervisor:
 ```bash
 export ROS_MASTER_URI=http://<lab-ros-master-ip>:11311
 export ROS_IP=<this-pc-ip-on-the-robot-network>
-roslaunch colmag_ros colmag_distributed.launch run_robot:=true dry_run:=true arm_id:=fr3 port:=/dev/ttyUSB0
+roslaunch colmag_ros colmag_distributed.launch input:=magnetometer run_robot:=true dry_run:=true arm_id:=fr3 port:=/dev/ttyUSB0
 ```
 
 If the magnetometer appears as `/dev/ttyACM0`, use that instead. Expected
@@ -215,14 +216,50 @@ rosrun colmag_ros fr3_simple_move.py _dry_run:=false _arm_id:=fr3 _delta:=0.04
 
 Stop if anything differs from the dry-run plan.
 
-### Stage 6 - full real COLMAG gesture pipeline
+### Stage 6 - real FR3 gestures from the touchpad
 
-Only start this after Stage 5 succeeds. Keep `fr3_real.launch` running in one
-terminal, then run the full pipeline in another. Use the real trajectory
-controller from `fr3_real.launch`, not the Gazebo effort controller:
+Only start this after Stage 5 succeeds. This drives the real arm from the
+**touchpad** — the same input already proven against Gazebo in Stage 3 — so the
+first real-robot gestures do not depend on the magnetometer at all. The
+distributed launch defaults to `input:=touchpad`, which starts only the robot
+node and rosbridge; the touchpad UI publishes the commands itself.
+
+Keep `fr3_real.launch` running in one terminal and use the real trajectory
+controller, not the Gazebo effort controller:
 
 ```bash
+# Terminal 1 - connect ROS to the real FR3
+roslaunch colmag_ros fr3_real.launch robot_ip:=<FR3-IP>
+
+# Terminal 2 - robot node + rosbridge (input defaults to touchpad)
 roslaunch colmag_ros colmag_distributed.launch \
+  run_robot:=true \
+  dry_run:=false \
+  arm_id:=fr3 \
+  arm_controller:=position_joint_trajectory_controller
+
+# Terminal 3 - touchpad writing interface
+python3 magnetometer_reader.py --input-source touchpad --ros --classifier-labels ABCXLRUD0123
+```
+
+The first live gesture must be explicitly approved. Review the motion mapped to
+that label in `ros/colmag_ros/scripts/colmag_robot_node.py` before running it on
+the real arm. Test calm commands first: `0`/`X` for home, then `L` or `R`.
+
+### Stage 7 - full real COLMAG pipeline with the magnetometer
+
+Only start this after Stage 6 succeeds. Same setup, but the gesture input now
+comes from the real magnetometer: `input:=magnetometer` starts the serial
+sensor, classifier, and joystick nodes instead of expecting the touchpad UI
+(do **not** also run `magnetometer_reader.py`).
+
+```bash
+# Terminal 1 - connect ROS to the real FR3
+roslaunch colmag_ros fr3_real.launch robot_ip:=<FR3-IP>
+
+# Terminal 2 - full pipeline from the serial magnetometer
+roslaunch colmag_ros colmag_distributed.launch \
+  input:=magnetometer \
   run_robot:=true \
   dry_run:=false \
   arm_id:=fr3 \
@@ -230,9 +267,9 @@ roslaunch colmag_ros colmag_distributed.launch \
   port:=/dev/ttyUSB0
 ```
 
-The first live gesture must be explicitly approved. Review the motion mapped to
-that label in `ros/colmag_ros/scripts/colmag_robot_node.py` before running it on
-the real arm.
+If the magnetometer appears as `/dev/ttyACM0`, use that instead. If a gesture
+misclassifies, fall back to Stage 6 (touchpad) to tell apart sensor problems
+from robot problems.
 
 ---
 
@@ -263,7 +300,7 @@ or replace `execute_command()` with MoveIt `move_group` goals (build with
 <summary><b>ROS-only test (no Gazebo, no hardware)</b></summary>
 
 ```bash
-roslaunch colmag_ros colmag_distributed.launch run_robot:=false
+roslaunch colmag_ros colmag_distributed.launch input:=magnetometer run_robot:=false
 rosrun colmag_ros colmag_listener.py
 ```
 </details>
@@ -359,7 +396,7 @@ own classifier/joystick nodes produce commands (do **not** also run the reader).
 Keep `dry_run:=true` until the full Stage 4 checklist passes:
 
 ```bash
-roslaunch colmag_ros colmag_distributed.launch run_robot:=true dry_run:=true arm_id:=fr3 port:=/dev/ttyUSB0
+roslaunch colmag_ros colmag_distributed.launch input:=magnetometer run_robot:=true dry_run:=true arm_id:=fr3 port:=/dev/ttyUSB0
 ```
 </details>
 
@@ -474,7 +511,8 @@ ros/
     launch/
       fr3.launch                 spawn the FR3 in Gazebo
       fr3_real.launch            connect to a real FR3 via franka_control
-      colmag_distributed.launch  full pipeline (sensor→classifier→joystick→robot)
+      colmag_distributed.launch  pipeline; input:=touchpad (default) runs robot node +
+                                 rosbridge, input:=magnetometer adds sensor→classifier→joystick
     scripts/
       colmag_robot_node.py       maps gestures → arm motion (NAMED_POSES)
       fr3_simple_move.py         tiny real/sim trajectory smoke test

@@ -2,7 +2,7 @@
   <!--
     colmag_distributed.launch — full distributed pipeline
 
-    Node topology:
+    Node topology (input:=magnetometer):
       colmag_sensor_node     reads serial → /colmag/sensor_data, /colmag/pose
       colmag_classifier_node subscribes to /colmag/pose
                              → /colmag/classifier, /colmag/confidence
@@ -13,17 +13,26 @@
       rosbridge_websocket    WebSocket bridge so the Mac visualiser can
                              subscribe/publish without a native ROS install
 
+    Node topology (input:=touchpad, the default):
+      The touchpad UI publishes /colmag/{sensor_data, pose, command, classifier,
+      confidence} itself, so the sensor/classifier/joystick nodes are skipped and
+      only colmag_robot_node + rosbridge start here. Run the interactive UI in
+      its own terminal:
+        python3 magnetometer_reader.py [with the touchpad input source and ROS
+        publishing enabled; see the Stage 6 command in the README]
+
     Usage:
       roslaunch colmag_ros colmag_distributed.launch
-      # Override serial port:
-      roslaunch colmag_ros colmag_distributed.launch port:=/dev/ttyUSB0
+      # Real magnetometer over serial instead of the touchpad:
+      roslaunch colmag_ros colmag_distributed.launch input:=magnetometer port:=/dev/ttyUSB0
       # Skip the robot node during development:
       roslaunch colmag_ros colmag_distributed.launch run_robot:=false
   -->
 
   <!-- ── Global arguments ─────────────────────────────────────────────────── -->
-  <arg name="port"         default=""       doc="Serial port (auto-detect if empty)"/>
-  <arg name="baudrate"     default="921600" doc="Serial baud rate"/>
+  <arg name="input"        default="touchpad" doc="Gesture input: 'touchpad' (run magnetometer_reader.py separately) or 'magnetometer' (serial sensor + classifier + joystick nodes)"/>
+  <arg name="port"         default=""       doc="Serial port (auto-detect if empty; input:=magnetometer only)"/>
+  <arg name="baudrate"     default="921600" doc="Serial baud rate (input:=magnetometer only)"/>
   <arg name="verbose"      default="false"  doc="Log every packet from sensor_node"/>
   <arg name="run_robot"       default="true"   doc="Start the robot node"/>
   <arg name="dry_run"         default="true"   doc="Robot node: log only, do not move"/>
@@ -34,7 +43,8 @@
   <node pkg="colmag_ros"
         type="colmag_sensor_node.py"
         name="colmag_sensor_node"
-        output="screen">
+        output="screen"
+        if="$(eval input == 'magnetometer')">
     <param name="port"     value="$(arg port)"/>
     <param name="baudrate" value="$(arg baudrate)"/>
     <param name="verbose"  value="$(arg verbose)"/>
@@ -44,7 +54,8 @@
   <node pkg="colmag_ros"
         type="colmag_classifier_node.py"
         name="colmag_classifier_node"
-        output="screen">
+        output="screen"
+        if="$(eval input == 'magnetometer')">
     <param name="image_size"        value="64"/>
     <param name="projection_extent" value="0.05"/>
     <param name="idle_seconds"      value="0.8"/>
@@ -58,7 +69,8 @@
   <node pkg="colmag_ros"
         type="colmag_joystick_node.py"
         name="colmag_joystick_node"
-        output="screen">
+        output="screen"
+        if="$(eval input == 'magnetometer')">
     <param name="dwell_seconds"     value="1.5"/>
     <param name="projection_extent" value="0.05"/>
     <param name="letter_labels"     value="ABCDEFGHIJKLMNOPQRSTUVWXYZ" type="str"/>
