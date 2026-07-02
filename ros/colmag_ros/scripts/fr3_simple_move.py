@@ -32,9 +32,21 @@ class SimpleFr3Move:
         self.joint_state_topic = rospy.get_param(
             "~joint_state_topic", "/franka_state_controller/joint_states"
         )
+        # Velocity shaping. "trapezoid" samples a ramp-cruise-ramp profile so
+        # each leg starts and ends at rest; "linear" is the original 3-waypoint,
+        # positions-only behaviour (constant velocity per leg, stepped reversal).
+        self.velocity_profile = str(rospy.get_param("~velocity_profile", "trapezoid")).lower()
+        self.ramp_fraction = float(rospy.get_param("~ramp_fraction", 0.3))
+        self.sample_dt = float(rospy.get_param("~sample_dt", 0.05))
 
         if not 1 <= self.joint_index <= 7:
             raise ValueError("~joint_index must be in 1..7")
+        if self.velocity_profile not in ("trapezoid", "linear"):
+            raise ValueError("~velocity_profile must be 'trapezoid' or 'linear'")
+        if not 0.0 < self.ramp_fraction <= 0.5:
+            raise ValueError("~ramp_fraction must be in (0, 0.5]")
+        if self.sample_dt <= 0.0:
+            raise ValueError("~sample_dt must be > 0")
 
         self.joint_names = ["{}_joint{}".format(self.arm_id, i) for i in range(1, 8)]
 
@@ -51,13 +63,55 @@ class SimpleFr3Move:
             )
         return [positions_by_name[name] for name in self.joint_names]
 
-    def _trajectory_goal(self, start):
-        target = list(start)
-        target[self.joint_index - 1] += self.delta
+    def _trapezoid_leg(self, base, moving_start, moving_end, t0, dur):
+        """Sample a trapezoidal-velocity profile for one leg on self.joint_index.
 
-        goal = FollowJointTrajectoryGoal()
-        goal.trajectory.joint_names = list(self.joint_names)
+        Velocity ramps linearly 0 -> v_peak over ramp_fraction*dur, cruises at
+        v_peak, then ramps back to 0, so the leg begins and ends at rest and the
+        area under v(t) equals the commanded displacement. Each sample carries
+        both position and velocity, which makes joint_trajectory_controller
+        interpolate cubically between the dense samples.
+        """
+        idx = self.joint_index - 1
+        distance = moving_end - moving_start
+        ramp = min(max(self.ramp_fraction, 1e-3), 0.5)
+        t_ramp = ramp * dur
+        v_peak = distance / (dur * (1.0 - ramp)) if dur > 0 else 0.0
+        accel = v_peak / t_ramp if t_ramp > 0 else 0.0
 
+        n = max(1, int(round(dur / self.sample_dt)))
+        points = []
+        for k in range(1, n + 1):
+            t = dur * k / n
+            if t < t_ramp:
+                vel = accel * t
+                offset = 0.5 * accel * t * t
+            elif t <= dur - t_ramp:
+                vel = v_peak
+                offset = 0.5 * accel * t_ramp * t_ramp + v_peak * (t - t_ramp)
+            else:
+                t_left = dur - t
+                vel = accel * t_left
+                offset = distance - 0.5 * accel * t_left * t_left
+
+            positions = list(base)
+            positions[idx] = moving_start + offset
+            velocities = [0.0] * len(base)
+            velocities[idx] = vel
+
+            point = JointTrajectoryPoint()
+            point.positions = positions
+            point.velocities = velocities
+            point.time_from_start = rospy.Duration(t0 + t)
+            points.append(point)
+
+        # Snap the final sample exactly onto the endpoint at rest.
+        points[-1].positions[idx] = moving_end
+        points[-1].velocities[idx] = 0.0
+        return points
+
+    def _linear_points(self, start, target):
+        """Original 3-waypoint, positions-only profile (constant velocity/leg)."""
         start_point = JointTrajectoryPoint()
         start_point.positions = list(start)
         start_point.time_from_start = rospy.Duration(self.start_delay)
@@ -70,7 +124,36 @@ class SimpleFr3Move:
         return_point.positions = list(start)
         return_point.time_from_start = rospy.Duration(self.return_time)
 
-        goal.trajectory.points = [start_point, target_point, return_point]
+        return [start_point, target_point, return_point]
+
+    def _trajectory_goal(self, start):
+        idx = self.joint_index - 1
+        target = list(start)
+        target[idx] += self.delta
+
+        goal = FollowJointTrajectoryGoal()
+        goal.trajectory.joint_names = list(self.joint_names)
+
+        if self.velocity_profile == "linear":
+            goal.trajectory.points = self._linear_points(start, target)
+            return goal, target
+
+        # Trapezoidal (default): hold briefly at the start pose, then ramp out to
+        # the target and back, each leg starting and ending at rest so the mid
+        # reversal has no velocity step.
+        hold = JointTrajectoryPoint()
+        hold.positions = list(start)
+        hold.velocities = [0.0] * len(start)
+        hold.time_from_start = rospy.Duration(self.start_delay)
+
+        out_leg = self._trapezoid_leg(
+            start, start[idx], target[idx], self.start_delay, self.move_time - self.start_delay
+        )
+        back_leg = self._trapezoid_leg(
+            start, target[idx], start[idx], self.move_time, self.return_time - self.move_time
+        )
+
+        goal.trajectory.points = [hold] + out_leg + back_leg
         return goal, target
 
     def run(self):
