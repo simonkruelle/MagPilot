@@ -1,0 +1,96 @@
+<?xml version="1.0"?>
+<!--
+  colmag_draw.launch — "draw in the air" Cartesian teleoperation mode.
+
+  The end-effector follows the cursor/magnet on a plane in front of the robot
+  (see colmag_draw_node.py). This launch starts the draw node, the gesture
+  robot node, rosbridge, and (for the real magnetometer) the serial sensor
+  node — so BOTH modes work in one session: the Teleop button enables
+  following, the Letters/Digits buttons switch back to classified gestures
+  (colmag_robot_node executes them; it suspends itself while teleop is
+  active). The touchpad UI, if used, is run separately and publishes
+  /colmag/pose plus the classifier/command topics itself.
+
+  SAFETY: dry_run defaults to true and motion is gated by /colmag/draw_enable.
+  Rehearse in Gazebo (fr3.launch) before driving the real arm via fr3_real.launch.
+
+  Usage:
+    # Gazebo rehearsal from the touchpad (no real robot):
+    roslaunch colmag_ros fr3.launch controller:=effort_joint_trajectory_controller
+    roslaunch colmag_ros colmag_draw.launch dry_run:=false
+    (run magnetometer_reader.py with the touchpad source and ROS on; see README)
+    rostopic pub -1 /colmag/draw_enable std_msgs/Bool "data: true"
+
+    # Real magnetometer instead of the touchpad:
+    roslaunch colmag_ros colmag_draw.launch input:=magnetometer dry_run:=false port:=/dev/ttyUSB0
+-->
+<launch>
+  <arg name="input"          default="touchpad" doc="Gesture input: 'touchpad' (run magnetometer_reader.py separately) or 'magnetometer' (serial sensor node)"/>
+  <arg name="port"           default=""       doc="Serial port (magnetometer input only)"/>
+  <arg name="baudrate"       default="921600" doc="Serial baud rate (magnetometer input only)"/>
+  <arg name="dry_run"        default="true"   doc="Draw node: log targets/IK residuals but do not move"/>
+  <arg name="arm_id"         default="fr3"    doc="Joint prefix '&lt;arm_id&gt;_joint1..7'"/>
+  <arg name="arm_controller" default="effort_joint_trajectory_controller" doc="JointTrajectoryController to stream to (Gazebo default; use position_joint_trajectory_controller on the real FR3)"/>
+  <arg name="run_robot"      default="true"   doc="Also start colmag_robot_node so Letters/Digits gestures execute"/>
+  <arg name="time_scale"     default="2.0"    doc="Robot node: multiplies gesture waypoint times (see colmag_distributed.launch)"/>
+  <arg name="start_enabled"  default="false"  doc="Follow immediately on start (else wait for the Teleop button / /colmag/draw_enable)"/>
+  <arg name="plane_orientation" default="horizontal" doc="'horizontal' (tabletop in the air) or 'vertical' (upright canvas)"/>
+  <arg name="plane_center_x" default="0.45"   doc="Drawing-plane centre X in the robot base frame (m)"/>
+  <arg name="plane_center_y" default="0.0"    doc="Drawing-plane centre Y (m)"/>
+  <arg name="plane_center_z" default="0.40"   doc="Drawing-plane centre Z (m); FLANGE height — fingertips are ~0.1-0.16 m lower with the hand"/>
+  <arg name="plane_width"    default="0.60"   doc="Workspace box Y extent (m)"/>
+  <arg name="plane_depth"    default="0.30"   doc="Workspace box X extent (m)"/>
+  <arg name="plane_height"   default="0.56"   doc="Workspace box Z extent (m); default box bottom puts fingertips at ~base height for pick-ups"/>
+  <arg name="max_joint_step" default="0.05"   doc="Max per-joint change per update (rad); secondary safety clamp"/>
+  <arg name="max_linear_speed" default="0.10" doc="Cartesian tool-speed cap (m/s); the target glides toward the cursor at this rate"/>
+  <arg name="grasp_force"    default="20.0"   doc="Gripper grasp force (N); raise for heavier/slippery objects (hand max 70)"/>
+
+  <!-- Serial sensor node — only when using the real magnetometer. -->
+  <node pkg="colmag_ros"
+        type="colmag_sensor_node.py"
+        name="colmag_sensor_node"
+        output="screen"
+        if="$(eval input == 'magnetometer')">
+    <param name="port"     value="$(arg port)"/>
+    <param name="baudrate" value="$(arg baudrate)"/>
+  </node>
+
+  <!-- Cartesian draw / teleop node. -->
+  <node pkg="colmag_ros"
+        type="colmag_draw_node.py"
+        name="colmag_draw_node"
+        output="screen">
+    <param name="dry_run"         value="$(arg dry_run)"/>
+    <param name="arm_id"          value="$(arg arm_id)"/>
+    <param name="arm_controller"  value="$(arg arm_controller)"/>
+    <param name="start_enabled"   value="$(arg start_enabled)"/>
+    <param name="plane_orientation" value="$(arg plane_orientation)"/>
+    <param name="plane_width"     value="$(arg plane_width)"/>
+    <param name="plane_depth"     value="$(arg plane_depth)"/>
+    <param name="plane_height"    value="$(arg plane_height)"/>
+    <param name="plane_center_x"  value="$(arg plane_center_x)"/>
+    <param name="plane_center_y"  value="$(arg plane_center_y)"/>
+    <param name="plane_center_z"  value="$(arg plane_center_z)"/>
+    <param name="max_joint_step"  value="$(arg max_joint_step)"/>
+    <param name="max_linear_speed" value="$(arg max_linear_speed)"/>
+    <param name="grasp_force"     value="$(arg grasp_force)"/>
+  </node>
+
+  <!-- Gesture robot node — executes classified letters/digits when NOT in
+       teleop (it ignores confirmed gestures while teleop is active). -->
+  <node pkg="colmag_ros"
+        type="colmag_robot_node.py"
+        name="colmag_robot_node"
+        output="screen"
+        if="$(arg run_robot)">
+    <param name="dry_run"         value="$(arg dry_run)"/>
+    <param name="arm_id"          value="$(arg arm_id)"/>
+    <param name="arm_controller"  value="$(arg arm_controller)"/>
+    <param name="time_scale"      value="$(arg time_scale)"/>
+  </node>
+
+  <!-- rosbridge WebSocket — lets the Mac touchpad UI connect over port 9090. -->
+  <include file="$(find rosbridge_server)/launch/rosbridge_websocket.launch">
+    <arg name="port" value="9090"/>
+  </include>
+</launch>

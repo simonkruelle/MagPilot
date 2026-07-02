@@ -50,6 +50,7 @@ behaves exactly as expected.
 | 5 | Real FR3, tiny smoke test | One small `fr3_simple_move.py` nudge | Yes, supervised only |
 | 6 | Real FR3 + touchpad | One approved gesture, touchpad input (known-good from Stage 3) | Yes, supervised only |
 | 7 | Real FR3 + magnetometer | The full COLMAG stack on real hardware | Yes, supervised only |
+| 8 | Real FR3 teleop | Cursor-following + pick-and-place on the real arm | Yes, supervised only |
 
 Stop immediately if the predicted command is wrong, a command repeats
 unexpectedly, the wrong controller/`arm_id` is active, the robot moves in the
@@ -271,6 +272,48 @@ If the magnetometer appears as `/dev/ttyACM0`, use that instead. If a gesture
 misclassifies, fall back to Stage 6 (touchpad) to tell apart sensor problems
 from robot problems.
 
+### Stage 8 - real FR3 teleop + pick-and-place
+
+Only start after Stage 6 ran clean, and after rehearsing the full pick-and-place
+in Gazebo (Stage 3 setup + `pick_objects:=true`). Bring a soft, light
+(< 0.5 kg) practice object.
+
+Pre-flight checklist:
+
+- [ ] The teleop workspace box — x 0.30–0.60, y ±0.30, z 0.12–0.68 in the base
+      frame — is completely clear: no table edges, monitors, cables, people.
+      Remember the fingertips reach ~0.10–0.16 m *below* the flange coordinate.
+- [ ] If the arm is mounted on a table, measure the real surface height and
+      raise `plane_center_z` / shrink `plane_height` so the box bottom stays
+      ~2 cm above the surface for the first session.
+- [ ] Gripper mounted and `load_gripper:=true`; object under ~0.5 kg (heavier:
+      configure the load mass in Desk first, or a collision reflex will fire).
+- [ ] One person holds the E-stop the entire session; a second drives.
+
+```bash
+# Terminal 1 - real FR3 with the gripper
+roslaunch colmag_ros fr3_real.launch robot_ip:=<FR3-IP> load_gripper:=true
+
+# Terminal 2 - draw node, DRY RUN first (default)
+roslaunch colmag_ros colmag_draw.launch arm_controller:=position_joint_trajectory_controller
+
+# Terminal 3 - touchpad UI
+python3 magnetometer_reader.py --input-source touchpad --ros
+```
+
+Dry-run verification (nothing moves): press Teleop, move the cursor, and watch
+Terminal 2 — the logged targets should match where you expect the arm to go and
+the IK residuals should stay well under 5 mm. Only then restart Terminal 2 with
+`dry_run:=false`.
+
+Expected behaviour going live: on pressing Teleop the arm glides at ~0.10 m/s
+from its current pose toward the cursor — slow and predictable. Test in this
+order: (1) small circles at mid height, (2) Shift+V height changes, (3) gripper
+rotation with the arrow keys, (4) one grasp + lift + set-down of the practice
+object. Stop immediately (E-stop or leaving teleop via Letters/Digits) if the
+arm does not track the cursor, a reflex fires (`rosrun colmag_ros
+fr3_recover.py` to recover), or anything enters the workspace box.
+
 ### Stopping safely and recovering from an E-stop
 
 **Ctrl-C:** the robot node and `fr3_simple_move.py` cancel their running
@@ -293,6 +336,99 @@ If the arm stays locked, unlock the joints in the Desk web interface (brakes)
 and confirm FCI mode is active, then run the script again. If `fr3_real.launch`
 died (its `franka_control` is a required process), just restart the launch — a
 fresh connection also clears the error.
+
+---
+
+## Draw-in-the-air mode (Cartesian tracing)
+
+An alternative to the classify-and-gesture pipeline: press the **Teleop** button
+(top of the left button pad) and the end-effector **follows the cursor/magnet**
+on an invisible plane in front of the robot — by default a **horizontal** plane,
+like a tabletop floating in the air (cursor up = further away, cursor right =
+right; `plane_orientation:=vertical` gives an upright canvas instead). Pressing
+**Letters**, **Digits**, or **Signs** leaves teleop: the arm stops following and
+gesture mode works as usual. **Shift+G** in the touchpad UI toggles the
+two-finger gripper (grasp with force / release), so you can pick something up
+while teleoping. It maps `/colmag/pose` onto the plane and solves inverse
+kinematics to stream joint targets to the same trajectory controller used in
+Stages 6-7 (no MoveIt or controller swap needed). See
+[`colmag_draw_node.py`](ros/colmag_ros/scripts/colmag_draw_node.py).
+
+**Rehearse in Gazebo first** (the IK geometry is validated, but the mapping,
+plane placement, and feel should be checked in sim before the real arm):
+
+```bash
+# Terminal 1 - simulated FR3 (Gazebo's trajectory controller is effort-based)
+roslaunch colmag_ros fr3.launch controller:=effort_joint_trajectory_controller
+
+# Terminal 2 - draw node (dry_run:=false lets it move the *sim* arm)
+roslaunch colmag_ros colmag_draw.launch dry_run:=false
+
+# Terminal 3 - touchpad publishing /colmag/pose
+python3 magnetometer_reader.py --input-source touchpad --ros
+```
+
+To practice pick-and-place, spawn two cubes and a cup inside the workspace:
+
+```bash
+roslaunch colmag_ros colmag_pick_objects.launch
+# or spawn them together with the arm:
+roslaunch colmag_ros fr3.launch controller:=effort_joint_trajectory_controller pick_objects:=true
+```
+
+Spawned objects only live for the current Gazebo session — after restarting
+`fr3.launch` they are gone until you spawn them again (that is Gazebo behaviour,
+not a bug).
+
+Then dwell on the **Teleop** button (top-left) — the arm starts tracing the
+cursor. In teleop the canvas shows a **softly fading trail** (~5 s) instead of
+accumulating ink. Dwell on **Letters** or **Digits** to stop following and go
+back to gestures. **Shift+G** toggles the gripper (grasp force via the
+`grasp_force` arg, default 20 N). **Hold the arrow keys ← / →** to rotate the
+gripper smoothly around its own axis (~35°/s, release to stop, ±92° range) to
+align the fingers with an object before grasping. **Shift+V** switches the control plane: horizontal (cursor drives x/y at the currently held height) ↔
+vertical (cursor drives y/z at the currently held depth) — the third coordinate
+keeps its last value, so alternating planes positions the end-effector anywhere
+in the workspace box (x 0.30–0.60, y ±0.30, z 0.12–0.68 m — the bottom layer
+puts the fingertips at about base height, so objects standing next to the robot
+can be grasped in vertical mode). The four extreme far-top-edge spots are
+outside the arm's reach with the gripper-down orientation; the node skips such
+targets safely instead of forcing them. On the **real** robot, run
+`fr3_real.launch` in place of `fr3.launch` (with `load_gripper:=true` if the
+hand is mounted), pass `arm_controller:=position_joint_trajectory_controller`
+to `colmag_draw.launch`, and start with `dry_run:=true` to watch the logged
+targets and IK residuals before enabling motion. For the real magnetometer
+instead of the touchpad, add `input:=magnetometer port:=/dev/ttyUSB0` and skip
+the reader.
+
+Safety and tuning:
+
+- **Gated + dry-run by default.** Nothing moves until `dry_run:=false` *and*
+  teleop is enabled (Teleop button, or manually
+  `rostopic pub -1 /colmag/draw_enable std_msgs/Bool "data: true"`). Leaving
+  teleop, Ctrl-C, or publishing `false` cancels the goal and the arm holds.
+  While teleop is active, `colmag_robot_node` ignores confirmed gestures, so the
+  two modes never fight over the arm.
+- **Speed-capped.** The tool glides toward the cursor at `max_linear_speed`
+  (default 0.10 m/s) — flicking the cursor across the pad cannot make the arm
+  lunge, and enabling teleop with the arm far from the cursor produces a slow
+  approach. Raise the cap (e.g. `max_linear_speed:=0.2`) once you are
+  comfortable.
+- **Speed cap.** `max_joint_step` (rad per 15 Hz update, default 0.05 → ~0.75
+  rad/s) bounds how fast the arm tracks; fast scribbles lag smoothly rather than
+  snapping. Raise it for snappier tracing only after sim rehearsal.
+- **Workspace placement.** `plane_orientation` (default `horizontal`),
+  `plane_center_x/y/z` and `plane_width/depth/height` (default box: 30 cm deep ×
+  60 cm wide × 56 cm tall, centred 45 cm in front at 40 cm height — note the
+  coordinates are *flange* positions; with the hand mounted the fingertips sit
+  ~0.10-0.16 m lower). The defaults were validated point-by-point against the
+  FR3/Panda joint limits; targets the IK cannot reach within 5 mm are skipped,
+  not forced. The held orientation is gripper-down, ready for grasping.
+- The horizontal mapping is oriented for someone standing **in front of** the
+  robot: cursor up → the plane's far edge (toward the robot), cursor right →
+  the viewer's right. Vertical plane: cursor right → +Y, cursor up → higher
+  (+Z). Flip either axis with `map_x_sign` / `map_y_sign` if your viewpoint
+  differs.
 
 ---
 

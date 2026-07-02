@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<!-- "Cup": 6 cm diameter x 9 cm cylinder, 120 g. Diameter fits the Franka
+     hand's 8 cm opening; grasp it around the middle. -->
+<sdf version="1.6">
+  <model name="pick_cup_blue">
+    <link name="link">
+      <inertial>
+        <mass>0.12</mass>
+        <inertia>
+          <ixx>1.08e-4</ixx><iyy>1.08e-4</iyy><izz>5.4e-5</izz>
+          <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz>
+        </inertia>
+      </inertial>
+      <collision name="collision">
+        <geometry><cylinder><radius>0.03</radius><length>0.09</length></cylinder></geometry>
+        <surface>
+          <friction><ode><mu>1.5</mu><mu2>1.5</mu2></ode></friction>
+          <contact><ode><kp>1e6</kp><kd>100</kd><min_depth>0.001</min_depth><max_vel>0.1</max_vel></ode></contact>
+        </surface>
+      </collision>
+      <visual name="visual">
+        <geometry><cylinder><radius>0.03</radius><length>0.09</length></cylinder></geometry>
+        <material>
+          <ambient>0.1 0.25 0.7 1</ambient>
+          <diffuse>0.15 0.35 0.85 1</diffuse>
+        </material>
+      </visual>
+    </link>
+  </model>
+</sdf>

@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<!--
+  colmag_pick_objects.launch — spawn practice objects for teleop pick-and-place.
+
+  Drops two cubes and a "cup" (cylinder) onto the ground plane inside the
+  teleop workspace box (x 0.30-0.60, y ±0.30), so you can rehearse:
+  hover in horizontal mode, Shift+V, descend, Shift+G to grasp, lift, move,
+  release. Run AFTER the Gazebo arm is up:
+
+    roslaunch colmag_ros fr3.launch controller:=effort_joint_trajectory_controller
+    roslaunch colmag_ros colmag_pick_objects.launch
+-->
+<launch>
+  <node name="spawn_pick_cube_red" pkg="gazebo_ros" type="spawn_model"
+        args="-sdf -file $(find colmag_ros)/models/pick_cube_red.sdf
+              -model pick_cube_red -x 0.42 -y -0.12 -z 0.03"/>
+
+  <node name="spawn_pick_cube_green" pkg="gazebo_ros" type="spawn_model"
+        args="-sdf -file $(find colmag_ros)/models/pick_cube_green.sdf
+              -model pick_cube_green -x 0.46 -y 0.10 -z 0.03"/>
+
+  <node name="spawn_pick_cup_blue" pkg="gazebo_ros" type="spawn_model"
+        args="-sdf -file $(find colmag_ros)/models/pick_cup_blue.sdf
+              -model pick_cup_blue -x 0.54 -y 0.18 -z 0.05"/>
+</launch>

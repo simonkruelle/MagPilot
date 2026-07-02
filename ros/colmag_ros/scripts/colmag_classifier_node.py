@@ -63,7 +63,8 @@ class ColmagClassifierNode:
         self.last_submitted_ink = -1
 
         # Pre-compute Gaussian brush kernel once
-        radius = max(0.75, self.image_size / 64.0)
+        # (matches the touchpad UI brush: slightly thinner than 1 px/64)
+        radius = max(0.6, self.image_size / 64.0 * 0.75)
         bext   = int(np.ceil(radius * 2.5))
         y_ker, x_ker = np.ogrid[-bext:bext + 1, -bext:bext + 1]
         self._brush_kernel = np.exp(

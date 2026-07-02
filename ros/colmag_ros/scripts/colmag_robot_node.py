@@ -108,6 +108,9 @@ class ColmagRobotNode:
         # ── Classifier state ──────────────────────────────────────────────────
         self.last_label      = None
         self.last_confidence = 0.0
+        # While the teleop/draw mode is active (colmag_draw_node follows the
+        # cursor), gesture motions are suspended so the two never fight.
+        self.teleop_active   = False
 
         # ── Trajectory action client (only when actually moving a robot) ──────
         self.traj_client = None
@@ -170,6 +173,10 @@ class ColmagRobotNode:
 
         # Resolve 'choice:0' to the actual label for logging
         if cmd == 'choice:0' and self.last_label:
+            if self.teleop_active:
+                rospy.loginfo('Teleop active — ignoring confirmed gesture "%s".',
+                              self.last_label)
+                return
             label = self.last_label
             conf  = self.last_confidence * 100
             rospy.loginfo(
@@ -178,14 +185,23 @@ class ColmagRobotNode:
             )
             if not self.dry_run:
                 self.execute_command(label)
+        elif cmd == 'robot:teleop':
+            self.teleop_active = True
+            rospy.loginfo('Teleop mode active — gesture motions suspended '
+                          '(press Letters/Digits/Signs to resume).')
         elif cmd == 'letter_detection':
+            self.teleop_active = False
             rospy.loginfo('Mode → letters OCR')
         elif cmd == 'number_detection':
+            self.teleop_active = False
             rospy.loginfo('Mode → digits OCR')
         elif cmd == 'symbol_detection':
+            self.teleop_active = False
             rospy.loginfo('Mode → signs / shape-recognition placeholder')
         elif cmd == 'canvas:reset':
             rospy.loginfo('Canvas reset')
+        elif cmd.startswith(('gripper:', 'plane:', 'rotate:')):
+            pass  # teleop-mode commands, handled by colmag_draw_node
         elif cmd.startswith('choice:'):
             idx = cmd.split(':')[1]
             rospy.loginfo('Runner-up choice %s selected', idx)

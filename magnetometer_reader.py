@@ -378,6 +378,10 @@ class MagnetometerReader:
             'reentered': True,
         }
         self.touchpad_speed_samples = deque(maxlen=5000)
+        # Teleop-mode cursor trail: (t, x, y) points rendered as a softly
+        # fading line instead of accumulating ink on the OCR canvas.
+        self.teleop_trail = deque(maxlen=600)
+        self.teleop_trail_fade_s = 5.0
         self.touchpad_last_speed = 0.0
         self.touchpad_last_speed_report_at = 0.0
         self.touchpad_speed_log_file = None
@@ -436,7 +440,9 @@ class MagnetometerReader:
             self.latest_prediction_text = self.classifier_unloaded_prediction_text()
 
         # Fix 5: Pre-compute Gaussian brush kernel once (avoids np.ogrid + np.exp per point per frame)
-        self._brush_radius = max(0.75, self.image_size / 64.0)
+        # Slightly thinner than 1 px/64: keeps strokes crisp on the canvas
+        # without the heavy look of the full-width Gaussian.
+        self._brush_radius = max(0.6, self.image_size / 64.0 * 0.75)
         self._brush_extent = int(np.ceil(self._brush_radius * 2.5))
         y_ker, x_ker = np.ogrid[
             -self._brush_extent:self._brush_extent + 1,
@@ -949,6 +955,11 @@ class MagnetometerReader:
                     if self.classifier is not None:
                         self.classifier_status_text = "OCR idle"
                 self._set_key_feedback("Mode: signs")
+                print(f"Virtual joystick: {event.button.name} -> {event.command}")
+            elif event.command == 'robot:teleop':
+                # Arm-following mode: colmag_draw_node starts tracing the cursor.
+                # Pressing Letters/Digits/Signs leaves teleop again.
+                self._set_key_feedback("Mode: TELEOP — arm follows cursor (Shift+G: gripper)")
                 print(f"Virtual joystick: {event.button.name} -> {event.command}")
             else:
                 self._set_key_feedback(f"{event.button.name}: {event.command.split(':', 1)[-1]}")
@@ -1988,6 +1999,40 @@ class MagnetometerReader:
                     self.touchpad_state['pen_down'] = False
                 state = "ON" if self.touchpad_pen_enabled else "OFF"
                 self._set_key_feedback(f"Pen: {state}")
+            elif self.input_source == 'touchpad' and raw_key in ('G', 'shift+g'):
+                # Shift+G = gripper toggle (teleop mode); lowercase g stays free
+                if self.ros_bridge:
+                    self.ros_bridge.publish_command('gripper:toggle')
+                    self._set_key_feedback("Gripper: toggle sent")
+                else:
+                    self._set_key_feedback("Gripper: needs --ros")
+            elif self.input_source == 'touchpad' and raw_key in (
+                    'shift+left', 'shift+right', 'left', 'right'):
+                # Arrow keys (hold to rotate) = rotate the gripper around its
+                # own axis in teleop mode. Key auto-repeat keeps refreshing a
+                # 'rotate:hold' keep-alive (throttled); releasing sends
+                # 'rotate:stop'. The draw node integrates a constant angular
+                # rate while the hold is fresh, so the motion is smooth
+                # regardless of the keyboard's repeat timing.
+                if self.ros_bridge:
+                    now_rot = time.monotonic()
+                    if now_rot - getattr(self, '_rotate_last_pub', 0.0) > 0.15:
+                        self._rotate_last_pub = now_rot
+                        rot_cmd = ('rotate:hold:ccw' if raw_key.endswith('left')
+                                   else 'rotate:hold:cw')
+                        self.ros_bridge.publish_command(rot_cmd)
+                        self._set_key_feedback(
+                            "Rotate gripper " + ("CCW" if rot_cmd.endswith('ccw') else "CW"))
+                else:
+                    self._set_key_feedback("Rotate: needs --ros")
+            elif self.input_source == 'touchpad' and raw_key in ('V', 'shift+v'):
+                # Shift+V = teleop plane toggle: horizontal (x/y at held height)
+                # <-> vertical (y/z at held depth); lowercase v stays free
+                if self.ros_bridge:
+                    self.ros_bridge.publish_command('plane:toggle')
+                    self._set_key_feedback("Teleop plane: toggle sent")
+                else:
+                    self._set_key_feedback("Plane toggle: needs --ros")
             elif self.input_source == 'touchpad' and raw_key in ('S', 'shift+s'):
                 # Shift+S = stop & save; lowercase s records letter_S
                 self.stop_session()
@@ -2008,6 +2053,10 @@ class MagnetometerReader:
             key = (event.key or '').lower()
             if self.input_source == 'touchpad' and key in (' ', 'space'):
                 self.touchpad_state['pen_down'] = False
+            elif (self.input_source == 'touchpad'
+                    and (key.endswith('left') or key.endswith('right'))):
+                if self.ros_bridge:
+                    self.ros_bridge.publish_command('rotate:stop')
 
         fig.canvas.mpl_connect('button_press_event', on_press)
         fig.canvas.mpl_connect('button_release_event', on_release)
@@ -2124,6 +2173,13 @@ class MagnetometerReader:
         self.touchpad_state['last_sample_x'] = current_x
         self.touchpad_state['last_sample_y'] = current_y
         self.touchpad_state['last_sample_pen_down'] = current_pen_down
+
+        # Mirror the serial path: stream the newest sample to ROS so pose
+        # consumers (e.g. colmag_draw_node plane tracing) work from the touchpad
+        # exactly like from the magnetometer. Row layout: [ts, 48 mag, 6 pose].
+        if self.ros_bridge and rows:
+            last_row = rows[-1]
+            self.ros_bridge.publish_sensor(last_row[1:49], last_row[49:55])
 
     def synthetic_magnetic_values(self, pose_x, pose_y, pose_z):
         """Generate a simple 4x4 dipole-like magnetic field for touchpad rows."""
@@ -2518,6 +2574,12 @@ class MagnetometerReader:
         button_labels = [artist_group['label'] for artist_group in button_artists.values()]
         self.setup_touchpad_events(fig, ax5)
 
+        # Fading cursor trail shown in teleop mode (segments fade over ~5 s).
+        from matplotlib.collections import LineCollection
+        teleop_trail_collection = LineCollection(
+            [], linewidths=2.5, capstyle='round', zorder=6)
+        ax5.add_collection(teleop_trail_collection)
+
         z_range = (
             f"calibrated {self.z_near:.4f}->{self.z_far:.4f}"
             if self.z_near is not None and self.z_far is not None
@@ -2590,6 +2652,7 @@ class MagnetometerReader:
         raw_blit_artists = (
             *sensor_trace_artists,
             image_artist,
+            teleop_trail_collection,
             hint_text,       # drawn after image so it stays on top of ink
             *button_circles,
             *button_labels,
@@ -2700,6 +2763,11 @@ class MagnetometerReader:
             writing_mask &= ~self.joystick_button_mask(pose_x, pose_y)
             capture_mask = self.classification_sample_mask(pose_rows)
             ocr_mask = writing_mask & capture_mask
+            teleop_mode = self.app_controller.mode.value == 'robot'
+            if teleop_mode:
+                # Teleop: no ink on the OCR canvas — the fading trail below
+                # shows the path instead, so the canvas never fills up.
+                ocr_mask = np.zeros_like(ocr_mask, dtype=bool)
             ink_count = int(np.count_nonzero(ocr_mask))
             digit_image = self.live_pose_to_digit_image(
                 pose_rows,
@@ -2719,14 +2787,38 @@ class MagnetometerReader:
                     pose_y[-1],
                     now,
                 )
+                if teleop_mode:
+                    self.teleop_trail.append((now, float(pose_x[-1]), float(pose_y[-1])))
             else:
                 cursor_artist.set_offsets(np.empty((0, 2)))
                 self.app_controller.update_cursor(999.0, 999.0, now)
+
+            # Render the teleop trail: prune old points, fade segments with age.
+            fade_s = self.teleop_trail_fade_s
+            while self.teleop_trail and now - self.teleop_trail[0][0] > fade_s:
+                self.teleop_trail.popleft()
+            if not teleop_mode and self.teleop_trail:
+                self.teleop_trail.clear()
+            trail_points = list(self.teleop_trail)
+            if len(trail_points) >= 2:
+                segments = []
+                colors = []
+                for (t0, x0, y0), (t1, x1, y1) in zip(trail_points, trail_points[1:]):
+                    if t1 - t0 > 0.35:
+                        continue  # cursor left the canvas — do not bridge the gap
+                    alpha = max(0.0, 1.0 - (now - t1) / fade_s)
+                    segments.append([(x0, y0), (x1, y1)])
+                    colors.append((0.04, 0.52, 1.0, 0.9 * alpha))
+                teleop_trail_collection.set_segments(segments)
+                teleop_trail_collection.set_color(colors)
+            else:
+                teleop_trail_collection.set_segments([])
 
             if interface_event is not None:
                 clear_canvas_requested = (
                     interface_event.command == 'canvas:reset'
                     or interface_event.command == 'symbol_detection'
+                    or interface_event.command == 'robot:teleop'
                     or interface_event.classifier_labels is not None
                 )
                 self.handle_interface_event(interface_event)
@@ -2840,12 +2932,19 @@ class MagnetometerReader:
                 else:
                     self.classifier_candidates = []
                 active_display_count = min(display_count, len(result_labels))
-                # Keep labels in a FIXED order. Previously they were re-sorted by
-                # probability every frame, which changed the y-axis tick labels and
-                # forced a full fig.canvas.draw() on each classification — that was
-                # the flashing. With a stable order, only the (blitted) bar widths
-                # and the highlight colour update, so the panel refreshes smoothly.
-                display_indices = list(range(active_display_count))
+                # Show the TOP-N labels ranked by confidence, so high-probability
+                # letters are always visible even when not all labels fit in the
+                # panel (26 letters vs 12 rows). update_classifier_axis_labels
+                # only forces the expensive full redraw when the displayed
+                # ranking actually changes (guarded by the != comparison), so
+                # this does not reintroduce the per-frame flashing that the
+                # previous fixed ordering was added to avoid.
+                probs_array = np.asarray(probabilities, dtype=float)
+                if probs_array.size and float(probs_array.max()) > 0.0:
+                    ranked = np.argsort(-probs_array, kind='stable')
+                    display_indices = [int(i) for i in ranked[:active_display_count]]
+                else:
+                    display_indices = list(range(active_display_count))
 
                 self.update_joystick_artists(button_artists)
 

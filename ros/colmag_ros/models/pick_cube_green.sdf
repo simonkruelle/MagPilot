@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<!-- 4.5 cm practice cube, 80 g (green variant of pick_cube_red.sdf). -->
+<sdf version="1.6">
+  <model name="pick_cube_green">
+    <link name="link">
+      <inertial>
+        <mass>0.08</mass>
+        <inertia>
+          <ixx>2.7e-5</ixx><iyy>2.7e-5</iyy><izz>2.7e-5</izz>
+          <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz>
+        </inertia>
+      </inertial>
+      <collision name="collision">
+        <geometry><box><size>0.045 0.045 0.045</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1.5</mu><mu2>1.5</mu2></ode></friction>
+          <contact><ode><kp>1e6</kp><kd>100</kd><min_depth>0.001</min_depth><max_vel>0.1</max_vel></ode></contact>
+        </surface>
+      </collision>
+      <visual name="visual">
+        <geometry><box><size>0.045 0.045 0.045</size></box></geometry>
+        <material>
+          <ambient>0.1 0.6 0.15 1</ambient>
+          <diffuse>0.15 0.7 0.2 1</diffuse>
+        </material>
+      </visual>
+    </link>
+  </model>
+</sdf>
