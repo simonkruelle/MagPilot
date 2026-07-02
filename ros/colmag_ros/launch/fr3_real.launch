@@ -16,6 +16,7 @@
   <arg name="load_gripper" default="false" doc="Set true only if the gripper is attached and needed" />
   <arg name="controller" default="position_joint_trajectory_controller" doc="Trajectory controller to spawn for smoke tests" />
   <arg name="xacro_args" default="" doc="Additional xacro args forwarded to franka_control.launch" />
+  <arg name="realtime_config" default="ignore" doc="libfranka realtime mode [enforce|ignore]. 'ignore' is required in Docker without an RT kernel / SYS_NICE" />
 
   <include file="$(find franka_control)/launch/franka_control.launch">
     <arg name="robot_ip" value="$(arg robot_ip)" />
@@ -24,6 +25,10 @@
     <arg name="load_gripper" value="$(arg load_gripper)" />
     <arg name="xacro_args" value="$(arg xacro_args)" />
   </include>
+
+  <!-- Override the 'enforce' default loaded from franka_control_node.yaml inside
+       the include above; the later param write wins on the parameter server. -->
+  <param name="franka_control/realtime_config" value="$(arg realtime_config)" />
 
   <node pkg="controller_manager"
         type="spawner"
