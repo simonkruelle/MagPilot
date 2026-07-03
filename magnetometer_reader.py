@@ -262,6 +262,7 @@ class MagnetometerReader:
         classifier_mode='continuous',
         classifier_idle_seconds=0.8,
         classifier_min_ink_samples=8,
+        serial_port_name=None,
         input_source='serial',
         touchpad_z=0.02,
         touchpad_sample_rate=100.0,
@@ -319,6 +320,7 @@ class MagnetometerReader:
         self.classifier_mode = classifier_mode
         self.classifier_idle_seconds = classifier_idle_seconds
         self.classifier_min_ink_samples = classifier_min_ink_samples
+        self.serial_port_name = serial_port_name
         if touchpad_sample_rate <= 0:
             raise ValueError("touchpad_sample_rate must be positive")
         if not 0.0 <= touchpad_ink_strength <= 1.0:
@@ -392,6 +394,10 @@ class MagnetometerReader:
         self.live_ink_count = 0
         self.live_ink_count = 0
         self.classifier_candidates = []
+        # Candidates snapshot taken when a confirm-dwell starts: any ink drawn
+        # during the dwell may re-classify the canvas, but the confirmation
+        # fires with the prediction the user saw when they stopped.
+        self._dwell_frozen_candidates = None
         self.action_feedback_text = ""
         self.action_feedback_button = None
         self.action_feedback_until = 0.0
@@ -965,6 +971,27 @@ class MagnetometerReader:
                 self._set_key_feedback(f"{event.button.name}: {event.command.split(':', 1)[-1]}")
                 print(f"Virtual joystick: {event.button.name} -> {event.command}")
 
+    def _effective_candidates(self):
+        """Candidates used for display + confirmation: frozen during a dwell."""
+        if self._dwell_frozen_candidates is not None:
+            return self._dwell_frozen_candidates
+        return self.classifier_candidates
+
+    def _update_dwell_candidate_freeze(self):
+        """Freeze the candidate list while a confirm-dwell is in progress."""
+        detector = self.app_controller.detector
+        button = detector.active_button
+        dwelling = (
+            button is not None
+            and button.action.startswith('choice:')
+            and self.app_controller.dwell_progress >= 0.12
+        )
+        if dwelling:
+            if self._dwell_frozen_candidates is None:
+                self._dwell_frozen_candidates = list(self.classifier_candidates)
+        else:
+            self._dwell_frozen_candidates = None
+
     def confirm_classifier_candidate(self, command, button_name):
         """Confirm one of the currently displayed classifier candidates."""
         try:
@@ -973,11 +1000,12 @@ class MagnetometerReader:
             print(f"Virtual joystick: {button_name} -> invalid candidate command")
             return
 
-        if candidate_index >= len(self.classifier_candidates):
+        candidates = self._effective_candidates()
+        if candidate_index >= len(candidates):
             print(f"Virtual joystick: {button_name} -> no classifier candidate yet")
             return
 
-        label, confidence = self.classifier_candidates[candidate_index]
+        label, confidence = candidates[candidate_index]
         confirmed_command = f"confirm:{label}"
         self.app_controller.last_command = confirmed_command
         self.action_feedback_text = f"Completed: {label} ({confidence * 100:.1f}%)"
@@ -1078,6 +1106,14 @@ class MagnetometerReader:
 
     def choose_port(self):
         """Let user choose a serial port."""
+        if self.serial_port_name:
+            if not os.path.exists(self.serial_port_name):
+                print(
+                    f"WARNING: requested serial port {self.serial_port_name} "
+                    "does not exist in this environment."
+                )
+            return self.serial_port_name
+
         ports = self.list_ports()
         if not ports:
             return None
@@ -2207,10 +2243,26 @@ class MagnetometerReader:
     def joystick_button_mask(self, pose_x, pose_y):
         """Return samples hidden from ink because they are UI-only.
 
-        Buttons are now translucent overlays on the writing surface, so moving
-        over them should still leave visible ink underneath.
+        The buttons are translucent overlays: strokes PASSING under a button
+        ink normally, so letters can use the whole canvas. Only while the
+        cursor is actually DWELLING on a button (a press in progress, past a
+        short grace period) are samples inside that button suppressed —
+        otherwise the 1.5-2 s confirmation dwell stamps a dot into the canvas
+        and re-classifies the character mid-confirm (magnet users hit this
+        because a magnet has no pen-up, unlike the touchpad).
         """
-        return np.zeros(len(pose_x), dtype=bool)
+        pose_x = np.asarray(pose_x, dtype=float)
+        pose_y = np.asarray(pose_y, dtype=float)
+        mask = np.zeros(pose_x.shape, dtype=bool)
+        button = self.app_controller.detector.active_button
+        if button is None or self.app_controller.dwell_progress < 0.12:
+            return mask
+        finite = np.isfinite(pose_x) & np.isfinite(pose_y)
+        radius = button.radius * 1.25
+        mask |= finite & (
+            (pose_x - button.x) ** 2 + (pose_y - button.y) ** 2 <= radius * radius
+        )
+        return mask
 
     def live_pose_rows(self, rows):
         """Return the row window used by live pose, joystick, and OCR views."""
@@ -2363,8 +2415,10 @@ class MagnetometerReader:
                     candidate_index = int(button.action.split(':', 1)[1])
                 except (IndexError, ValueError):
                     candidate_index = -1
-                if 0 <= candidate_index < len(self.classifier_candidates):
-                    candidate_label, candidate_confidence = self.classifier_candidates[candidate_index]
+                # Frozen snapshot while dwelling: what is shown is what fires.
+                display_candidates = self._effective_candidates()
+                if 0 <= candidate_index < len(display_candidates):
+                    candidate_label, candidate_confidence = display_candidates[candidate_index]
                     label_text = f"{button.name}\n{candidate_label}"
                     if candidate_confidence > 0.0:
                         facecolor = '#fff1b8'
@@ -2378,8 +2432,15 @@ class MagnetometerReader:
                 button_alpha = 0.46
 
             if button.name == active_button:
-                facecolor = '#ffd60a'   # Apple yellow — dwell in progress
-                button_alpha = 0.60
+                # Dwell in progress: blend yellow -> green with dwell progress,
+                # so the button visibly "charges up" before it fires.
+                progress = min(1.0, max(0.0, self.app_controller.dwell_progress))
+                yellow = (1.000, 0.839, 0.039)   # #ffd60a
+                green = (0.204, 0.780, 0.349)    # #34c759
+                facecolor = tuple(
+                    y + (g - y) * progress for y, g in zip(yellow, green)
+                )
+                button_alpha = 0.50 + 0.20 * progress
                 label_alpha = 0.96
 
             if (
@@ -2751,7 +2812,7 @@ class MagnetometerReader:
                 trail_length=0 if self.classifier_canvas_active() else None,
                 include_timestamps=True,
             )
-            writing_mask, _, _ = self.writing_sample_mask(
+            writing_mask, sample_speed, _ = self.writing_sample_mask(
                 pose_x,
                 pose_y,
                 pose_z,
@@ -2792,6 +2853,7 @@ class MagnetometerReader:
             else:
                 cursor_artist.set_offsets(np.empty((0, 2)))
                 self.app_controller.update_cursor(999.0, 999.0, now)
+            self._update_dwell_candidate_freeze()
 
             # Render the teleop trail: prune old points, fade segments with age.
             fade_s = self.teleop_trail_fade_s
@@ -3016,6 +3078,19 @@ class MagnetometerReader:
             self.latest_prediction_text = prediction_text
             self.latest_runner_up_text = runner_up_text
 
+            # Live XY speed vs. the ink band — the tuning aid for
+            # --writing-min-velocity / --writing-max-velocity: write a letter
+            # and note the speeds, then move to a button and note those.
+            v_now = float(sample_speed[-1]) if len(sample_speed) else 0.0
+            v_max_text = (
+                f"{self.writing_max_velocity:.2f}"
+                if self.writing_max_velocity is not None else "inf"
+            )
+            speed_text = (
+                f"v: {v_now:.3f} m/s "
+                f"(ink {self.writing_min_velocity:.2f}-{v_max_text})"
+            )
+
             if len(pose_z) > 0:
                 finite_z = pose_z[np.isfinite(pose_z)]
                 if len(finite_z) > 0:
@@ -3023,6 +3098,7 @@ class MagnetometerReader:
                         f"{prediction_text}\n"
                         f"{runner_up_text}\n"
                         f"Ink: {ink_count}/{len(pose_z)}\n"
+                        f"{speed_text}\n"
                         f"Z: {finite_z[-1]:.4f} "
                         f"[{np.min(finite_z):.4f}..{np.max(finite_z):.4f}]"
                     )
@@ -3031,6 +3107,7 @@ class MagnetometerReader:
                     f"{prediction_text}\n"
                     f"{runner_up_text}\n"
                     f"Ink: {ink_count}/{len(pose_z)}\n"
+                    f"{speed_text}\n"
                     "Z: --"
                 )
 
@@ -3306,6 +3383,9 @@ def main():
                        help='Sensor number to plot (1-16, default: 1)')
     parser.add_argument('--baudrate', '-b', type=int, default=921600,
                        help='Serial baudrate (default: 921600)')
+    parser.add_argument('--port', '-p', type=str, default=None,
+                       help='Serial device for --input-source serial, e.g. /dev/ttyUSB0. '
+                            'If omitted, prompt from detected ports.')
     parser.add_argument('--csv', '-c', type=str, default='magnetometer_data.csv',
                        help='Explicit continuous raw CSV output filename. '
                             'Default is off in live mode, or output_dir/raw/<run_id>_raw.csv with --record-data')
@@ -3472,14 +3552,19 @@ def main():
         arg == '--writing-min-velocity' or arg.startswith('--writing-min-velocity=')
         for arg in sys.argv[1:]
     )
+    # Auto-tuned ink thresholds: high enough that a relaxed move toward a
+    # button does not register as ink (only deliberate, quicker writing
+    # strokes do), while still catching normal writing speeds. Override with
+    # an explicit --writing-min-velocity; the live "v:" readout in the info
+    # panel shows your actual speeds for tuning.
     if (
         args.input_source == 'touchpad'
         and args.touchpad_ink_mode == 'velocity'
         and not writing_min_velocity_was_explicit
     ):
-        args.writing_min_velocity = 0.08
+        args.writing_min_velocity = 0.10
     if args.input_source == 'serial' and not writing_min_velocity_was_explicit:
-        args.writing_min_velocity = 0.04
+        args.writing_min_velocity = 0.06
     display_window_was_explicit = any(
         arg == '--display-window' or arg.startswith('--display-window=')
         for arg in sys.argv[1:]
@@ -3511,6 +3596,8 @@ def main():
     else:
         print("MODE: LIVE VIEW — no data saved, use --record-data to enable recording")
     print(f"Input Source: {args.input_source}")
+    if args.input_source == 'serial':
+        print(f"Serial Port: {args.port or 'prompt/autodetect'}")
     print(f"Plotting Sensor: {args.sensor}")
     print(f"Baudrate: {args.baudrate}")
     csv_was_explicit = any(
@@ -3598,6 +3685,7 @@ def main():
         classifier_mode=args.classifier_mode,
         classifier_idle_seconds=args.classifier_idle_seconds,
         classifier_min_ink_samples=args.classifier_min_ink_samples,
+        serial_port_name=args.port,
         input_source=args.input_source,
         touchpad_z=args.touchpad_z,
         touchpad_sample_rate=args.touchpad_sample_rate,

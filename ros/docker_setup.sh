@@ -21,6 +21,7 @@ LIBFRANKA_VERSION="${LIBFRANKA_VERSION:-0.13.3}"
 FRANKA_ROS_VERSION="${FRANKA_ROS_VERSION:-0.10.2}"
 ENABLE_GPU="${COLMAG_ENABLE_GPU:-auto}"
 COLMAG_SERIAL_DEVICE="${COLMAG_SERIAL_DEVICE:-}"
+COLMAG_SERIAL_DEVICES="${COLMAG_SERIAL_DEVICES:-}"
 
 BUILD_PLATFORM_ARGS=()
 RUN_PLATFORM_ARGS=()
@@ -29,24 +30,28 @@ if [ -n "$DOCKER_PLATFORM" ]; then
     RUN_PLATFORM_ARGS=(--platform "$DOCKER_PLATFORM")
 fi
 
-SERIAL_DEVICE="$COLMAG_SERIAL_DEVICE"
-if [ -z "$SERIAL_DEVICE" ]; then
+DEVICE_ARGS=()
+SERIAL_DEVICES=()
+if [ -n "$COLMAG_SERIAL_DEVICES" ]; then
+    IFS=',: ' read -r -a SERIAL_DEVICES <<< "$COLMAG_SERIAL_DEVICES"
+elif [ -n "$COLMAG_SERIAL_DEVICE" ]; then
+    SERIAL_DEVICES=("$COLMAG_SERIAL_DEVICE")
+else
     for candidate in /dev/ttyUSB* /dev/ttyACM*; do
         if [ -e "$candidate" ]; then
-            SERIAL_DEVICE="$candidate"
-            break
+            SERIAL_DEVICES+=("$candidate")
         fi
     done
 fi
 
-DEVICE_ARGS=()
-if [ -n "$SERIAL_DEVICE" ]; then
-    if [ -e "$SERIAL_DEVICE" ]; then
-        DEVICE_ARGS=(--device "$SERIAL_DEVICE:$SERIAL_DEVICE")
+for device in "${SERIAL_DEVICES[@]}"; do
+    [ -n "$device" ] || continue
+    if [ -e "$device" ]; then
+        DEVICE_ARGS+=(--device "$device:$device")
     else
-        echo "WARNING: serial device '$SERIAL_DEVICE' does not exist; not mounting it."
+        echo "WARNING: serial device '$device' does not exist; not mounting it."
     fi
-fi
+done
 
 DISPLAY_ARGS=()
 if [ -n "${DISPLAY:-}" ] && [ -d /tmp/.X11-unix ]; then
@@ -109,10 +114,10 @@ if [ -n "$DOCKER_PLATFORM" ]; then
 else
     echo "Platform: Docker host default"
 fi
-if [ -n "$SERIAL_DEVICE" ] && [ -e "$SERIAL_DEVICE" ]; then
-    echo "Serial device: $SERIAL_DEVICE"
+if [ "${#DEVICE_ARGS[@]}" -gt 0 ]; then
+    echo "Serial devices: ${SERIAL_DEVICES[*]}"
 else
-    echo "Serial device: none mounted"
+    echo "Serial devices: none mounted"
 fi
 if [ "${#DISPLAY_ARGS[@]}" -gt 0 ]; then
     echo "Display: $DISPLAY"

@@ -250,27 +250,42 @@ the real arm. Test calm commands first: `0`/`X` for home, then `L` or `R`.
 ### Stage 7 - full real COLMAG pipeline with the magnetometer
 
 Only start this after Stage 6 succeeds. Same setup, but the gesture input now
-comes from the real magnetometer: `input:=magnetometer` starts the serial
-sensor, classifier, and joystick nodes instead of expecting the touchpad UI
-(do **not** also run `magnetometer_reader.py`).
+comes from the real magnetometer. For supervised real-robot use, run the robot
+side from ROS and run `magnetometer_reader.py` as the serial GUI. The GUI reads
+the serial sensor, shows the drawn character/classifier result, and publishes
+the same `/colmag/*` topics as the touchpad UI.
 
 ```bash
 # Terminal 1 - connect ROS to the real FR3
 roslaunch colmag_ros fr3_real.launch robot_ip:=<FR3-IP>
 
-# Terminal 2 - full pipeline from the serial magnetometer
+# Terminal 2 - robot node + rosbridge only; the GUI will publish /colmag/*
 roslaunch colmag_ros colmag_distributed.launch \
-  input:=magnetometer \
+  input:=touchpad \
   run_robot:=true \
   dry_run:=false \
   arm_id:=fr3 \
-  arm_controller:=position_joint_trajectory_controller \
-  port:=/dev/ttyUSB0
+  arm_controller:=position_joint_trajectory_controller
+
+# Terminal 3 - serial magnetometer GUI
+python3 magnetometer_reader.py \
+  --input-source serial \
+  --port /dev/ttyUSB0 \
+  --ros \
+  --classifier-labels ABCXLRUD0123
 ```
 
 If the magnetometer appears as `/dev/ttyACM0`, use that instead. If a gesture
 misclassifies, fall back to Stage 6 (touchpad) to tell apart sensor problems
 from robot problems.
+
+For unattended/headless debugging only, you can still run the distributed
+serial pipeline directly:
+
+```bash
+roslaunch colmag_ros colmag_distributed.launch \
+  input:=magnetometer run_robot:=true dry_run:=true arm_id:=fr3 port:=/dev/ttyUSB0
+```
 
 ### Stage 8 - real FR3 teleop + pick-and-place
 
@@ -549,10 +564,12 @@ real robot.
 <details>
 <summary><b>Real magnetometer hardware dry-run shortcut</b></summary>
 
-`docker_setup.sh` auto-mounts `/dev/ttyUSB*` / `/dev/ttyACM*`. Use the
-distributed launch, where `sensor_node` reads the serial port and the launch's
-own classifier/joystick nodes produce commands (do **not** also run the reader).
-Keep `dry_run:=true` until the full Stage 4 checklist passes:
+`docker_setup.sh` auto-mounts all detected `/dev/ttyUSB*` and `/dev/ttyACM*`
+devices. Use `COLMAG_SERIAL_DEVICES="/dev/ttyUSB0 /dev/ttyACM0"` to mount an
+explicit subset. For a headless dry-run, use the distributed launch, where
+`sensor_node` reads the serial port and the launch's own classifier/joystick
+nodes produce commands (do **not** also run the reader). Keep `dry_run:=true`
+until the full Stage 4 checklist passes:
 
 ```bash
 roslaunch colmag_ros colmag_distributed.launch input:=magnetometer run_robot:=true dry_run:=true arm_id:=fr3 port:=/dev/ttyUSB0
@@ -646,6 +663,7 @@ downstream — not the full distributed launch.
 | Option | Purpose |
 |--------|---------|
 | `--input-source serial \| trackpad` | real sensor, or trackpad simulator (`touchpad` is an alias) |
+| `--port /dev/ttyUSB0` | serial device to open; if omitted, the reader prompts from detected ports |
 | `--ros` | publish to ROS (native `rospy` in Docker, `roslibpy` bridge on Mac) |
 | `--classifier-labels ABCXLRUD0123` | restrict OCR to the characters the robot has actions for |
 | `--writing-max-z 0.05` | (real sensor) ignore ink when the magnet is > 5 cm away |

@@ -51,7 +51,7 @@
                 -J $(arg arm_id)_finger_joint2 0.001"
        />
   <arg name="interactive_marker" default="$(eval arg('controller') == 'cartesian_impedance_example_controller')" doc="Should the interactive marker node be started?" />
-  <arg name="pick_objects" default="false" doc="Spawn the colmag practice pick-and-place objects (two cubes + cup)" />
+  <arg name="pick_objects" default="true" doc="Spawn the colmag practice pick-and-place objects (two cubes + cup); pick_objects:=false for an empty world" />
 
   <include file="$(find gazebo_ros)/launch/empty_world.launch" if="$(arg gazebo)">
     <arg name="world_name" value="$(arg world)"/>
