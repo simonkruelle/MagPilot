@@ -2611,12 +2611,16 @@ class MagnetometerReader:
                 pass
         else:
             ax5.set_aspect('equal', adjustable='box')
+        _hint_teleop = "Teleop: Shift+V horizontal/vertical plane   Shift+G gripper   Shift+Left/Right rotate"
         if self.input_source == 'touchpad':
             _hint_line1 = "Shift+S save   Shift+Q quit   |   A-Z / 0-9 / - / = record"
             _hint_line2 = "Space/click draw   Shift+P pen   |   Shift+L letters   Shift+R digits   Shift+D reset"
-            _hint_lines = [_hint_line1, _hint_line2]
+            _hint_lines = [_hint_line1, _hint_line2, _hint_teleop]
         else:
-            _hint_lines = ["s = stop & save   q = quit   |   A-Z = letter   0-9 = digit   - = blank   = = still"]
+            _hint_lines = [
+                "s = stop & save   q = quit   |   A-Z = letter   0-9 = digit   - = blank   = = still",
+                _hint_teleop,
+            ]
         hint_text = ax5.text(
             0.5, 0.03,
             "\n".join(_hint_lines),
