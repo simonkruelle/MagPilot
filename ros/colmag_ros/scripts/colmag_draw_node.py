@@ -11,8 +11,9 @@ in colmag_robot_node.py.
 How it works
   - /colmag/pose (PoseStamped, colmag_base frame) gives magnet/cursor x,y in
     metres, clipped by the reader/sensor to +-input_extent (default 0.05 m).
-  - (x, y) are scaled onto a vertical plane of size plane_width x plane_height,
-    centred at (plane_center_x, _y, _z) in the robot base frame.
+  - (x, y) are scaled onto the active control layer in a bounded workspace box:
+    horizontal = move in x/y, vertical = move in y/z, rotate = hold position and
+    rotate the gripper/wrist from cursor x.
   - A damped-least-squares IK solves for joint angles that put the flange at that
     point while holding a fixed "pen" orientation (the natural orientation at the
     plane centre), seeded from the last commanded pose for continuity.
@@ -26,11 +27,10 @@ Mode switching (via /colmag/command, i.e. the touchpad UI buttons)
     (Letters/Digits/Signs buttons)                        -> following DISABLED
   - 'gripper:toggle' / 'gripper:open' / 'gripper:close'
     (Shift+G in the touchpad UI)                          -> franka_gripper action
-  - 'plane:toggle' (Shift+V in the touchpad UI)           -> switch between the
-    horizontal plane (drives x/y at the held height) and the vertical plane
-    (drives y/z at the held depth). The coordinate the active plane does not
-    control keeps its last value, so alternating planes positions the flange
-    anywhere in the workspace box.
+  - 'plane:toggle' / 'layer:next' (Shift+V / Layer button) -> cycle through
+    horizontal (x/y), vertical (y/z), and rotate-wrist. Coordinates not owned by
+    the active layer keep their last value, so the layers together position and
+    orient the flange inside the workspace box.
   /colmag/draw_enable (std_msgs/Bool) remains as a manual override.
 
 The plane is horizontal by default (like a tabletop floating in front of the
@@ -51,6 +51,8 @@ SAFETY
   - Each update additionally clamps per-joint change to max_joint_step.
   - IK solutions with residual > max_reach_error are rejected; the target holds
     at the last reachable point instead of drifting through dead zones.
+  - If pose.z is farther than lift_gate_z (default 0.05 m), following pauses and
+    the controller holds. Lowering the magnet below the hysteresis band resumes.
 
 Parameters (see below for defaults). Usage:
   # Gazebo rehearsal, touchpad input, no real motion until Teleop is pressed:
@@ -179,6 +181,7 @@ class ColmagDrawNode:
         self.plane_orientation = str(rospy.get_param('~plane_orientation', 'horizontal')).lower()
         if self.plane_orientation not in ('horizontal', 'vertical'):
             raise ValueError("~plane_orientation must be 'horizontal' or 'vertical'")
+        self.layer_modes = ('horizontal', 'vertical', 'rotate')
         # Workspace box defaults were validated offline against the FR3/Panda
         # joint-limit intersection with the gripper-down orientation: a dense
         # 729-point sweep of x 0.30-0.60, y ±0.30, z 0.12-0.68 has only the four
@@ -207,6 +210,13 @@ class ColmagDrawNode:
         # normal following and turns the take-over after enabling teleop (arm
         # far from cursor) into a slow, predictable approach.
         self.max_lin_speed  = float(rospy.get_param('~max_linear_speed', 0.10))
+        # Real magnet input: lifting the magnet away from the board should pause
+        # following so the user can travel to taskbar buttons without dragging
+        # the robot. Set lift_gate_z<=0 to disable.
+        self.lift_gate_z = float(rospy.get_param('~lift_gate_z', 0.05))
+        self.lift_gate_hysteresis = abs(float(rospy.get_param('~lift_gate_hysteresis', 0.005)))
+        self.lift_reengage_z = max(0.0, self.lift_gate_z - self.lift_gate_hysteresis)
+        self._lift_paused = False
         # Grasp force in N (Franka hand: up to 70 N continuous). 20 N holds
         # light objects; raise it for heavier or slippery ones.
         self.grasp_force    = float(rospy.get_param('~grasp_force', 20.0))
@@ -221,9 +231,9 @@ class ColmagDrawNode:
 
         # Freeze the pen orientation as the natural orientation with the flange at
         # the plane centre (validated to be reachable and IK-stable there).
-        # Runtime plane mode (Shift+V in the touchpad UI toggles it). Horizontal
-        # drives (x, y) at the currently held height; vertical drives (y, z) at
-        # the currently held depth — together they reach any point in the box.
+        # Runtime layer mode (Shift+V / Layer toggles it). Horizontal drives
+        # (x, y), vertical drives (y, z), rotate turns the wrist at fixed
+        # position — together they reach and orient any point in the box.
         self.plane_mode = self.plane_orientation
         self.box_lo = self.center - np.array([self.half_d, self.half_w, self.half_h])
         self.box_hi = self.center + np.array([self.half_d, self.half_w, self.half_h])
@@ -243,10 +253,12 @@ class ColmagDrawNode:
         self.rotate_speed = np.radians(float(rospy.get_param('~rotate_speed_deg', 35.0)))
         self._rot_dir = 0          # -1 ccw / 0 off / +1 cw
         self._rot_deadline = 0.0   # watchdog: stops if keep-alives cease
+        self._rotate_layer_ref_u = None
+        self._rotate_layer_ref_yaw = self.pen_yaw
         self.q_ready = q_ready
         self.q_cmd = q_ready.copy()   # last commanded joints (IK warm seed)
-        # Persistent 3D target; the cursor only overwrites the 2 coordinates the
-        # active plane controls, so the third is held across plane switches.
+        # Persistent 3D target; the cursor only overwrites the coordinates the
+        # active layer controls, so the others are held across layer switches.
         self.p_target = _fk(self.q_cmd)[:3, 3].copy()
         rospy.loginfo('Draw plane centre reachable within %.2f mm; pen orientation frozen.',
                       err0 * 1000)
@@ -272,11 +284,15 @@ class ColmagDrawNode:
         rospy.Subscriber(self.joint_state_topic, JointState, self._on_joint_state)
         rospy.Timer(rospy.Duration(1.0 / self.update_rate), self._on_tick)
 
-        rospy.loginfo('colmag_draw_node ready | mode=%s | %s plane %.2fx%.2f m @ %s | '
-                      'enabled=%s',
+        lift_text = ('off' if self.lift_gate_z <= 0.0
+                     else 'pause above %.1f cm, resume below %.1f cm'
+                     % (100.0 * self.lift_gate_z, 100.0 * self.lift_reengage_z))
+        rospy.loginfo('colmag_draw_node ready | mode=%s | layer=%s | workspace %.2fx%.2fx%.2f m @ %s | '
+                      'lift_gate=%s | enabled=%s',
                       'DRY RUN' if self.dry_run else 'LIVE (%s)' % self.controller,
-                      self.plane_orientation, 2 * self.half_w, 2 * self.half_h,
-                      np.round(self.center, 2), self.enabled)
+                      self.plane_mode, 2 * self.half_d, 2 * self.half_w,
+                      2 * self.half_h, np.round(self.center, 2),
+                      lift_text, self.enabled)
         if not self.dry_run and not self.enabled:
             rospy.loginfo('Press the Teleop button in the touchpad UI (or publish '
                           'true to /colmag/draw_enable) to start following.')
@@ -340,12 +356,14 @@ class ColmagDrawNode:
             if self.traj_client is not None:
                 # Stop any running gesture trajectory before taking over.
                 self.traj_client.cancel_all_goals()
+            self._lift_paused = False
             rospy.logwarn('TELEOP ENABLED (%s) — the arm now follows the cursor.', source)
         elif not enabled and self.enabled:
             rospy.loginfo('Teleop disabled (%s) — arm holds position.', source)
             self._halt_streaming()
             if self.traj_client is not None:
                 self.traj_client.cancel_all_goals()
+            self._lift_paused = False
         self.enabled = bool(enabled)
 
     def _on_joint_state(self, msg):
@@ -375,24 +393,45 @@ class ColmagDrawNode:
         elif cmd in ('rotate:cw', 'rotate:ccw'):
             # Discrete single-step variant (kept for gesture/scripted use).
             self._rotate_pen(self.rotate_step if cmd == 'rotate:cw' else -self.rotate_step)
-        elif cmd in ('plane:toggle', 'plane:horizontal', 'plane:vertical'):
-            if cmd == 'plane:toggle':
-                new_mode = 'vertical' if self.plane_mode == 'horizontal' else 'horizontal'
-            else:
-                new_mode = cmd.split(':', 1)[1]
-            if new_mode != self.plane_mode:
-                self.plane_mode = new_mode
-                held = ('height z=%.2f m' % self.p_target[2]
-                        if new_mode == 'horizontal'
-                        else 'depth x=%.2f m' % self.p_target[0])
-                rospy.loginfo('Teleop plane -> %s (holding %s)', new_mode, held)
+        elif cmd in ('plane:toggle', 'layer:next'):
+            idx = self.layer_modes.index(self.plane_mode)
+            self._set_layer_mode(self.layer_modes[(idx + 1) % len(self.layer_modes)], cmd)
+        elif (cmd.startswith('plane:') or cmd.startswith('layer:')):
+            new_mode = cmd.split(':', 1)[1]
+            self._set_layer_mode(new_mode, cmd)
 
-    def _rotate_pen(self, delta, quiet=False):
-        """Rotate the held tool orientation about its own axis (local z)."""
-        new_yaw = float(np.clip(self.pen_yaw + delta, -self.max_pen_yaw, self.max_pen_yaw))
-        if new_yaw == self.pen_yaw:
-            rospy.logwarn_throttle(2.0, 'Gripper rotation limit reached (%.0f deg).',
-                                   np.degrees(self.pen_yaw))
+    def _set_layer_mode(self, new_mode, source='command'):
+        if new_mode not in self.layer_modes:
+            rospy.logwarn('Unknown teleop layer "%s" from %s', new_mode, source)
+            return
+        if new_mode == self.plane_mode:
+            return
+
+        self.plane_mode = new_mode
+        if new_mode == 'horizontal':
+            held = 'height z=%.2f m' % self.p_target[2]
+        elif new_mode == 'vertical':
+            held = 'depth x=%.2f m' % self.p_target[0]
+        else:
+            # Rotate layer: remember where the cursor was when entering, so the
+            # wrist does not jump just because the layer changed.
+            self._rotate_layer_ref_yaw = self.pen_yaw
+            if self.latest_pose is not None:
+                self._rotate_layer_ref_u, _ = self._cursor_uv(self.latest_pose)
+            else:
+                self._rotate_layer_ref_u = 0.0
+            held = 'position x=%.2f y=%.2f z=%.2f m' % tuple(self.p_target)
+
+        rospy.loginfo('Teleop layer -> %s (holding %s)', new_mode, held)
+
+    def _set_pen_yaw(self, yaw, quiet=False):
+        """Set the held tool yaw about its own axis (local z)."""
+        requested = float(yaw)
+        new_yaw = float(np.clip(requested, -self.max_pen_yaw, self.max_pen_yaw))
+        if abs(new_yaw - self.pen_yaw) < 1e-6:
+            if not quiet and abs(requested - new_yaw) > 1e-6:
+                rospy.logwarn_throttle(2.0, 'Gripper rotation limit reached (%.0f deg).',
+                                       np.degrees(self.pen_yaw))
             return
         self.pen_yaw = new_yaw
         c, s = np.cos(new_yaw), np.sin(new_yaw)
@@ -400,6 +439,10 @@ class ColmagDrawNode:
         self.R_pen = self.R_pen0 @ rz
         if not quiet:
             rospy.loginfo_throttle(0.5, 'Gripper rotation: %+.0f deg', np.degrees(new_yaw))
+
+    def _rotate_pen(self, delta, quiet=False):
+        """Rotate the held tool orientation about its own axis (local z)."""
+        self._set_pen_yaw(self.pen_yaw + delta, quiet=quiet)
 
     def _handle_gripper(self, action):
         if action == 'toggle':
@@ -451,15 +494,61 @@ class ColmagDrawNode:
     def _on_pose(self, msg):
         self.latest_pose = msg.pose.position
 
+    def _cursor_uv(self, pos):
+        """Return cursor coordinates normalized to [-1, 1]."""
+        u = np.clip(pos.x / self.input_extent, -1.0, 1.0)
+        v = np.clip(pos.y / self.input_extent, -1.0, 1.0)
+        return float(u), float(v)
+
+    def _lift_gate_paused(self, pos):
+        """Pause following while the magnet/cursor is lifted away from the board."""
+        if self.lift_gate_z <= 0.0:
+            return False
+        try:
+            z = abs(float(pos.z))
+        except (TypeError, ValueError):
+            return False
+        if not np.isfinite(z):
+            return False
+
+        if self._lift_paused:
+            if z <= self.lift_reengage_z:
+                self._lift_paused = False
+                if self.latest_joints is not None:
+                    self.q_cmd = self.latest_joints.copy()
+                    self.p_target = _fk(self.q_cmd)[:3, 3].copy()
+                    self._q_sent = None
+                rospy.loginfo('Lift gate resumed: |pose.z| %.1f cm <= %.1f cm.',
+                              100.0 * z, 100.0 * self.lift_reengage_z)
+                return False
+            return True
+
+        if z > self.lift_gate_z:
+            self._lift_paused = True
+            self._halt_streaming()
+            rospy.loginfo('Lift gate paused: |pose.z| %.1f cm > %.1f cm; arm holds.',
+                          100.0 * z, 100.0 * self.lift_gate_z)
+            return True
+        return False
+
+    def _update_rotate_layer_from_cursor(self, pos):
+        """In rotate layer, cursor x turns the wrist while position holds."""
+        if self.plane_mode != 'rotate':
+            return
+        u, _ = self._cursor_uv(pos)
+        if self._rotate_layer_ref_u is None:
+            self._rotate_layer_ref_u = u
+            self._rotate_layer_ref_yaw = self.pen_yaw
+        yaw = self._rotate_layer_ref_yaw + (u - self._rotate_layer_ref_u) * self.max_pen_yaw
+        self._set_pen_yaw(yaw, quiet=True)
+
     def _desired_point(self, pos):
         """Absolute cursor-mapped point in the workspace box.
 
-        The active plane controls two coordinates; the third keeps the tracked
-        target's current value (so switching planes lets the cursor position
-        the flange anywhere in the box).
+        The active layer controls only part of the command; everything else
+        keeps the tracked target's current value.
         """
-        u = np.clip(pos.x / self.input_extent, -1.0, 1.0)
-        v = np.clip(pos.y / self.input_extent, -1.0, 1.0)
+        u, v = self._cursor_uv(pos)
         target = self.p_target.copy()
         if self.plane_mode == 'horizontal':
             # Tabletop as seen from IN FRONT of the robot: cursor up -> the far
@@ -467,14 +556,21 @@ class ColmagDrawNode:
             # from that viewpoint), cursor right -> viewer's right (+y).
             target[0] = self.center[0] - self.sign_h * v * self.half_d
             target[1] = self.center[1] + self.sign_w * u * self.half_w
-        else:
+        elif self.plane_mode == 'vertical':
             # Upright canvas: cursor up -> higher (+z), cursor right -> +y.
             target[1] = self.center[1] + self.sign_w * u * self.half_w
             target[2] = self.center[2] + self.sign_h * v * self.half_h
+        else:
+            # Rotate layer: position holds; _update_rotate_layer_from_cursor()
+            # maps cursor x to gripper yaw before IK runs.
+            pass
         return np.clip(target, self.box_lo, self.box_hi)
 
     def _on_tick(self, _event):
         if self.latest_pose is None or not self.enabled:
+            return
+
+        if self._lift_gate_paused(self.latest_pose):
             return
 
         # Smooth hold-to-rotate: integrate a constant angular rate while the
@@ -487,6 +583,7 @@ class ColmagDrawNode:
             else:
                 self._rotate_pen(self._rot_dir * self.rotate_speed / self.update_rate,
                                  quiet=True)
+        self._update_rotate_layer_from_cursor(self.latest_pose)
 
         # Glide the tracked target toward the cursor point at max_linear_speed
         # rather than teleporting it. This caps the tool speed while following

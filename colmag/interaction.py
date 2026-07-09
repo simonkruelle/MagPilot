@@ -63,6 +63,22 @@ class VirtualJoystick:
             ]
         )
 
+    @classmethod
+    def teleop(cls, extent):
+        """Taskbar layout used while teleoperating: a row of buttons along the
+        top strip so the rest of the canvas stays a clean teleop area. 'Draw'
+        exits back to letter mode; the 'cmd:' buttons publish their command
+        verbatim without changing the app mode."""
+        radius = extent * 0.13
+        bar_y = extent * 0.80
+        return cls(
+            [
+                VirtualButton('Draw', -extent * 0.60, bar_y, radius, 'mode:letters'),
+                VirtualButton('Gripper', 0.0, bar_y, radius, 'cmd:gripper:toggle'),
+                VirtualButton('Layer', extent * 0.60, bar_y, radius, 'cmd:plane:toggle'),
+            ]
+        )
+
     def button_at(self, cursor_x, cursor_y):
         for button in self.buttons:
             if button.contains(cursor_x, cursor_y):
@@ -110,8 +126,12 @@ class AppController:
         dwell_seconds=2.0,
         letter_labels='letters',
         digit_labels='digits',
+        teleop_joystick=None,
     ):
         self.joystick = joystick
+        # Alternate button layout used while in ROBOT (teleop) mode; falls back
+        # to the default layout when not provided.
+        self.teleop_joystick = teleop_joystick or joystick
         self.detector = DwellPressDetector(dwell_seconds=dwell_seconds)
         self.letter_labels = letter_labels
         self.digit_labels = digit_labels
@@ -122,8 +142,12 @@ class AppController:
         self.active_button = None
         self.dwell_progress = 0.0
 
+    def active_joystick(self):
+        """The button layout for the current mode (taskbar while teleoperating)."""
+        return self.teleop_joystick if self.mode == InputMode.ROBOT else self.joystick
+
     def update_cursor(self, cursor_x, cursor_y, timestamp):
-        button = self.joystick.button_at(cursor_x, cursor_y)
+        button = self.active_joystick().button_at(cursor_x, cursor_y)
         fired, progress = self.detector.update(button, timestamp)
         self.active_button = button.name if button else None
         self.dwell_progress = progress
@@ -155,6 +179,11 @@ class AppController:
         elif button.action.startswith('robot:'):
             self.mode = InputMode.ROBOT
             command = button.action
+            self.last_command = command
+        elif button.action.startswith('cmd:'):
+            # Passthrough button: publish the embedded command verbatim without
+            # changing the app mode (used by the teleop taskbar).
+            command = button.action[len('cmd:'):]
             self.last_command = command
         elif button.action.startswith('choice:'):
             command = button.action

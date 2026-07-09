@@ -323,9 +323,10 @@ the IK residuals should stay well under 5 mm. Only then restart Terminal 2 with
 
 Expected behaviour going live: on pressing Teleop the arm glides at ~0.10 m/s
 from its current pose toward the cursor — slow and predictable. Test in this
-order: (1) small circles at mid height, (2) Shift+V height changes, (3) gripper
-rotation with the arrow keys, (4) one grasp + lift + set-down of the practice
-object. Stop immediately (E-stop or leaving teleop via Letters/Digits) if the
+order: (1) small circles in the x/y layer, (2) Shift+V into the z layer and make
+tiny height changes, (3) Shift+V into the rotate layer and turn the wrist, (4)
+one gripper close/open, (5) one grasp + lift + set-down of the practice object.
+Stop immediately (E-stop or leaving teleop via Letters/Digits/Shift+E) if the
 arm does not track the cursor, a reflex fires (`rosrun colmag_ros
 fr3_recover.py` to recover), or anything enters the workspace box.
 
@@ -397,24 +398,35 @@ not a bug).
 
 Then dwell on the **Teleop** button (top-left) — the arm starts tracing the
 cursor. In teleop the canvas shows a **softly fading trail** (~5 s) instead of
-accumulating ink. Dwell on **Letters** or **Digits** to stop following and go
-back to gestures. **Shift+G** toggles the gripper (grasp force via the
-`grasp_force` arg, default 20 N). **Hold the arrow keys ← / →** to rotate the
-gripper smoothly around its own axis (~35°/s, release to stop, ±92° range) to
-align the fingers with an object before grasping. **Shift+V** switches the control plane: horizontal (cursor drives x/y at the currently held height) ↔
-vertical (cursor drives y/z at the currently held depth) — the third coordinate
-keeps its last value, so alternating planes positions the end-effector anywhere
-in the workspace box (x 0.30–0.60, y ±0.30, z 0.12–0.68 m — the bottom layer
-puts the fingertips at about base height, so objects standing next to the robot
-can be grasped in vertical mode). The four extreme far-top-edge spots are
-outside the arm's reach with the gripper-down orientation; the node skips such
-targets safely instead of forcing them. On the **real** robot, run
+accumulating ink. Dwell on **Draw** in the top taskbar, dwell on **Letters** or
+**Digits**, or press **Shift+E** to stop following and go back to gestures.
+**Shift+G** toggles the gripper (grasp force via the `grasp_force` arg, default
+20 N). **Shift+V** or the **Layer** taskbar button cycles the teleop layer:
+horizontal (cursor drives x/y at the currently held height) → vertical (cursor
+drives y/z at the currently held depth) → rotate (cursor left/right rotates the
+wrist while position holds, ±92° range). The coordinates not controlled by the
+active layer keep their last value, so the layers position and orient the
+end-effector anywhere in the workspace box (x 0.30–0.60, y ±0.30, z
+0.12–0.68 m — the bottom layer puts the fingertips at about base height, so
+objects standing next to the robot can be grasped in vertical mode). The arrow
+keys ← / → still rotate the gripper smoothly in touchpad mode. The four extreme
+far-top-edge spots are outside the arm's reach with the gripper-down
+orientation; the node skips such targets safely instead of forcing them. On the
+**real** robot, run
 `fr3_real.launch` in place of `fr3.launch` (with `load_gripper:=true` if the
 hand is mounted), pass `arm_controller:=position_joint_trajectory_controller`
 to `colmag_draw.launch`, and start with `dry_run:=true` to watch the logged
 targets and IK residuals before enabling motion. For the real magnetometer
-instead of the touchpad, add `input:=magnetometer port:=/dev/ttyUSB0` and skip
-the reader.
+with the same visual UI plus tilt/twist controls, keep `colmag_draw.launch`
+running and start the reader with:
+
+```bash
+python3 magnetometer_reader.py --input-source serial --port /dev/ttyUSB0 --ros
+```
+
+In serial teleop, tilting the magnet closes/opens the gripper, twisting it
+cycles the teleop layer, and lifting it farther than 5 cm pauses following so
+you can move to the top taskbar without dragging the arm.
 
 Safety and tuning:
 
@@ -424,6 +436,11 @@ Safety and tuning:
   teleop, Ctrl-C, or publishing `false` cancels the goal and the arm holds.
   While teleop is active, `colmag_robot_node` ignores confirmed gestures, so the
   two modes never fight over the arm.
+- **Lift gate.** If `/colmag/pose.z` is farther than `lift_gate_z` (default
+  0.05 m), the draw node pauses following and holds the arm. Lower the magnet
+  below the hysteresis band (default resume below 0.045 m) to continue. This
+  lets you lift the magnet away from the board and travel to the top taskbar
+  without dragging the end-effector. Disable with `lift_gate_z:=0`.
 - **Speed-capped.** The tool glides toward the cursor at `max_linear_speed`
   (default 0.10 m/s) — flicking the cursor across the pad cannot make the arm
   lunge, and enabling teleop with the arm far from the cursor produces a slow

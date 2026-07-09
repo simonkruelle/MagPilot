@@ -384,6 +384,20 @@ class MagnetometerReader:
         # fading line instead of accumulating ink on the OCR canvas.
         self.teleop_trail = deque(maxlen=600)
         self.teleop_trail_fade_s = 5.0
+
+        # ── Magnet-orientation teleop controls (real sensor only) ──────────────
+        # The dipole direction m=(mx,my,mz) gives two angles:
+        #   theta = acos(mz)      tilt away from vertical  → drives the GRIPPER
+        #   phi   = atan2(mx,my)  twist in the board plane → cycles CONTROL LAYERS
+        # (There is no 3rd orientation: a magnet is axially symmetric, so spin
+        # about its own axis is unobservable — 2 angles + xyz = 5 DOF total.)
+        self.magnet_gripper_close_deg = 55.0   # tilt >= this ⇒ request close
+        self.magnet_gripper_open_deg  = 25.0   # tilt <= this ⇒ request open (hysteresis)
+        self.magnet_gripper_hold_s    = 0.30   # must sustain past a threshold before firing
+        self.magnet_layer_step_deg    = 70.0   # twist this far to advance one layer
+        self._magnet_grip_closed   = False
+        self._magnet_grip_pending  = None      # (target_bool, since_monotonic)
+        self._magnet_layer_ref_phi = None       # reference azimuth for twist accumulation
         self.touchpad_last_speed = 0.0
         self.touchpad_last_speed_report_at = 0.0
         self.touchpad_speed_log_file = None
@@ -432,12 +446,18 @@ class MagnetometerReader:
         self.writing_edge_speed_factor = 4.0
         self.clean_view = clean_view
         self.joystick = VirtualJoystick.default(self.projection_extent)
+        # Taskbar layout shown while teleoperating (Draw = exit, Gripper, Layer).
+        self.teleop_joystick = VirtualJoystick.teleop(self.projection_extent)
         self.app_controller = AppController(
             self.joystick,
             dwell_seconds=joystick_dwell_seconds,
             letter_labels=letter_labels,
             digit_labels=digit_labels,
+            teleop_joystick=self.teleop_joystick,
         )
+        # UI refs for the teleop-mode layout swap (populated in plot_data).
+        self._teleop_ui = None
+        self._teleop_ui_active = False
         self.latest_interface_text = "Mode: menu | Button: -- | Last: --"
 
         if enable_classifier and not lazy_classifier:
@@ -965,7 +985,7 @@ class MagnetometerReader:
             elif event.command == 'robot:teleop':
                 # Arm-following mode: colmag_draw_node starts tracing the cursor.
                 # Pressing Letters/Digits/Signs leaves teleop again.
-                self._set_key_feedback("Mode: TELEOP — arm follows cursor (Shift+G: gripper)")
+                self._set_key_feedback("Mode: TELEOP — Shift+E exits, Shift+V changes layer")
                 print(f"Virtual joystick: {event.button.name} -> {event.command}")
             else:
                 self._set_key_feedback(f"{event.button.name}: {event.command.split(':', 1)[-1]}")
@@ -2016,6 +2036,18 @@ class MagnetometerReader:
         def on_key_press(event):
             raw_key = event.key or ''
             key = raw_key.lower()
+            # Shift+E = SAFETY EXIT from teleoperation, in BOTH trackpad and
+            # magnet (serial) mode. Returns to letter-drawing mode and publishes
+            # letter_detection so the draw node stops following immediately.
+            # Only active while teleoperating, so serial-mode 'E' recording is
+            # unaffected outside teleop.
+            if (raw_key in ('E', 'shift+e')
+                    and self.app_controller.mode.value == 'robot'):
+                self.activate_classifier_mode('letters')
+                if self.ros_bridge:
+                    self.ros_bridge.publish_command('letter_detection')
+                self._set_key_feedback("TELEOP EXIT → letters")
+                return
             # Shift+L/R/U/D = mode/reset controls (keep lowercase free for recording)
             if self.input_source == 'touchpad' and raw_key in ('L', 'shift+l'):
                 self.activate_classifier_mode('letters')
@@ -2062,13 +2094,13 @@ class MagnetometerReader:
                 else:
                     self._set_key_feedback("Rotate: needs --ros")
             elif self.input_source == 'touchpad' and raw_key in ('V', 'shift+v'):
-                # Shift+V = teleop plane toggle: horizontal (x/y at held height)
-                # <-> vertical (y/z at held depth); lowercase v stays free
+                # Shift+V = teleop layer toggle: move x/y -> move y/z ->
+                # rotate wrist; lowercase v stays free
                 if self.ros_bridge:
                     self.ros_bridge.publish_command('plane:toggle')
-                    self._set_key_feedback("Teleop plane: toggle sent")
+                    self._set_key_feedback("Teleop layer: toggle sent")
                 else:
-                    self._set_key_feedback("Plane toggle: needs --ros")
+                    self._set_key_feedback("Layer toggle: needs --ros")
             elif self.input_source == 'touchpad' and raw_key in ('S', 'shift+s'):
                 # Shift+S = stop & save; lowercase s records letter_S
                 self.stop_session()
@@ -2308,43 +2340,67 @@ class MagnetometerReader:
         else:
             ax.set_aspect('equal', adjustable='box')
 
+        # Taskbar strip behind the teleop buttons (hidden until teleop mode).
+        extent = self.projection_extent
+        taskbar_patch = patches.FancyBboxPatch(
+            (-extent * 0.97, extent * 0.62),
+            extent * 1.94,
+            extent * 0.34,
+            boxstyle='round,pad=0.001',
+            facecolor='#eef0f4',
+            edgecolor='#d2d2d7',
+            linewidth=1.0,
+            alpha=0.92,
+            zorder=3,
+            visible=False,
+        )
+        ax.add_patch(taskbar_patch)
+        self._teleop_taskbar_patch = taskbar_patch
+
         button_artists = {}
-        for button in self.joystick.buttons:
-            if button.action.startswith('choice:'):
-                label_fontsize = 11
-            elif len(button.name) >= 6:
-                label_fontsize = 7.5
-            else:
-                label_fontsize = 9.5
-            edgecolor = '#8e8e93'
-            if button.action.startswith('canvas:'):
-                edgecolor = '#b07a1a'
-            circle = patches.Circle(
-                (button.x, button.y),
-                button.radius,
-                facecolor='#f2f2f7',
-                edgecolor=edgecolor,
-                linewidth=1.1,
-                alpha=0.34,
-                zorder=4,
-            )
-            ax.add_patch(circle)
-            label = ax.text(
-                button.x,
-                button.y,
-                button.name,
-                ha='center',
-                va='center',
-                fontsize=label_fontsize,
-                weight='medium',
-                color='#4f5661',
-                alpha=0.68,
-                zorder=5,
-            )
-            button_artists[button.name] = {
-                'circle': circle,
-                'label': label,
-            }
+        # Default layout plus the teleop taskbar layout (Draw/Gripper/Layer);
+        # the teleop set starts hidden and is swapped in when teleop activates.
+        for joystick_obj, is_teleop in ((self.joystick, False),
+                                        (self.teleop_joystick, True)):
+            for button in joystick_obj.buttons:
+                if button.action.startswith('choice:'):
+                    label_fontsize = 11
+                elif len(button.name) >= 6:
+                    label_fontsize = 7.5
+                else:
+                    label_fontsize = 9.5
+                edgecolor = '#8e8e93'
+                if button.action.startswith('canvas:'):
+                    edgecolor = '#b07a1a'
+                circle = patches.Circle(
+                    (button.x, button.y),
+                    button.radius,
+                    facecolor='#ffffff' if is_teleop else '#f2f2f7',
+                    edgecolor=edgecolor,
+                    linewidth=1.1,
+                    alpha=0.95 if is_teleop else 0.34,
+                    zorder=4,
+                    visible=not is_teleop,
+                )
+                ax.add_patch(circle)
+                label = ax.text(
+                    button.x,
+                    button.y,
+                    button.name,
+                    ha='center',
+                    va='center',
+                    fontsize=label_fontsize,
+                    weight='medium',
+                    color='#1d1d1f' if is_teleop else '#4f5661',
+                    alpha=0.9 if is_teleop else 0.68,
+                    zorder=5,
+                    visible=not is_teleop,
+                )
+                button_artists[button.name] = {
+                    'circle': circle,
+                    'label': label,
+                    'teleop': is_teleop,
+                }
 
         cursor_artist = ax.scatter(
             [],
@@ -2394,13 +2450,15 @@ class MagnetometerReader:
         if not hasattr(self, '_cached_button_texts'):
             self._cached_button_texts = {}
 
-        for button in self.joystick.buttons:
+        # Style only the layout that is currently active (default vs teleop bar).
+        for button in self.app_controller.active_joystick().buttons:
             artist_group = button_artists[button.name]
             artist = artist_group['circle']
             label_artist = artist_group['label']
-            facecolor = '#f2f2f7'
-            button_alpha = 0.34
-            label_alpha = 0.68
+            is_teleop_button = artist_group.get('teleop', False)
+            facecolor = '#ffffff' if is_teleop_button else '#f2f2f7'
+            button_alpha = 0.95 if is_teleop_button else 0.34
+            label_alpha = 0.9 if is_teleop_button else 0.68
             label_text = button.name
             if button.action == 'mode:letters' and self.app_controller.mode.value == 'letters':
                 facecolor = '#dcecff'
@@ -2460,6 +2518,110 @@ class MagnetometerReader:
                 label_artist.set_text(label_text)
                 self._cached_button_texts[button.name] = label_text
 
+    def _magnet_control_decisions(self, theta_deg, phi_deg, now):
+        """Decide teleop commands from magnet tilt/twist for one sample.
+
+        Pure w.r.t. ROS (no publishing) so it can be unit-tested: it only mutates
+        the teleop state fields and returns a list of /colmag/command strings.
+
+        - Gripper: tilt theta past magnet_gripper_close_deg (held for
+          magnet_gripper_hold_s) closes; dropping below magnet_gripper_open_deg
+          (held) opens. The hysteresis band + hold time stop it firing by accident.
+        - Layer: accumulate azimuth phi; each magnet_layer_step_deg of twist
+          emits one 'plane:toggle' to advance the control layer (the draw node
+          keeps this legacy command name but cycles all teleop layers).
+        """
+        cmds = []
+
+        # Gripper from tilt (hysteresis + sustained hold)
+        want = None
+        if theta_deg >= self.magnet_gripper_close_deg and not self._magnet_grip_closed:
+            want = True
+        elif theta_deg <= self.magnet_gripper_open_deg and self._magnet_grip_closed:
+            want = False
+        if want is None:
+            self._magnet_grip_pending = None
+        elif self._magnet_grip_pending is None or self._magnet_grip_pending[0] != want:
+            self._magnet_grip_pending = (want, now)
+        elif now - self._magnet_grip_pending[1] >= self.magnet_gripper_hold_s:
+            self._magnet_grip_closed = want
+            self._magnet_grip_pending = None
+            cmds.append('gripper:close' if want else 'gripper:open')
+
+        # Layer from twist (one step of rotation → advance one layer)
+        if self._magnet_layer_ref_phi is None:
+            self._magnet_layer_ref_phi = phi_deg
+        dphi = ((phi_deg - self._magnet_layer_ref_phi + 180.0) % 360.0) - 180.0
+        if abs(dphi) >= self.magnet_layer_step_deg:
+            cmds.append('plane:toggle')
+            self._magnet_layer_ref_phi = phi_deg
+
+        return cmds
+
+    def update_magnet_teleop_controls(self, mx, my, mz):
+        """Serial teleop: turn magnet orientation into gripper/layer commands.
+
+        Only active with the real sensor (the trackpad has no true orientation).
+        theta = acos(mz), phi = atan2(mx, my), per the tracking-pipeline convention.
+        """
+        if self.input_source != 'serial' or self.ros_bridge is None:
+            return
+        try:
+            mz_c = float(np.clip(float(mz), -1.0, 1.0))
+            theta = float(np.degrees(np.arccos(mz_c)))       # tilt from vertical
+            phi = float(np.degrees(np.arctan2(float(mx), float(my))))  # azimuth in plane
+        except (ValueError, TypeError):
+            return
+        for cmd in self._magnet_control_decisions(theta, phi, time.monotonic()):
+            self.ros_bridge.publish_command(cmd)
+
+    def _sync_teleop_ui(self):
+        """Swap the interface between classify mode and teleop mode.
+
+        Teleop: buttons move to a top taskbar (Draw = exit, Gripper, Layer),
+        the legend + classifier panels hide, and the canvas expands into a
+        large clean teleoperation screen. Classify: original 3-panel layout.
+        Runs every frame but only does work when the mode actually flips
+        (each flip needs one full redraw + blit-cache clear).
+        """
+        ui = self._teleop_ui
+        if not ui:
+            return
+        active = self.app_controller.mode.value == 'robot'
+        if active == self._teleop_ui_active:
+            return
+        self._teleop_ui_active = active
+
+        for group in ui['button_artists'].values():
+            show = group.get('teleop', False) == active
+            group['circle'].set_visible(show)
+            group['label'].set_visible(show)
+        self._teleop_taskbar_patch.set_visible(active)
+
+        for artist in ui['classifier_artists']:
+            artist.set_visible(not active)
+        if ui.get('ax6') is not None:
+            ui['ax6'].set_visible(not active)
+        if ui.get('ax_legend') is not None:
+            ui['ax_legend'].set_visible(not active)
+
+        ax5 = ui['ax5']
+        if active:
+            ax5.set_position(ui['ax5_teleop_pos'])
+            ax5.set_title('Teleoperation', fontweight='medium')
+        else:
+            ax5.set_position(ui['ax5_default_pos'])
+            ax5.set_title('Writing Surface', fontweight='medium')
+
+        # One full redraw so the new static layout becomes the blit background.
+        ui['fig'].canvas.draw()
+        animation = getattr(self, '_animation', None)
+        if animation is not None:
+            try:
+                animation._blit_cache.clear()
+            except AttributeError:
+                pass
+
     def _draw_robot_action_legend(self, ax):
         """Render the gesture → robot action legend panel beside the canvas."""
         ax.axis('off')
@@ -2516,6 +2678,7 @@ class MagnetometerReader:
             self._draw_robot_action_legend(ax_legend)
             ax1 = ax2 = ax3 = ax4 = None
         else:
+            ax_legend = None
             fig = plt.figure(figsize=(18, 10))
             fig.suptitle(
                 f'Real-time Magnetometer Data - Sensor {self.plot_sensor} | '
@@ -2611,7 +2774,7 @@ class MagnetometerReader:
                 pass
         else:
             ax5.set_aspect('equal', adjustable='box')
-        _hint_teleop = "Teleop: Shift+V horizontal/vertical plane   Shift+G gripper   Shift+Left/Right rotate"
+        _hint_teleop = "Teleop: Shift+E EXIT   Shift+V layer   Shift+G gripper   Shift+Left/Right rotate"
         if self.input_source == 'touchpad':
             _hint_line1 = "Shift+S save   Shift+Q quit   |   A-Z / 0-9 / - / = record"
             _hint_line2 = "Space/click draw   Shift+P pen   |   Shift+L letters   Shift+R digits   Shift+D reset"
@@ -2719,6 +2882,7 @@ class MagnetometerReader:
             image_artist,
             teleop_trail_collection,
             hint_text,       # drawn after image so it stays on top of ink
+            self._teleop_taskbar_patch,  # after image so ink cannot cover the bar
             *button_circles,
             *button_labels,
             cursor_artist,
@@ -2733,6 +2897,23 @@ class MagnetometerReader:
         )
         for artist in blit_artists:
             artist.set_animated(True)
+
+        # References for the teleop-mode layout swap (see _sync_teleop_ui).
+        # Captured after tight_layout so the stored default position is final.
+        _ax5_default_pos = ax5.get_position()
+        _teleop_left = 0.06
+        _teleop_width = 0.88
+        self._teleop_ui = {
+            'fig': fig,
+            'ax5': ax5,
+            'ax6': ax6,
+            'ax_legend': ax_legend,
+            'button_artists': button_artists,
+            'classifier_artists': [*prob_bar_artists, info_text],
+            'ax5_default_pos': _ax5_default_pos,
+            'ax5_teleop_pos': [_teleop_left, 0.12, _teleop_width, 0.80],
+        }
+        self._teleop_ui_active = False
 
         def update_classifier_axis_labels(labels, indices):
             nonlocal current_classifier_axis_labels
@@ -2829,10 +3010,19 @@ class MagnetometerReader:
             capture_mask = self.classification_sample_mask(pose_rows)
             ocr_mask = writing_mask & capture_mask
             teleop_mode = self.app_controller.mode.value == 'robot'
+            # Swap the whole interface layout when teleop toggles (taskbar on
+            # top + expanded canvas vs the classify 3-panel view).
+            self._sync_teleop_ui()
             if teleop_mode:
                 # Teleop: no ink on the OCR canvas — the fading trail below
                 # shows the path instead, so the canvas never fills up.
                 ocr_mask = np.zeros_like(ocr_mask, dtype=bool)
+                # Magnet orientation (real sensor only) drives gripper + layers.
+                # mx,my,mz are the last three values of each pose row.
+                if self.input_source == 'serial' and len(data) > 0:
+                    last_row = data[-1]
+                    self.update_magnet_teleop_controls(
+                        last_row[-3], last_row[-2], last_row[-1])
             ink_count = int(np.count_nonzero(ocr_mask))
             digit_image = self.live_pose_to_digit_image(
                 pose_rows,

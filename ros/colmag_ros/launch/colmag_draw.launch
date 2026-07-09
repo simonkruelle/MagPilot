@@ -21,8 +21,9 @@
     (run magnetometer_reader.py with the touchpad source and ROS on; see README)
     rostopic pub -1 /colmag/draw_enable std_msgs/Bool "data: true"
 
-    # Real magnetometer instead of the touchpad:
-    roslaunch colmag_ros colmag_draw.launch input:=magnetometer dry_run:=false port:=/dev/ttyUSB0
+    # Real magnetometer with the full Matplotlib UI / tilt+twist controls:
+    roslaunch colmag_ros colmag_draw.launch dry_run:=false
+    Run magnetometer_reader.py in serial ROS mode; see README for the command.
 -->
 <launch>
   <arg name="input"          default="touchpad" doc="Gesture input: 'touchpad' (run magnetometer_reader.py separately) or 'magnetometer' (serial sensor node)"/>
@@ -43,6 +44,8 @@
   <arg name="plane_height"   default="0.56"   doc="Workspace box Z extent (m); default box bottom puts fingertips at ~base height for pick-ups"/>
   <arg name="max_joint_step" default="0.05"   doc="Max per-joint change per update (rad); secondary safety clamp"/>
   <arg name="max_linear_speed" default="0.10" doc="Cartesian tool-speed cap (m/s); the target glides toward the cursor at this rate"/>
+  <arg name="lift_gate_z"    default="0.05"   doc="Pause teleop following when |/colmag/pose.z| exceeds this value in meters; set &lt;=0 to disable"/>
+  <arg name="lift_gate_hysteresis" default="0.005" doc="Resume only after |pose.z| falls this far below lift_gate_z"/>
   <arg name="grasp_force"    default="20.0"   doc="Gripper grasp force (N); raise for heavier/slippery objects (hand max 70)"/>
 
   <!-- Serial sensor node — only when using the real magnetometer. -->
@@ -73,6 +76,8 @@
     <param name="plane_center_z"  value="$(arg plane_center_z)"/>
     <param name="max_joint_step"  value="$(arg max_joint_step)"/>
     <param name="max_linear_speed" value="$(arg max_linear_speed)"/>
+    <param name="lift_gate_z"     value="$(arg lift_gate_z)"/>
+    <param name="lift_gate_hysteresis" value="$(arg lift_gate_hysteresis)"/>
     <param name="grasp_force"     value="$(arg grasp_force)"/>
   </node>
 
