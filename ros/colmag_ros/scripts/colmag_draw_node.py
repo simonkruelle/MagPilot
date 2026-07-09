@@ -60,6 +60,7 @@ Parameters (see below for defaults). Usage:
 """
 
 import sys
+import time
 
 import numpy as np
 import rospy
@@ -77,7 +78,8 @@ except ImportError:
 
 try:
     from franka_gripper.msg import (GraspAction, GraspGoal,
-                                    MoveAction, MoveGoal)
+                                    MoveAction, MoveGoal,
+                                    StopAction, StopGoal)
     _GRIPPER_AVAILABLE = True
 except ImportError:
     _GRIPPER_AVAILABLE = False
@@ -200,6 +202,15 @@ class ColmagDrawNode:
         self.sign_w = float(rospy.get_param('~map_x_sign', 1.0))
         self.sign_h = float(rospy.get_param('~map_y_sign', 1.0))
 
+        # Magnet height → end-effector height (horizontal plane). pose.z in
+        # 0..lift_gate_z maps EE z from height_ee_min (magnet lying on the board
+        # → EE near the ground) to height_ee_max (magnet at the cutoff → default
+        # height). Above the cutoff the lift gate disengages. Set
+        # height_from_magnet:=false to keep the old fixed-height plane.
+        self.height_from_magnet = bool(rospy.get_param('~height_from_magnet', True))
+        self.height_ee_min = float(rospy.get_param('~height_ee_min', 0.12))
+        self.height_ee_max = float(rospy.get_param('~height_ee_max', 0.55))
+
         self.update_rate    = float(rospy.get_param('~update_rate', 15.0))
         self.command_time   = float(rospy.get_param('~command_time', 0.12))
         self.max_joint_step = float(rospy.get_param('~max_joint_step', 0.05))
@@ -271,11 +282,21 @@ class ColmagDrawNode:
         self._q_sent = None
         self._grip_clients = None
         self._grip_closed = False
+        # Return the arm to the neutral home pose whenever teleop is exited
+        # (Draw button / Shift+E / letter mode). ~home_on_exit:=false to hold.
+        self.home_on_exit = bool(rospy.get_param('~home_on_exit', True))
         if not self.dry_run:
             self._setup_trajectory_client()
 
         self.joint_state_topic = rospy.get_param(
             '~joint_state_topic', '/franka_state_controller/joint_states')
+
+        # Latched teleop-state broadcast: lets colmag_robot_node (and any other
+        # arm user) know whether teleop currently owns the arm — even if that
+        # node starts later and missed the 'robot:teleop' command.
+        self._active_pub = rospy.Publisher('/colmag/draw_active', Bool,
+                                           queue_size=1, latch=True)
+        self._publish_active()
 
         rospy.on_shutdown(self._cancel_on_shutdown)
         rospy.Subscriber('/colmag/pose', PoseStamped, self._on_pose)
@@ -338,6 +359,32 @@ class ColmagDrawNode:
         except Exception as exc:
             rospy.logwarn('Shutdown: could not halt motion: %s', exc)
 
+    def _go_home(self, duration=3.0):
+        """Send the arm back to the neutral elbow-bend pose (teleop exit)."""
+        if self.dry_run or self.traj_client is None:
+            return
+        goal = FollowJointTrajectoryGoal()
+        goal.trajectory.joint_names = list(self.joint_names)
+        pt = JointTrajectoryPoint()
+        pt.positions = list(_HOME)
+        pt.velocities = [0.0] * len(self.joint_names)
+        pt.time_from_start = rospy.Duration(duration)
+        goal.trajectory.points = [pt]
+        goal.trajectory.header.stamp = rospy.Time.now()
+        self.traj_client.send_goal(goal)
+        # Resync command state to home so a later re-enable starts clean.
+        self.q_cmd = _HOME.copy()
+        self.p_target = _fk(self.q_cmd)[:3, 3].copy()
+        self._q_sent = None
+        self.pen_yaw = 0.0
+        self._rotate_layer_ref_yaw = 0.0
+        rospy.loginfo('Teleop exit: homing the arm (%.1fs).', duration)
+
+    def _publish_active(self):
+        pub = getattr(self, '_active_pub', None)
+        if pub is not None:
+            pub.publish(Bool(data=bool(self.enabled)))
+
     def _set_enabled(self, enabled, source):
         if enabled and not self.enabled:
             # Resync the command state to where the arm ACTUALLY is: without
@@ -359,12 +406,22 @@ class ColmagDrawNode:
             self._lift_paused = False
             rospy.logwarn('TELEOP ENABLED (%s) — the arm now follows the cursor.', source)
         elif not enabled and self.enabled:
-            rospy.loginfo('Teleop disabled (%s) — arm holds position.', source)
+            # Order matters: stop the streaming ticks FIRST (enabled=False),
+            # then halt/cancel, then wait a beat so the empty-trajectory stop
+            # and the async cancel have landed at the controller — otherwise
+            # they arrive late and kill the homing goal we send next.
+            self.enabled = False
             self._halt_streaming()
             if self.traj_client is not None:
                 self.traj_client.cancel_all_goals()
             self._lift_paused = False
+            if self.home_on_exit:
+                time.sleep(0.3)
+                self._go_home()
+            else:
+                rospy.loginfo('Teleop disabled (%s) — arm holds position.', source)
         self.enabled = bool(enabled)
+        self._publish_active()
 
     def _on_joint_state(self, msg):
         by_name = dict(zip(msg.name, msg.position))
@@ -457,7 +514,7 @@ class ColmagDrawNode:
         clients = self._setup_gripper_clients()
         if clients is None:
             return
-        move, grasp = clients
+        move, grasp, stop = clients
         if action == 'close':
             goal = GraspGoal()
             goal.width = 0.0
@@ -467,6 +524,11 @@ class ColmagDrawNode:
             goal.force = self.grasp_force
             grasp.send_goal(goal)   # closes until contact, holds with force
         else:
+            # A grasp keeps applying force until explicitly STOPPED — a plain
+            # move while grasping is ignored (real arm and franka_gazebo alike).
+            # Release the grasp first, then open.
+            stop.send_goal(StopGoal())
+            stop.wait_for_result(rospy.Duration(1.0))
             goal = MoveGoal()
             goal.width = 0.078
             goal.speed = 0.08
@@ -482,13 +544,15 @@ class ColmagDrawNode:
             return None
         move = actionlib.SimpleActionClient('/franka_gripper/move', MoveAction)
         grasp = actionlib.SimpleActionClient('/franka_gripper/grasp', GraspAction)
+        stop = actionlib.SimpleActionClient('/franka_gripper/stop', StopAction)
         if not (move.wait_for_server(rospy.Duration(2.0))
-                and grasp.wait_for_server(rospy.Duration(2.0))):
+                and grasp.wait_for_server(rospy.Duration(2.0))
+                and stop.wait_for_server(rospy.Duration(2.0))):
             rospy.logwarn('franka_gripper action servers not available — launch the '
                           'arm with the gripper (fr3.launch use_gripper:=true / '
                           'fr3_real.launch load_gripper:=true).')
             return None
-        self._grip_clients = (move, grasp)
+        self._grip_clients = (move, grasp, stop)
         return self._grip_clients
 
     def _on_pose(self, msg):
@@ -556,6 +620,11 @@ class ColmagDrawNode:
             # from that viewpoint), cursor right -> viewer's right (+y).
             target[0] = self.center[0] - self.sign_h * v * self.half_d
             target[1] = self.center[1] + self.sign_w * u * self.half_w
+            # EE height from magnet height (pose.z): press the magnet down to
+            # lower the tool toward the board, lift it to raise toward default.
+            if self.height_from_magnet and self.lift_gate_z > 0.0:
+                frac = float(np.clip(abs(float(pos.z)) / self.lift_gate_z, 0.0, 1.0))
+                target[2] = self.height_ee_min + frac * (self.height_ee_max - self.height_ee_min)
         elif self.plane_mode == 'vertical':
             # Upright canvas: cursor up -> higher (+z), cursor right -> +y.
             target[1] = self.center[1] + self.sign_w * u * self.half_w

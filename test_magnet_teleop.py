@@ -23,10 +23,10 @@ def _reader():
     r.magnet_gripper_close_deg = 55.0
     r.magnet_gripper_open_deg = 25.0
     r.magnet_gripper_hold_s = 0.30
-    r.magnet_layer_step_deg = 70.0
+    r.magnet_rotate_step_deg = 70.0
     r._magnet_grip_closed = False
     r._magnet_grip_pending = None
-    r._magnet_layer_ref_phi = None
+    r._magnet_twist_ref_phi = None
     return r
 
 
@@ -58,19 +58,19 @@ def test_gripper_brief_tilt_ignored():
     assert r._magnet_grip_pending is None
 
 
-def test_layer_toggles_on_twist():
+def test_rotate_steps_on_twist():
     r = _reader()
-    assert r._magnet_control_decisions(10.0, 0.0, 0.0) == []                 # sets ref phi = 0
-    assert r._magnet_control_decisions(10.0, 40.0, 0.1) == []                # 40 < 70
-    assert r._magnet_control_decisions(10.0, 80.0, 0.2) == ['plane:toggle']  # 80 >= 70
-    assert r._magnet_control_decisions(10.0, 120.0, 0.3) == []               # +40 from new ref
-    assert r._magnet_control_decisions(10.0, 160.0, 0.4) == ['plane:toggle']  # +80 from new ref
+    assert r._magnet_control_decisions(10.0, 0.0, 0.0) == []                # sets ref phi = 0
+    assert r._magnet_control_decisions(10.0, 40.0, 0.1) == []               # 40 < 70
+    assert r._magnet_control_decisions(10.0, 80.0, 0.2) == ['rotate:cw']    # +80 >= 70 (cw)
+    assert r._magnet_control_decisions(10.0, 120.0, 0.3) == []              # +40 from new ref
+    assert r._magnet_control_decisions(10.0, 0.0, 0.4) == ['rotate:ccw']    # -120 the short way (ccw)
 
 
-def test_layer_twist_wraps_shortest_way():
+def test_rotate_twist_wraps_shortest_way():
     r = _reader()
-    r._magnet_layer_ref_phi = 170.0
-    # 170 -> -160 is +30 the short way (not -330), below the step -> no toggle
+    r._magnet_twist_ref_phi = 170.0
+    # 170 -> -160 is +30 the short way (not -330), below the step -> no step
     assert r._magnet_control_decisions(10.0, -160.0, 0.0) == []
 
 

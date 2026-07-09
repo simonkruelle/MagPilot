@@ -197,17 +197,20 @@ DATA_MANIFEST_SCHEMA_VERSION = 1
 # Gesture → robot action legend shown beside the canvas in the clean view.
 # Mirrors NAMED_POSES in ros/colmag_ros/scripts/colmag_robot_node.py — keep the
 # two in sync if you change the robot's preprogrammed motions.
+# (key, action) rows; a (None, title) row renders as a section header.
 ROBOT_ACTION_LEGEND = (
+    (None, 'LETTERS · tricks'),
     ('A', 'wave'),
     ('B', 'bow'),
     ('C', 'fist pumps'),
     ('D', 'dab'),
     ('U', 'stretch up'),
-    ('L / R', 'point L / R'),
-    ('1', 'nod (yes)'),
-    ('2', 'shake (no)'),
-    ('3', 'cheer'),
-    ('0 / X', 'home'),
+    ('L / R', 'point left / right'),
+    ('X', 'home'),
+    (None, 'DIGITS · line positions'),
+    ('1 – 9', 'park at slot 1…9'),
+    ('', 'on a left→right line'),
+    ('0', 'home / reset'),
 )
 
 RECORDING_TARGETS = (
@@ -385,19 +388,37 @@ class MagnetometerReader:
         self.teleop_trail = deque(maxlen=600)
         self.teleop_trail_fade_s = 5.0
 
-        # ── Magnet-orientation teleop controls (real sensor only) ──────────────
-        # The dipole direction m=(mx,my,mz) gives two angles:
-        #   theta = acos(mz)      tilt away from vertical  → drives the GRIPPER
-        #   phi   = atan2(mx,my)  twist in the board plane → cycles CONTROL LAYERS
-        # (There is no 3rd orientation: a magnet is axially symmetric, so spin
-        # about its own axis is unobservable — 2 angles + xyz = 5 DOF total.)
+        # ── Magnet-orientation teleop controls ─────────────────────────────────
+        # The dipole direction m=(mx,my,mz) gives two angles; the magnet height
+        # over the sensor (pose.z) gives a third input:
+        #   theta = acos(mz)      tilt away from vertical  → GRIPPER open/close
+        #   phi   = atan2(mx,my)  twist in the board plane → END-EFFECTOR ROTATION
+        #   height (pose.z)       distance above the board → END-EFFECTOR HEIGHT
         self.magnet_gripper_close_deg = 55.0   # tilt >= this ⇒ request close
         self.magnet_gripper_open_deg  = 25.0   # tilt <= this ⇒ request open (hysteresis)
         self.magnet_gripper_hold_s    = 0.30   # must sustain past a threshold before firing
-        self.magnet_layer_step_deg    = 70.0   # twist this far to advance one layer
+        self.magnet_rotate_step_deg   = 15.0   # twist this far ⇒ one wrist-rotate step
         self._magnet_grip_closed   = False
         self._magnet_grip_pending  = None      # (target_bool, since_monotonic)
-        self._magnet_layer_ref_phi = None       # reference azimuth for twist accumulation
+        self._magnet_twist_ref_phi = None       # reference azimuth for twist accumulation
+
+        # ── Simulated magnet orientation (touchpad gyroscope) ──────────────────
+        # The trackpad has no real dipole, so the numpad drives a simulated
+        # magnet whose tilt/twist feed the SAME _magnet_control_decisions logic.
+        self.sim_magnet_theta = 0.0    # tilt from vertical [deg], 0..90
+        self.sim_magnet_phi = 0.0      # azimuth in the board plane [deg]
+        self.sim_magnet_tilt_step = 8.0    # deg per numpad tilt press (8/2)
+        self.sim_magnet_twist_step = 15.0  # deg per numpad twist press (4/6)
+        self._last_real_theta = 0.0        # last real-sensor tilt (gyro display)
+        self._last_real_phi = 0.0
+        # Simulated magnet height over the sensor (scroll wheel controls it).
+        # 0 = lying on the board → EE to the ground; height_cutoff = lifted away
+        # → EE at default height; above the cutoff disengages (lift gate).
+        self.magnet_height_cutoff_m = 0.05     # 5 cm cutoff = default / disengage
+        self.sim_magnet_height_m = self.magnet_height_cutoff_m  # start "up" (default)
+        self.sim_magnet_height_step = 0.005    # 0.5 cm per scroll notch
+        self.ee_height_min_cm = 0.0            # EE height at magnet on the board
+        self.ee_height_max_cm = 50.0           # EE height at the cutoff (display)
         self.touchpad_last_speed = 0.0
         self.touchpad_last_speed_report_at = 0.0
         self.touchpad_speed_log_file = None
@@ -458,6 +479,10 @@ class MagnetometerReader:
         # UI refs for the teleop-mode layout swap (populated in plot_data).
         self._teleop_ui = None
         self._teleop_ui_active = False
+        # Cursor y at/above this (in the top taskbar strip) does NOT drive the
+        # teleoperated arm — it is a button-only zone, so you can reach the
+        # taskbar without dragging the end-effector up there.
+        self.teleop_taskbar_y_min = self.projection_extent * 0.72
         self.latest_interface_text = "Mode: menu | Button: -- | Last: --"
 
         if enable_classifier and not lazy_classifier:
@@ -958,6 +983,10 @@ class MagnetometerReader:
         if event.command:
             if self.ros_bridge:
                 self.ros_bridge.publish_command(event.command)
+            if event.command == 'gripper:toggle':
+                # Taskbar Gripper button: keep the magnet-tilt state machine in
+                # lockstep so tilting up still opens after a button close.
+                self._magnet_grip_closed = not self._magnet_grip_closed
             if event.command.startswith('choice:'):
                 self.confirm_classifier_candidate(event.command, event.button.name)
             elif event.command == 'canvas:reset':
@@ -2048,6 +2077,27 @@ class MagnetometerReader:
                     self.ros_bridge.publish_command('letter_detection')
                 self._set_key_feedback("TELEOP EXIT → letters")
                 return
+            # Numpad rotates the SIMULATED magnet while teleoperating (touchpad):
+            # 8/2 tilt, 4/6 twist, 5 upright. Only in teleop, so digit recording
+            # elsewhere is unaffected. NumLock-off variants (num8 …) also handled.
+            if (self.input_source != 'serial'
+                    and self.app_controller.mode.value == 'robot'
+                    and raw_key.replace('num', '') in ('8', '2', '4', '6', '5')):
+                k = raw_key.replace('num', '')
+                if k == '8':
+                    self._step_sim_magnet(dtheta=-self.sim_magnet_tilt_step)
+                elif k == '2':
+                    self._step_sim_magnet(dtheta=+self.sim_magnet_tilt_step)
+                elif k == '4':
+                    self._step_sim_magnet(dphi=-self.sim_magnet_twist_step)
+                elif k == '6':
+                    self._step_sim_magnet(dphi=+self.sim_magnet_twist_step)
+                elif k == '5':
+                    self._step_sim_magnet(reset=True)
+                self._set_key_feedback(
+                    "Magnet  tilt %.0f deg  twist %.0f deg"
+                    % (self.sim_magnet_theta, self.sim_magnet_phi))
+                return
             # Shift+L/R/U/D = mode/reset controls (keep lowercase free for recording)
             if self.input_source == 'touchpad' and raw_key in ('L', 'shift+l'):
                 self.activate_classifier_mode('letters')
@@ -2071,6 +2121,9 @@ class MagnetometerReader:
                 # Shift+G = gripper toggle (teleop mode); lowercase g stays free
                 if self.ros_bridge:
                     self.ros_bridge.publish_command('gripper:toggle')
+                    # Keep the tilt state machine in lockstep so tilting the
+                    # magnet up still opens after a button/keyboard close.
+                    self._magnet_grip_closed = not self._magnet_grip_closed
                     self._set_key_feedback("Gripper: toggle sent")
                 else:
                     self._set_key_feedback("Gripper: needs --ros")
@@ -2126,12 +2179,25 @@ class MagnetometerReader:
                 if self.ros_bridge:
                     self.ros_bridge.publish_command('rotate:stop')
 
+        def on_scroll(event):
+            # Scroll wheel simulates the magnet height over the sensor while
+            # teleoperating: up = lift (higher EE), down = press down (lower EE).
+            if (self.input_source == 'serial'
+                    or self.app_controller.mode.value != 'robot'):
+                return
+            step = event.step if getattr(event, 'step', 0) else (
+                1 if event.button == 'up' else -1)
+            self._step_sim_height(step * self.sim_magnet_height_step)
+            self._set_key_feedback(
+                "Magnet height %.1f cm" % (100.0 * self.sim_magnet_height_m))
+
         fig.canvas.mpl_connect('button_press_event', on_press)
         fig.canvas.mpl_connect('button_release_event', on_release)
         fig.canvas.mpl_connect('motion_notify_event', on_motion)
         fig.canvas.mpl_connect('axes_leave_event', on_axes_leave)
         fig.canvas.mpl_connect('key_press_event', on_key_press)
         fig.canvas.mpl_connect('key_release_event', on_key_release)
+        fig.canvas.mpl_connect('scroll_event', on_scroll)
         # Disconnect matplotlib's built-in key handler (l=log scale, r=reset, etc.)
         # so our key bindings take exclusive control.
         try:
@@ -2192,8 +2258,12 @@ class MagnetometerReader:
             self.touchpad_last_speed = sample_speed
             self.touchpad_speed_samples.append(sample_speed)
 
+            # Pose z = magnet height over the sensor. While teleoperating this is
+            # the scroll-controlled simulated height (so the synthetic field also
+            # gets stronger as the magnet nears the board), plain z otherwise.
+            z_value = self.sim_teleop_pose_z()
             mag_values = (
-                self.synthetic_magnetic_values(sample_x, sample_y, self.touchpad_z)
+                self.synthetic_magnetic_values(sample_x, sample_y, z_value)
                 if self.touchpad_synthetic_magnetics
                 else [0.0] * 48
             )
@@ -2205,7 +2275,7 @@ class MagnetometerReader:
                 *mag_values,
                 sample_x,
                 sample_y,
-                self.touchpad_z,
+                z_value,
                 1.0 if sample_pen_down else 0.0,
                 0.0,
                 0.0,
@@ -2245,7 +2315,13 @@ class MagnetometerReader:
         # Mirror the serial path: stream the newest sample to ROS so pose
         # consumers (e.g. colmag_draw_node plane tracing) work from the touchpad
         # exactly like from the magnetometer. Row layout: [ts, 48 mag, 6 pose].
-        if self.ros_bridge and rows:
+        #
+        # Taskbar hold: while teleoperating, if the cursor is up in the top
+        # taskbar strip, do NOT stream new poses — the arm holds where it is so
+        # you can press Draw/Gripper/Layer without dragging the end-effector up.
+        in_taskbar = (self.app_controller.mode.value == 'robot'
+                      and current_y >= self.teleop_taskbar_y_min)
+        if self.ros_bridge and rows and not in_taskbar:
             last_row = rows[-1]
             self.ros_bridge.publish_sensor(last_row[1:49], last_row[49:55])
 
@@ -2343,9 +2419,9 @@ class MagnetometerReader:
         # Taskbar strip behind the teleop buttons (hidden until teleop mode).
         extent = self.projection_extent
         taskbar_patch = patches.FancyBboxPatch(
-            (-extent * 0.97, extent * 0.62),
+            (-extent * 0.97, extent * 0.72),
             extent * 1.94,
-            extent * 0.34,
+            extent * 0.24,
             boxstyle='round,pad=0.001',
             facecolor='#eef0f4',
             edgecolor='#d2d2d7',
@@ -2527,9 +2603,9 @@ class MagnetometerReader:
         - Gripper: tilt theta past magnet_gripper_close_deg (held for
           magnet_gripper_hold_s) closes; dropping below magnet_gripper_open_deg
           (held) opens. The hysteresis band + hold time stop it firing by accident.
-        - Layer: accumulate azimuth phi; each magnet_layer_step_deg of twist
-          emits one 'plane:toggle' to advance the control layer (the draw node
-          keeps this legacy command name but cycles all teleop layers).
+        - Rotation: accumulate azimuth phi; each magnet_rotate_step_deg of twist
+          emits one 'rotate:cw' / 'rotate:ccw' to turn the end-effector wrist
+          (twisting the magnet twists the tool — no more layer cycling).
         """
         cmds = []
 
@@ -2548,15 +2624,198 @@ class MagnetometerReader:
             self._magnet_grip_pending = None
             cmds.append('gripper:close' if want else 'gripper:open')
 
-        # Layer from twist (one step of rotation → advance one layer)
-        if self._magnet_layer_ref_phi is None:
-            self._magnet_layer_ref_phi = phi_deg
-        dphi = ((phi_deg - self._magnet_layer_ref_phi + 180.0) % 360.0) - 180.0
-        if abs(dphi) >= self.magnet_layer_step_deg:
-            cmds.append('plane:toggle')
-            self._magnet_layer_ref_phi = phi_deg
+        # End-effector rotation from twist (each step of twist → one wrist step)
+        if self._magnet_twist_ref_phi is None:
+            self._magnet_twist_ref_phi = phi_deg
+        dphi = ((phi_deg - self._magnet_twist_ref_phi + 180.0) % 360.0) - 180.0
+        if abs(dphi) >= self.magnet_rotate_step_deg:
+            cmds.append('rotate:cw' if dphi > 0 else 'rotate:ccw')
+            self._magnet_twist_ref_phi = phi_deg
 
         return cmds
+
+    def _step_sim_magnet(self, dtheta=0.0, dphi=0.0, reset=False):
+        """Nudge the simulated magnet orientation (touchpad numpad control)."""
+        if reset:
+            self.sim_magnet_theta = 0.0
+            self.sim_magnet_phi = 0.0
+        else:
+            self.sim_magnet_theta = float(np.clip(self.sim_magnet_theta + dtheta, 0.0, 90.0))
+            self.sim_magnet_phi = (self.sim_magnet_phi + dphi) % 360.0
+
+    def _step_sim_height(self, dz):
+        """Change the simulated magnet height (scroll wheel), clamped a touch
+        above the cutoff so lifting off disengages via the draw-node lift gate."""
+        hi = self.magnet_height_cutoff_m + self.sim_magnet_height_step
+        self.sim_magnet_height_m = float(np.clip(self.sim_magnet_height_m + dz, 0.0, hi))
+
+    def sim_teleop_pose_z(self):
+        """Pose-z to publish while teleoperating on the touchpad (= magnet height
+        over the sensor); the plain touchpad z otherwise."""
+        if self.input_source != 'serial' and self.app_controller.mode.value == 'robot':
+            return self.sim_magnet_height_m
+        return self.touchpad_z
+
+    def update_sim_magnet_teleop(self):
+        """Touchpad teleop: feed the simulated magnet orientation into the SAME
+        gripper/rotation decision logic the real sensor uses, and publish."""
+        if self.input_source == 'serial' or self.ros_bridge is None:
+            return
+        if self.app_controller.mode.value != 'robot':
+            self._magnet_twist_ref_phi = None   # reset twist reference off-teleop
+            return
+        for cmd in self._magnet_control_decisions(
+                self.sim_magnet_theta, self.sim_magnet_phi, time.monotonic()):
+            self.ros_bridge.publish_command(cmd)
+
+    # ── Magnet gyroscope widget (3D-style, blittable 2D projection) ────────────
+
+    def _gyro_project(self, pts):
+        """Fixed orthographic iso projection of 3D points to the gyro 2D axes."""
+        az, el = np.radians(35.0), np.radians(18.0)
+        x, y, z = pts[:, 0], pts[:, 1], pts[:, 2]
+        u = x * np.cos(az) - y * np.sin(az)
+        w = x * np.sin(az) + y * np.cos(az)
+        v = z * np.cos(el) - w * np.sin(el)
+        return u, v
+
+    def _setup_gyro(self, fig):
+        """Build the magnet gyroscope inset: a small sphere with the dipole and
+        the gripper-threshold cones. Returns (axes, dynamic_artists)."""
+        def latitude(t, n=80):
+            a = np.linspace(0, 2 * np.pi, n)
+            return np.stack([np.sin(t) * np.cos(a), np.sin(t) * np.sin(a),
+                             np.full_like(a, np.cos(t))], axis=1)
+
+        ax = fig.add_axes([0.75, 0.27, 0.185, 0.41], zorder=10)
+        ax.set_xlim(-1.55, 1.55)
+        ax.set_ylim(-3.15, 1.6)
+        ax.set_aspect('equal')
+        ax.axis('off')
+        ax.set_title('Magnet tilt / twist', fontsize=10, fontweight='medium', pad=1)
+
+        # Static sphere wireframe (drawn once, stays in the blit background).
+        ax.add_patch(patches.Circle((0, 0), 1.0, fill=True, fc='#fbfbfd',
+                                     ec='#d2d2d7', lw=1.0, zorder=1))
+        for t in (np.pi / 4, np.pi / 2, 3 * np.pi / 4):
+            u, v = self._gyro_project(latitude(t))
+            ax.plot(u, v, color='#e5e5ea', lw=0.7, zorder=2)
+        for a0 in np.linspace(0, np.pi, 6, endpoint=False):
+            tt = np.linspace(0, np.pi, 40)
+            pts = np.stack([np.sin(tt) * np.cos(a0), np.sin(tt) * np.sin(a0),
+                            np.cos(tt)], axis=1)
+            u, v = self._gyro_project(pts)
+            ax.plot(u, v, color='#eeeef3', lw=0.6, zorder=2)
+        uz, vz = self._gyro_project(np.array([[0, 0, -1.05], [0, 0, 1.2]]))
+        ax.plot(uz, vz, color='#c7c7cc', lw=1.0, ls=(0, (3, 3)), zorder=2)
+
+        # Threshold cones (latitude rings) — where gripper open/close fires.
+        for t_deg, col in ((self.magnet_gripper_open_deg, '#34c759'),
+                           (self.magnet_gripper_close_deg, '#ff3b30')):
+            u, v = self._gyro_project(latitude(np.radians(t_deg)))
+            ax.plot(u, v, color=col, lw=1.5, zorder=3, alpha=0.85)
+        ax.text(-1.52, 0.62, 'open %.0f' % self.magnet_gripper_open_deg + '°',
+                ha='left', va='center', fontsize=7.5, color='#2ea24f', fontweight='medium')
+        ax.text(-1.52, 0.28, 'close %.0f' % self.magnet_gripper_close_deg + '°',
+                ha='left', va='center', fontsize=7.5, color='#ff3b30', fontweight='medium')
+        ax.text(-1.52, -0.05, 'rot/%.0f' % self.magnet_rotate_step_deg + '°',
+                ha='left', va='center', fontsize=6.5, color='#8e8e93')
+
+        # Dynamic: base-plane azimuth arrow (always shows the 360° twist), a
+        # thick 3D-ish bar magnet (blue S / red N) with big pole caps, and the
+        # readout. Azimuth first so the bar overlays it.
+        azimuth_line, = ax.plot([], [], color='#aeaeb2', lw=2.2, zorder=4,
+                                solid_capstyle='round')
+        azimuth_head, = ax.plot([], [], marker='o', ms=6, mfc='#8e8e93',
+                                mec='white', mew=0.8, zorder=4, linestyle='none')
+        south_line, = ax.plot([], [], color='#0a84ff', lw=8.0,
+                              solid_capstyle='round', zorder=5)
+        north_line, = ax.plot([], [], color='#ff3b30', lw=8.0,
+                              solid_capstyle='round', zorder=5)
+        south_cap, = ax.plot([], [], marker='o', ms=12, mfc='#0a84ff', mec='white',
+                             mew=1.1, zorder=6, linestyle='none')
+        tip, = ax.plot([], [], marker='o', ms=13, mfc='#ff3b30', mec='white',
+                       mew=1.4, zorder=7, linestyle='none')
+        readout = ax.text(0.0, -1.28, '', ha='center', va='top', fontsize=8,
+                          family='monospace', color='#1d1d1f',
+                          bbox={'facecolor': 'white', 'edgecolor': 'none', 'pad': 0})
+
+        # Numpad legend (static): five keys in a plus, matching the motion.
+        for kx, ky, kchar in ((0.0, -1.95, '8'), (0.0, -2.75, '2'),
+                              (-0.72, -2.35, '4'), (0.72, -2.35, '6'),
+                              (0.0, -2.35, '5')):
+            ax.add_patch(patches.FancyBboxPatch(
+                (kx - 0.2, ky - 0.2), 0.4, 0.4, boxstyle='round,pad=0.02',
+                fc='#ffffff', ec='#c7c7cc', lw=1.1, zorder=4))
+            ax.text(kx, ky, kchar, ha='center', va='center', fontsize=10,
+                    fontweight='bold', family='monospace', zorder=5)
+        ax.text(0.30, -1.95, 'tilt→grip', ha='left', va='center', fontsize=6.5, color='#6e6e73')
+        ax.text(0.30, -2.75, 'tilt→grip', ha='left', va='center', fontsize=6.5, color='#6e6e73')
+        ax.text(-1.05, -2.35, 'rotate', ha='right', va='center', fontsize=6.5, color='#6e6e73')
+        ax.text(1.05, -2.35, 'rotate', ha='left', va='center', fontsize=6.5, color='#6e6e73')
+        ax.text(0.0, -3.02, '5 = reset   ·   scroll = height', ha='center', va='top',
+                fontsize=6.5, color='#8e8e93')
+
+        # Height gauge (right of the sphere): magnet height → EE height.
+        hx = 1.30
+        ax.plot([hx, hx], [-1.0, 1.0], color='#e0e0e5', lw=7,
+                solid_capstyle='round', zorder=2)
+        ax.text(hx, 1.06, '5cm', ha='center', va='bottom', fontsize=6, color='#8e8e93')
+        ax.text(hx, -1.06, '0', ha='center', va='top', fontsize=6, color='#8e8e93')
+        ax.text(hx + 0.16, 0.0, 'height', rotation=90, ha='left', va='center',
+                fontsize=6.5, color='#6e6e73')
+        height_fill, = ax.plot([], [], color='#0a84ff', lw=7,
+                               solid_capstyle='round', zorder=3)
+        height_text = ax.text(hx, -1.34, '', ha='center', va='top', fontsize=7,
+                              family='monospace', color='#0a5ecc')
+
+        self._gyro = {'ax': ax, 'north': north_line, 'south': south_line,
+                      'tip': tip, 'south_cap': south_cap,
+                      'azimuth': azimuth_line, 'azimuth_head': azimuth_head,
+                      'readout': readout, 'height_fill': height_fill,
+                      'height_text': height_text, 'hx': hx}
+        return ax, [azimuth_line, azimuth_head, south_line, north_line,
+                    south_cap, tip, readout, height_fill, height_text]
+
+    def _update_gyro(self):
+        """Point the gyro dipole at the current (simulated or real) orientation."""
+        g = getattr(self, '_gyro', None)
+        if not g:
+            return
+        if self.input_source == 'serial':
+            theta, phi = self._last_real_theta, self._last_real_phi
+        else:
+            theta, phi = self.sim_magnet_theta, self.sim_magnet_phi
+        th, ph = np.radians(theta), np.radians(phi)
+        m = np.array([np.sin(th) * np.cos(ph), np.sin(th) * np.sin(ph), np.cos(th)])
+        un, vn = self._gyro_project(np.stack([np.zeros(3), 0.9 * m]))
+        us, vs = self._gyro_project(np.stack([np.zeros(3), -0.9 * m]))
+        g['north'].set_data(un, vn)
+        g['south'].set_data(us, vs)
+        g['tip'].set_data([un[1]], [vn[1]])
+        g['south_cap'].set_data([us[1]], [vs[1]])
+        # Azimuth heading on the base plane (z=0) — visible 360° twist even upright.
+        base = np.array([[0.0, 0.0, 0.0],
+                         [0.95 * np.cos(ph), 0.95 * np.sin(ph), 0.0]])
+        ub, vb = self._gyro_project(base)
+        g['azimuth'].set_data(ub, vb)
+        g['azimuth_head'].set_data([ub[1]], [vb[1]])
+        if theta >= self.magnet_gripper_close_deg:
+            g['tip'].set_markerfacecolor('#ff3b30')     # in the close cone
+        elif theta <= self.magnet_gripper_open_deg:
+            g['tip'].set_markerfacecolor('#34c759')     # in the open cone
+        else:
+            g['tip'].set_markerfacecolor('#ffd60a')     # between thresholds
+        g['readout'].set_text('tilt %2.0f°  twist %3.0f°\ngrip %s'
+                              % (theta, phi,
+                                 'CLOSED' if self._magnet_grip_closed else 'open'))
+        # Height gauge: magnet height over the board → EE height.
+        frac_h = float(np.clip(self.sim_magnet_height_m / self.magnet_height_cutoff_m,
+                               0.0, 1.0))
+        hx = g['hx']
+        g['height_fill'].set_data([hx, hx], [-1.0, -1.0 + 2.0 * frac_h])
+        ee_cm = self.ee_height_min_cm + frac_h * (self.ee_height_max_cm - self.ee_height_min_cm)
+        g['height_text'].set_text('%.1fcm\nEE %2.0f' % (100.0 * self.sim_magnet_height_m, ee_cm))
 
     def update_magnet_teleop_controls(self, mx, my, mz):
         """Serial teleop: turn magnet orientation into gripper/layer commands.
@@ -2572,6 +2831,7 @@ class MagnetometerReader:
             phi = float(np.degrees(np.arctan2(float(mx), float(my))))  # azimuth in plane
         except (ValueError, TypeError):
             return
+        self._last_real_theta, self._last_real_phi = theta, phi   # gyro display
         for cmd in self._magnet_control_decisions(theta, phi, time.monotonic()):
             self.ros_bridge.publish_command(cmd)
 
@@ -2604,6 +2864,22 @@ class MagnetometerReader:
             ui['ax6'].set_visible(not active)
         if ui.get('ax_legend') is not None:
             ui['ax_legend'].set_visible(not active)
+        # Also hide the full-view sensor plots + 3D and the suptitle, so teleop
+        # looks like the clean touchpad screen in serial/magnet/sim mode too.
+        for extra_ax, default_pos in ui.get('extra_axes', []):
+            extra_ax.set_visible(not active)
+            # Old matplotlib doesn't fully hide 3D axes via set_visible, so also
+            # park them off-figure while teleoperating and restore on exit.
+            extra_ax.set_position([2.0, 2.0, 0.01, 0.01] if active else default_pos)
+        for artist in ui.get('sensor_artists', []):
+            artist.set_visible(not active)
+        # Magnet gyroscope: only shown while teleoperating.
+        if ui.get('gyro_ax') is not None:
+            ui['gyro_ax'].set_visible(active)
+        for artist in ui.get('gyro_artists', []):
+            artist.set_visible(active)
+        if ui.get('suptitle') is not None:
+            ui['suptitle'].set_visible(not active)
 
         ax5 = ui['ax5']
         if active:
@@ -2627,18 +2903,27 @@ class MagnetometerReader:
         ax.axis('off')
         ax.set_title('Robot actions', fontsize=12, fontweight='bold', pad=12)
         n = len(ROBOT_ACTION_LEGEND)
-        y0, y_end = 0.94, 0.10
+        y0, y_end = 0.95, 0.12
         dy = (y0 - y_end) / max(n - 1, 1)
         for i, (label, action) in enumerate(ROBOT_ACTION_LEGEND):
             y = y0 - i * dy
-            ax.text(0.04, y, label, transform=ax.transAxes,
-                    fontsize=11, fontweight='bold', va='center', ha='left',
-                    family='monospace', color='#1a5fb4')
-            ax.text(0.42, y, action, transform=ax.transAxes,
-                    fontsize=9, va='center', ha='left', color='#222222')
-        ax.text(0.04, 0.01, 'write a character →\ndwell to confirm',
+            if label is None:
+                # Section header with a subtle rule beneath it
+                ax.text(0.02, y, action, transform=ax.transAxes,
+                        fontsize=8, fontweight='bold', va='center', ha='left',
+                        color='#86868b')
+                ax.plot([0.02, 0.95], [y - dy * 0.42] * 2,
+                        transform=ax.transAxes, color='#e3e3e8', lw=0.8,
+                        clip_on=False)
+                continue
+            ax.text(0.06, y, label, transform=ax.transAxes,
+                    fontsize=10.5, fontweight='bold', va='center', ha='left',
+                    family='monospace', color='#0a84ff')
+            ax.text(0.40, y, action, transform=ax.transAxes,
+                    fontsize=9, va='center', ha='left', color='#1d1d1f')
+        ax.text(0.02, 0.02, 'write a character →\ndwell to confirm',
                 transform=ax.transAxes, fontsize=8, va='top', ha='left',
-                style='italic', color='#666666')
+                style='italic', color='#86868b')
 
     def plot_data(self):
         """Create real-time plot of Bx, By, Bz for the selected sensor."""
@@ -2677,10 +2962,11 @@ class MagnetometerReader:
             ax6 = fig.add_subplot(grid[0, 2])
             self._draw_robot_action_legend(ax_legend)
             ax1 = ax2 = ax3 = ax4 = None
+            _suptitle = None
         else:
             ax_legend = None
             fig = plt.figure(figsize=(18, 10))
-            fig.suptitle(
+            _suptitle = fig.suptitle(
                 f'Real-time Magnetometer Data - Sensor {self.plot_sensor} | '
                 f'Projection: {self.image_size}x{self.image_size}, last {self.trail_length} samples',
                 fontsize=14
@@ -2774,7 +3060,7 @@ class MagnetometerReader:
                 pass
         else:
             ax5.set_aspect('equal', adjustable='box')
-        _hint_teleop = "Teleop: Shift+E EXIT   Shift+V layer   Shift+G gripper   Shift+Left/Right rotate"
+        _hint_teleop = "Teleop: Shift+E EXIT | move=cursor  numpad 8/2 tilt→grip  4/6 twist→rotate  5 reset  scroll=height"
         if self.input_source == 'touchpad':
             _hint_line1 = "Shift+S save   Shift+Q quit   |   A-Z / 0-9 / - / = record"
             _hint_line2 = "Space/click draw   Shift+P pen   |   Shift+L letters   Shift+R digits   Shift+D reset"
@@ -2872,6 +3158,13 @@ class MagnetometerReader:
         # tight_layout once at init, not per-frame
         plt.tight_layout()
 
+        # Magnet gyroscope inset — built after tight_layout (fixed position),
+        # starts hidden and is shown only while teleoperating.
+        gyro_ax, gyro_artists = self._setup_gyro(fig)
+        gyro_ax.set_visible(False)
+        for _gyro_artist in gyro_artists:
+            _gyro_artist.set_visible(False)
+
         sensor_trace_artists = () if (self.input_source == 'touchpad' or self.clean_view) else (
             line_bx,
             line_by,
@@ -2890,6 +3183,7 @@ class MagnetometerReader:
             completion_text,
             *prob_bar_artists,
             info_text,
+            *gyro_artists,
         )
         blit_artists = tuple(
             artist for artist in raw_blit_artists
@@ -2910,6 +3204,13 @@ class MagnetometerReader:
             'ax_legend': ax_legend,
             'button_artists': button_artists,
             'classifier_artists': [*prob_bar_artists, info_text],
+            # Full-view-only panels (Bx/By/Bz + 3D trajectory) and their traces;
+            # hidden in teleop so it always looks like the clean touchpad screen.
+            'extra_axes': [(a, a.get_position()) for a in (ax1, ax2, ax3, ax4) if a is not None],
+            'sensor_artists': [a for a in (line_bx, line_by, line_bz) if a is not None],
+            'suptitle': _suptitle,
+            'gyro_ax': gyro_ax,
+            'gyro_artists': gyro_artists,
             'ax5_default_pos': _ax5_default_pos,
             'ax5_teleop_pos': [_teleop_left, 0.12, _teleop_width, 0.80],
         }
@@ -3017,6 +3318,10 @@ class MagnetometerReader:
                 # Teleop: no ink on the OCR canvas — the fading trail below
                 # shows the path instead, so the canvas never fills up.
                 ocr_mask = np.zeros_like(ocr_mask, dtype=bool)
+                # Simulated magnet (touchpad numpad) → gripper/layer commands,
+                # and refresh the gyroscope dipole for either input source.
+                self.update_sim_magnet_teleop()
+                self._update_gyro()
                 # Magnet orientation (real sensor only) drives gripper + layers.
                 # mx,my,mz are the last three values of each pose row.
                 if self.input_source == 'serial' and len(data) > 0:

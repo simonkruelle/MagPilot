@@ -1,0 +1,53 @@
+<?xml version="1.0"?>
+<!--
+  colmag_arm_nodes.launch — start BOTH arm-side nodes in one terminal:
+
+    colmag_draw_node    teleoperation (cursor-following, gripper, rotation,
+                        magnet-height → EE height); homes the arm on teleop exit
+    colmag_robot_node   discrete gesture motions (letters → tricks,
+                        digits 1-9 → constant-X line); homes on startup when
+                        teleop is not active
+
+  The two nodes coordinate over the latched /colmag/draw_active topic, so the
+  start order and timing never matter: while teleop owns the arm, gestures and
+  startup homing are suspended.
+
+  Usage (inside the colmag_ros container, next to fr3.launch):
+    roslaunch colmag_ros colmag_arm_nodes.launch dry_run:=false
+    # Panda instead of the FR3:
+    roslaunch colmag_ros colmag_arm_nodes.launch dry_run:=false arm_id:=panda
+-->
+<launch>
+
+  <arg name="arm_id"         default="fr3"   doc="Joint prefix: fr3 or panda"/>
+  <arg name="dry_run"        default="true"  doc="true = log only, do not move the arm"/>
+  <arg name="arm_controller" default="effort_joint_trajectory_controller"
+       doc="JointTrajectoryController both nodes drive"/>
+  <arg name="time_scale"     default="2.0"   doc="Gesture motion time multiplier (robot node)"/>
+  <arg name="home_on_start"  default="true"  doc="Robot node: home the arm at startup (skipped while teleop is active)"/>
+  <arg name="home_on_exit"   default="true"  doc="Draw node: home the arm when exiting teleop"/>
+
+  <!-- Teleoperation: cursor following, gripper, wrist rotation, height. -->
+  <node pkg="colmag_ros"
+        type="colmag_draw_node.py"
+        name="colmag_draw_node"
+        output="screen">
+    <param name="arm_id"         value="$(arg arm_id)"/>
+    <param name="dry_run"        value="$(arg dry_run)"/>
+    <param name="arm_controller" value="$(arg arm_controller)"/>
+    <param name="home_on_exit"   value="$(arg home_on_exit)"/>
+  </node>
+
+  <!-- Discrete gesture motions (letters/digits). -->
+  <node pkg="colmag_ros"
+        type="colmag_robot_node.py"
+        name="colmag_robot_node"
+        output="screen">
+    <param name="arm_id"         value="$(arg arm_id)"/>
+    <param name="dry_run"        value="$(arg dry_run)"/>
+    <param name="arm_controller" value="$(arg arm_controller)"/>
+    <param name="time_scale"     value="$(arg time_scale)"/>
+    <param name="home_on_start"  value="$(arg home_on_start)"/>
+  </node>
+
+</launch>

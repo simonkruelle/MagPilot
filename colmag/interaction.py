@@ -69,8 +69,8 @@ class VirtualJoystick:
         top strip so the rest of the canvas stays a clean teleop area. 'Draw'
         exits back to letter mode; the 'cmd:' buttons publish their command
         verbatim without changing the app mode."""
-        radius = extent * 0.13
-        bar_y = extent * 0.80
+        radius = extent * 0.10
+        bar_y = extent * 0.84
         return cls(
             [
                 VirtualButton('Draw', -extent * 0.60, bar_y, radius, 'mode:letters'),
