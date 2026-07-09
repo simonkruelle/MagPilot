@@ -50,7 +50,7 @@ else:
 # On Mac (no ROS): falls back to roslibpy over rosbridge WebSocket.
 try:
     import rospy
-    from std_msgs.msg import String, Float64, Float64MultiArray
+    from std_msgs.msg import Bool, String, Float64, Float64MultiArray
     from geometry_msgs.msg import PoseStamped
     _ROSPY_AVAILABLE = True
 except ImportError:
@@ -118,6 +118,19 @@ class _RosBridge:
             )
 
         print('[ROS] Topics: /colmag/{sensor_data, pose, command, classifier, confidence}')
+
+    def subscribe_gripper_state(self, callback):
+        """Sync to the draw node's authoritative gripper state (latched Bool).
+
+        callback receives a plain bool: True = closed.
+        """
+        if self._mode == 'rospy':
+            rospy.Subscriber('/colmag/gripper_closed', Bool,
+                             lambda msg: callback(bool(msg.data)))
+        elif self._mode == 'roslibpy':
+            topic = roslibpy.Topic(self._client, '/colmag/gripper_closed',
+                                   'std_msgs/Bool')
+            topic.subscribe(lambda msg: callback(bool(msg.get('data', False))))
 
     def _pub(self, name, msg_type, data):
         if self._mode == 'rospy':
@@ -419,6 +432,15 @@ class MagnetometerReader:
         self.sim_magnet_height_step = 0.005    # 0.5 cm per scroll notch
         self.ee_height_min_cm = 0.0            # EE height at magnet on the board
         self.ee_height_max_cm = 50.0           # EE height at the cutoff (display)
+
+        # Authoritative gripper state from the draw node (latched topic): keeps
+        # the tilt hysteresis and the gyro readout in sync with the REAL gripper
+        # no matter how it was toggled (tilt, taskbar button, Shift+G).
+        if self.ros_bridge is not None:
+            try:
+                self.ros_bridge.subscribe_gripper_state(self._on_gripper_state)
+            except Exception as exc:
+                print(f'[ROS] gripper-state sync unavailable: {exc}')
         self.touchpad_last_speed = 0.0
         self.touchpad_last_speed_report_at = 0.0
         self.touchpad_speed_log_file = None
@@ -2633,6 +2655,11 @@ class MagnetometerReader:
             self._magnet_twist_ref_phi = phi_deg
 
         return cmds
+
+    def _on_gripper_state(self, closed):
+        """Latched /colmag/gripper_closed from the draw node — ground truth."""
+        self._magnet_grip_closed = bool(closed)
+        self._magnet_grip_pending = None
 
     def _step_sim_magnet(self, dtheta=0.0, dphi=0.0, reset=False):
         """Nudge the simulated magnet orientation (touchpad numpad control)."""

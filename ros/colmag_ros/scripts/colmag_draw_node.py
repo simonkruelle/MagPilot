@@ -297,6 +297,10 @@ class ColmagDrawNode:
         self._active_pub = rospy.Publisher('/colmag/draw_active', Bool,
                                            queue_size=1, latch=True)
         self._publish_active()
+        # Authoritative gripper state for the UI (gyro readout + tilt hysteresis).
+        self._grip_pub = rospy.Publisher('/colmag/gripper_closed', Bool,
+                                         queue_size=1, latch=True)
+        self._grip_pub.publish(Bool(data=self._grip_closed))
 
         rospy.on_shutdown(self._cancel_on_shutdown)
         rospy.Subscriber('/colmag/pose', PoseStamped, self._on_pose)
@@ -510,6 +514,7 @@ class ColmagDrawNode:
         if self.dry_run:
             rospy.loginfo('[dry] gripper %s', action)
             self._grip_closed = action == 'close'
+            self._publish_grip_state()
             return
         clients = self._setup_gripper_clients()
         if clients is None:
@@ -534,7 +539,13 @@ class ColmagDrawNode:
             goal.speed = 0.08
             move.send_goal(goal)
         self._grip_closed = action == 'close'
+        self._publish_grip_state()
         rospy.loginfo('Gripper: %s', action)
+
+    def _publish_grip_state(self):
+        pub = getattr(self, '_grip_pub', None)
+        if pub is not None:
+            pub.publish(Bool(data=bool(self._grip_closed)))
 
     def _setup_gripper_clients(self):
         if self._grip_clients is not None:
