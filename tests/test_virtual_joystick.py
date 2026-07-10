@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """Smoke test the virtual joystick mode controller."""
 
+import os as _os, sys as _sys
+_ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+for _p in (_ROOT, _os.path.join(_ROOT, 'tools')):
+    if _p not in _sys.path:
+        _sys.path.insert(0, _p)
+
 from colmag.interaction import AppController, InputMode, VirtualJoystick
 
 

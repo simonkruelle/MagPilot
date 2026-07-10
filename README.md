@@ -1,99 +1,124 @@
 <div align="center">
 
-# COLMAG
+<img src="docs/banner.png" width="880" alt="MagPilot — pilot a robot arm with nothing but a magnet">
 
-### Air-write a character. Watch the robot move.
-
-Magnetometer-based gesture control and teleoperation for a **Franka FR3 / Panda**
-arm — draw letters and digits in the air (or on a trackpad) and the robot acts;
-switch to teleop and steer the end-effector with the magnet itself.
-Runs fully in **Gazebo simulation** inside Docker, or on the real robot.
+<br><br>
 
 ![ROS](https://img.shields.io/badge/ROS-Noetic-22314E?logo=ros&logoColor=white)
 ![Gazebo](https://img.shields.io/badge/Gazebo-11-FF6A00)
 ![Robot](https://img.shields.io/badge/Franka-FR3%20%2F%20Panda-0A84FF)
-![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-one%20command%20setup-2496ED?logo=docker&logoColor=white)
+
+**No joystick. No teach pendant. No code.**
+A single magnet over a sensor board is the entire controller for a Franka FR3 —
+air-write a character and the robot performs; pick the magnet up like a stick
+and fly the arm in real time.
+
+<sub>TUM seminar project (COLMAG) · full pipeline in simulation · staged path to the real robot</sub>
 
 </div>
 
----
+<br>
 
-## Setup (once)
+## Why a magnet?
+
+Robot teleoperation usually means expensive hardware and a steep learning
+curve. A permanent magnet costs cents, needs no battery, no pairing, no setup
+ritual — and a small magnetometer grid tracks its **position, height, tilt
+and twist** through the air. Five intuitive control channels, hiding in a
+piece of metal. MagPilot turns them into a complete robot interface:
+
+<div align="center">
+
+| ✋ You do | 🤖 The robot does |
+|---|---|
+| ✍️ write `A`…`9` over the board | the mapped action — wave, bow, dab, park at slot *n* |
+| 🕹 glide the magnet around | end-effector follows in real time |
+| ↕️ raise / lower it (0–5 cm) | end-effector height follows |
+| 📐 tilt past 55° / back under 25° | gripper closes / opens |
+| 🔄 twist it | end-effector rotates |
+| ⬆️ lift above 5 cm | arm pauses — walk away safely |
+
+</div>
+
+## One window. Zero terminals.
+
+<div align="center">
+<img alt="MagPilot Control Center" src="docs/launcher.png" width="600">
+</div>
+
+```bash
+python3 colmag_launcher.py
+```
+
+The **Control Center** drives the whole stack inside Docker: robot, arm nodes
+and interface each start with one button, and the status dots poll live.
+Green = running · **amber = the Gazebo window was closed** (Start simply
+reopens the window — it never launches a second sim into a running one) ·
+the log pane streams whichever stage you select.
+
+## Two modes, one surface
+
+| ✍️ Writing studio | ✈️ MagPilot flight deck |
+|:---:|:---:|
+| <img src="docs/interface.png" width="420"> | <img src="docs/magpilot.png" width="420"> |
+| Draw a character — it is inked live, classified when you pause, and the arm executes on confirm. | Dwell on **MagPilot**: your magnet becomes the little blue plane and the arm follows it. |
+
+**Writing mode** — the legend beside the canvas shows the full mapping:
+
+| Letter | Action | Digit | Action |
+|:---:|---|:---:|---|
+| `A` | wave 👋 | `1`–`9` | park at slot 1…9 on a left→right line |
+| `B` | bow 🙇 | `0` / `X` | home / reset |
+| `C` | fist pumps 💪 | | *(nine evenly spaced positions at constant depth —* |
+| `D` | dab 😎 | | *a built-in benchmark for the digit classifier)* |
+| `U` | stretch up 🙆 | `L` / `R` | point left / right |
+
+**Flight deck** — the live gyroscope shows the magnet's tilt and twist against
+the gripper thresholds, with a height gauge beside it. The top taskbar
+(**Draw** = exit · **Gripper** · **Layer**) is button-only; everywhere else on
+the deck is play area.
+
+| Magnet input | Controls | Simulate on the trackpad |
+|---|---|---|
+| move over the board | end-effector X/Y | move the cursor |
+| height over board (0–5 cm) | end-effector height | mouse **scroll wheel** |
+| lift above 5 cm | pause — arm holds | scroll to the top |
+| tilt ≥ 55° / ≤ 25° | gripper close / open | numpad **2** / **8** |
+| twist (15° steps) | rotate the end-effector | numpad **4** / **6** |
+| — | reset magnet upright | numpad **5** |
+
+Switch modes any time — **even mid-motion**: entering MagPilot cancels the
+running gesture, glides to a ready pose, then hands you the arm. `Shift+E`
+bails out instantly and the arm returns to neutral.
+
+## Under the hood
+
+- **Sensing** — 48-channel magnetometer grid (218-byte packets @ 921600 baud);
+  the dipole model recovers position + orientation (θ = tilt, φ = twist).
+- **Recognition** — strokes are anti-aliased into a 64 px canvas with a
+  velocity-hysteresis ink gate (slow corners stay connected) and classified
+  by an OCR backend.
+- **Motion** — damped least-squares IK streamed at 30 Hz with
+  velocity-continuous trajectory points: the controller splines *through*
+  the waypoints instead of braking at each one, so following is smooth.
+- **Arbitration** — a latched ownership topic coordinates the gesture node
+  and the teleop node; startup homing, mid-motion take-over and exit homing
+  are all handled gracefully.
+
+## Quick start
 
 Needs Docker and a Linux desktop (X11). NVIDIA GPU optional.
 
 ```bash
 git clone <this-repo> && cd COLMAG-seminar-SS26
 xhost +local:root
-INSTALL_GAZEBO=1 bash ros/docker_setup.sh     # builds the image, starts the container
+INSTALL_GAZEBO=1 bash ros/docker_setup.sh   # build image + start container
+python3 colmag_launcher.py                  # then Start 1 → 2 → 3
 ```
-
----
-
-## 🚀 The Control Center app
-
-Everything is driven from one window — no terminals needed:
-
-```bash
-python3 colmag_launcher.py
-```
-
-<img alt="Control Center" src="docs/launcher.png" width="600">
-
-| Element | What it does |
-|---|---|
-| **Simulation / Real robot** | Chooses where the pipeline runs. Real mode asks for the robot IP and shows safety confirmations. |
-| **1 · Robot — Start** | Spawns the FR3 in Gazebo (sim) or connects to the real arm (`fr3_real.launch`). |
-| **2 · Arm nodes — Start** | Starts teleop + gesture nodes together. Uncheck **live** for a dry run (log only, no motion). |
-| **3 · Interface — Start** | Opens the writing/teleop window. Pick `trackpad` (no hardware) or `magnetometer` (real sensor). |
-| **Status dots** | Green when that stage is actually running (polled every 2 s). |
-| **Stop all / Restart container** | Kill the pipeline · full clean reset. |
-| **Log pane** | Live tail of the selected stage's output. |
-
-Start **1 → 2 → 3**, wait for each dot to turn green. The arm homes on startup.
-
----
-
-## Writing mode (gestures)
-
-Draw a character in the Interface window, then dwell on the confirm button.
-The legend beside the canvas shows the mapping:
-
-| Letter | Action | Digit | Action |
-|:---:|---|:---:|---|
-| `A` | wave 👋 | `1`–`9` | park at slot 1…9 on a left→right line |
-| `B` | bow 🙇 | `0` | home / reset |
-| `C` | fist pumps 💪 | | *(nine evenly spaced positions at constant depth —* |
-| `D` | dab 😎 | | *ideal for checking the digit classifier)* |
-| `U` | stretch up 🙆 | | |
-| `L` / `R` | point left / right | `X` | home |
-
-## Teleoperation mode
-
-Dwell on **Teleop**. The interface switches to a clean canvas with a taskbar on
-top (**Draw** = exit · **Gripper** · **Layer**) and a live magnet gyroscope with
-the thresholds and a height gauge. The taskbar strip is button-only — the arm
-does not follow the cursor there.
-
-| Magnet input | Controls | Simulate on the trackpad |
-|---|---|---|
-| move over the board | end-effector X/Y | move the cursor |
-| **height** over board (0–5 cm) | end-effector height (0 cm = ground, 5 cm = default) | mouse **scroll wheel** |
-| lift **above 5 cm** | teleop pauses — arm holds | scroll to the top |
-| **tilt** ≥ 55° / ≤ 25° | gripper close / open | numpad **2** / **8** |
-| **twist** (15° steps) | rotate the end-effector | numpad **4** / **6** |
-| — | reset magnet upright | numpad **5** |
-
-**Safety exits:** `Shift+E` leaves teleop immediately (trackpad *and* magnet
-mode) and the arm returns to its neutral pose. `Ctrl+C` in any stage stops and
-holds the arm.
-
----
-
-## Manual commands (alternative to the app)
 
 <details>
-<summary>Run the three stages by hand</summary>
+<summary><b>Manual commands</b> (alternative to the app)</summary>
 
 Each terminal: `bash ros/docker_connect.sh`, then:
 
@@ -102,67 +127,62 @@ Each terminal: `bash ros/docker_connect.sh`, then:
 roslaunch colmag_ros fr3.launch controller:=effort_joint_trajectory_controller
 # 2 — arm nodes (teleop + gestures)
 roslaunch colmag_ros colmag_arm_nodes.launch dry_run:=false
-# 3 — interface
+# 3 — interface (trackpad sim; use --clean --writing-max-z 0.05 for the real sensor)
 python3 magnetometer_reader.py --input-source trackpad --ros --classifier-labels ABCXLRUD0123
 ```
-
-Real sensor instead of trackpad:
-`python3 magnetometer_reader.py --clean --writing-max-z 0.05 --ros --classifier-labels ABCXLRUD0123`
 </details>
-
----
 
 ## Real robot — staged safety pipeline
 
 Never skip stages. Move on only when the current stage behaves exactly as
-expected. Stop immediately on any wrong/repeated command, wrong `arm_id`, or
-anyone inside the workspace.
+expected; stop immediately on anything unexpected.
 
 | Stage | What | Moves the real arm? |
 |:---:|---|:---:|
-| 1 | Everything in **simulation** (the app, Simulation mode) | No |
+| 1 | Everything in **Simulation** mode | No |
 | 2 | Real sensor + ROS, arm nodes **dry-run** (uncheck *live*) | No |
 | 3 | One tiny supervised nudge: `rosrun colmag_ros fr3_simple_move.py _dry_run:=false` | ✳ tiny, supervised |
-| 4 | One approved gesture, then the full stack, then teleop | ✳ supervised |
+| 4 | One approved gesture, then the full stack, then MagPilot | ✳ supervised |
 
-For the real connection use the app's **Real robot** mode (it runs
-`fr3_real.launch robot_ip:=…`), or set `ROS_MASTER_URI` / `ROS_IP` for the lab
-network inside the container first. Keep the E-stop reachable at all times.
+Use the app's **Real robot** mode (runs `fr3_real.launch robot_ip:=…`). Keep
+the E-stop reachable at all times.
 
----
-
-## Troubleshooting
+<details>
+<summary><b>Troubleshooting</b></summary>
 
 | Symptom | Fix |
 |---|---|
+| Robot dot is **amber** | Sim runs but the Gazebo window is closed — press Start to reopen it. |
 | Stage dot stays gray | Check that stage's log in the app's log pane. |
-| *"new node registered with same name"* | Two copies of a stage are running — **Stop all**, then start again. |
-| Anything weird / stuck | **Restart container** in the app (bulletproof reset). |
+| *"new node registered with same name"* | Two copies of a stage — **Stop all**, then start again. |
+| Anything weird / stuck | **Restart container** (bulletproof reset). |
 | GUI window doesn't open | `xhost +local:root` on the host once. |
-| `python: command not found` in container | Use `python3`. |
-| Gripper won't reopen | Fixed via grasp→stop→move; if it recurs, toggle the taskbar Gripper button once. |
-
----
+</details>
 
 ## Repository map
 
 ```
-colmag_launcher.py          ← the Control Center app (run on the host)
-magnetometer_reader.py      writing/teleop interface (classifier, gyro, taskbar)
+colmag_launcher.py          MagPilot Control Center (run on the host)
+magnetometer_reader.py      writing studio + MagPilot flight deck
+colmag/                     interface building blocks (buttons, modes)
 ros/colmag_ros/
   launch/fr3.launch              FR3 in Gazebo (+ practice objects)
   launch/fr3_real.launch         real FR3 connection
   launch/colmag_arm_nodes.launch teleop + gesture nodes together
-  scripts/colmag_draw_node.py    teleop: cursor→EE, height, rotation, gripper
+  scripts/colmag_draw_node.py    MagPilot: cursor→EE, height, twist, gripper
   scripts/colmag_robot_node.py   gestures: letter tricks, digit line, homing
+tests/                      unit + smoke tests (run with python3 tests/…)
+tools/                      calibration, CSV visualizer, logo/screenshot makers
+docs/                       images + guides
 ```
-
-Magnetometer hardware: 218-byte packets (`0xAA` + 48 field floats + 6 pose
-floats + `0xBB`) at 921600 baud; pose `mx,my,mz` encode the magnet orientation
-(θ = tilt, φ = twist) used for the teleop controls.
 
 ---
 
 <div align="center">
-<sub>TUM Seminar · Collaborative Robotics and Assistive Technology for Advanced Human-Robot Interaction</sub>
+
+<img src="docs/logo.png" width="72" alt="MagPilot icon">
+
+<sub>TUM Seminar · Collaborative Robotics and Assistive Technology for
+Advanced Human-Robot Interaction</sub>
+
 </div>

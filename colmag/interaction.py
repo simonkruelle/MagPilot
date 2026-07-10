@@ -52,7 +52,7 @@ class VirtualJoystick:
 
         return cls(
             [
-                VirtualButton('Teleop', left_x, vertical, radius, 'robot:teleop'),
+                VirtualButton('MagPilot', left_x, vertical, radius, 'robot:teleop'),
                 VirtualButton('Reset', left_x, -vertical, radius, 'canvas:reset'),
                 VirtualButton('Letters', left_x - horizontal, 0.0, radius, 'mode:letters'),
                 VirtualButton('Digits', left_x + horizontal, 0.0, radius, 'mode:digits'),

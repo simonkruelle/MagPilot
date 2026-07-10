@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """Smoke test the EasyOCR character classifier without sensor hardware."""
 
+import os as _os, sys as _sys
+_ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+for _p in (_ROOT, _os.path.join(_ROOT, 'tools')):
+    if _p not in _sys.path:
+        _sys.path.insert(0, _p)
+
 import numpy as np
 
 from digit_classifier.inference import DigitClassifier

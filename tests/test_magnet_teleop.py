@@ -8,10 +8,15 @@ isolation — no ROS, no hardware, no display.
 
 Run:  python3 test_magnet_teleop.py
 """
+
+import os as _os, sys as _sys
+_ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+for _p in (_ROOT, _os.path.join(_ROOT, 'tools')):
+    if _p not in _sys.path:
+        _sys.path.insert(0, _p)
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault('MPLBACKEND', 'Agg')
 
 from magnetometer_reader import MagnetometerReader

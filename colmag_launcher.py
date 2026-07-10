@@ -8,8 +8,7 @@ Run on the HOST (not inside Docker):
 
 Buttons start each pipeline stage inside the `colmag_ros` Docker container via
 `docker exec`, so you never need more than this window plus the GUIs that the
-stages open themselves (Gazebo, the trackpad interface). Simulation and real
-robot mode share the same three steps:
+stages open themselves (Gazebo, the trackpad interface).
 
     1. Robot     — Gazebo FR3 (sim) or franka_control (real, needs robot IP)
     2. Arm nodes — teleop draw node + gesture robot node (one launch)
@@ -27,27 +26,29 @@ import subprocess
 import threading
 import tkinter as tk
 import tkinter.font as tkfont
-from tkinter import messagebox, ttk
+from tkinter import messagebox
 
 CONTAINER = 'colmag_ros'
 REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 ROS_SETUP = ('source /opt/ros/noetic/setup.bash; '
              '[ -f /catkin_ws/devel/setup.bash ] && source /catkin_ws/devel/setup.bash; ')
 
-# ── Apple-ish palette ────────────────────────────────────────────────────────
-BG = '#f5f5f7'
+# ── MagPilot sky palette: white cards floating like clouds on light blue ────
+BG = '#e9f3fc'
 CARD = '#ffffff'
 TEXT = '#1d1d1f'
-SUBTLE = '#86868b'
+SUBTLE = '#7b8b99'
 BLUE = '#0a84ff'
 BLUE_DARK = '#0060df'
 GREEN = '#34c759'
 RED = '#ff3b30'
-BORDER = '#e3e3e8'
-DOT_OFF = '#d2d2d7'
+AMBER = '#ff9f0a'
+BORDER = '#d9e6f2'
+TRACK = '#dcebf7'
+DOT_OFF = '#c6d6e3'
 
 STAGES = ('robot', 'nodes', 'interface')
-WIDTH = 760
+WIDTH = 780
 
 
 def pick_font(candidates, fallback='TkDefaultFont'):
@@ -62,7 +63,6 @@ def pick_font(candidates, fallback='TkDefaultFont'):
 
 
 def sh(cmd, timeout=10):
-    """Run a host command, return (ok, output)."""
     try:
         out = subprocess.run(cmd, shell=True, capture_output=True, text=True,
                              timeout=timeout)
@@ -72,8 +72,10 @@ def sh(cmd, timeout=10):
 
 
 def in_container_detached(tag, command):
-    """Start a long-running command inside the container, detached, logged."""
-    inner = '{}{} > /tmp/colmag_gui_{}.log 2>&1'.format(ROS_SETUP, command, tag)
+    # PYTHONUNBUFFERED: python ROS nodes block-buffer stdout when redirected
+    # to a file, which left the log pane empty until the process exited.
+    inner = 'export PYTHONUNBUFFERED=1; {}{} > /tmp/colmag_gui_{}.log 2>&1'.format(
+        ROS_SETUP, command, tag)
     return sh('docker exec -d {} bash -lc {}'.format(CONTAINER, shlex.quote(inner)))
 
 
@@ -88,8 +90,10 @@ def round_rect(canvas, x1, y1, x2, y2, r, **kw):
     return canvas.create_polygon(pts, smooth=True, **kw)
 
 
+# ── macOS-style custom widgets ───────────────────────────────────────────────
+
 class Pill(tk.Canvas):
-    """A rounded, macOS-style button."""
+    """Rounded push button."""
 
     def __init__(self, parent, text, command, kind='primary',
                  width=96, height=32, font=None, parent_bg=CARD):
@@ -98,25 +102,135 @@ class Pill(tk.Canvas):
         self._command = command
         self._kind = kind
         fills = {'primary': (BLUE, 'white', BLUE),
-                 'danger': ('#ffffff', RED, '#f0d3d1'),
+                 'danger': ('#ffffff', RED, '#f2cfcc'),
                  'plain': ('#ffffff', TEXT, BORDER)}
         self._fill, fg, outline = fills[kind]
         self._shape = round_rect(self, 1, 1, width - 1, height - 1,
                                  height // 2 - 1, fill=self._fill,
                                  outline=outline)
-        self._label = self.create_text(width // 2, height // 2, text=text,
-                                       fill=fg, font=font)
+        self.create_text(width // 2, height // 2, text=text, fill=fg, font=font)
         self.bind('<Button-1>', lambda e: self._command())
-        self.bind('<Enter>', self._hover_on)
-        self.bind('<Leave>', self._hover_off)
+        self.bind('<Enter>', lambda e: self.itemconfigure(
+            self._shape, fill={'primary': BLUE_DARK, 'danger': '#fff0ef',
+                               'plain': '#f5f5f7'}[self._kind]))
+        self.bind('<Leave>', lambda e: self.itemconfigure(
+            self._shape, fill=self._fill))
 
-    def _hover_on(self, _):
-        hover = {'primary': BLUE_DARK, 'danger': '#fff0ef',
-                 'plain': '#f5f5f7'}[self._kind]
-        self.itemconfigure(self._shape, fill=hover)
 
-    def _hover_off(self, _):
-        self.itemconfigure(self._shape, fill=self._fill)
+class Segmented(tk.Canvas):
+    """macOS segmented control bound to a StringVar."""
+
+    def __init__(self, parent, variable, options, command=None,
+                 width=300, height=32, font=None, parent_bg=BG):
+        super().__init__(parent, width=width, height=height, bg=parent_bg,
+                         highlightthickness=0, bd=0, cursor='hand2')
+        self._var, self._command, self._font = variable, command, font
+        self._opts = options          # [(value, label), ...]
+        self._wseg = (width - 4) // len(options)
+        round_rect(self, 0, 0, width, height, height // 2, fill=TRACK,
+                   outline=TRACK)
+        self._redraw()
+        self.bind('<Button-1>', self._click)
+
+    def _redraw(self):
+        self.delete('seg')
+        h = int(self['height'])
+        for i, (value, label) in enumerate(self._opts):
+            x1 = 2 + i * self._wseg
+            if value == self._var.get():
+                round_rect(self, x1 + 1, 3, x1 + self._wseg - 1, h - 3,
+                           (h - 6) // 2, fill=CARD, outline='#d8d8dd',
+                           tags='seg')
+            self.create_text(x1 + self._wseg // 2, h // 2, text=label,
+                             fill=TEXT, font=self._font, tags='seg')
+
+    def _click(self, event):
+        idx = max(0, min(len(self._opts) - 1,
+                         (event.x - 2) // self._wseg))
+        value = self._opts[idx][0]
+        if value != self._var.get():
+            self._var.set(value)
+            self._redraw()
+            if self._command:
+                self._command()
+
+
+class Toggle(tk.Canvas):
+    """macOS switch bound to a BooleanVar."""
+
+    def __init__(self, parent, variable, parent_bg=CARD, command=None):
+        w, h = 46, 27
+        super().__init__(parent, width=w, height=h, bg=parent_bg,
+                         highlightthickness=0, bd=0, cursor='hand2')
+        self._var, self._command = variable, command
+        self._redraw()
+        self.bind('<Button-1>', self._flip)
+
+    def _redraw(self):
+        self.delete('all')
+        on = bool(self._var.get())
+        round_rect(self, 1, 1, 45, 26, 12, fill=GREEN if on else TRACK,
+                   outline='' if on else '#dcdce1')
+        x = 32 if on else 13
+        self.create_oval(x - 10, 3, x + 10, 23, fill='white',
+                         outline='#e6e6e6')
+
+    def _flip(self, _):
+        self._var.set(not self._var.get())
+        self._redraw()
+        if self._command:
+            self._command()
+
+
+class Selector(tk.Canvas):
+    """Rounded value cycler (click to switch between options)."""
+
+    def __init__(self, parent, variable, options, width=132, height=30,
+                 font=None, parent_bg=CARD):
+        super().__init__(parent, width=width, height=height, bg=parent_bg,
+                         highlightthickness=0, bd=0, cursor='hand2')
+        self._var, self._opts, self._font = variable, list(options), font
+        self._shape = round_rect(self, 1, 1, width - 1, height - 1,
+                                 height // 2 - 1, fill='#ffffff',
+                                 outline=BORDER)
+        self._wdt, self._hgt = width, height
+        self._redraw()
+        self.bind('<Button-1>', self._next)
+        self.bind('<Enter>', lambda e: self.itemconfigure(self._shape,
+                                                          fill='#f5f5f7'))
+        self.bind('<Leave>', lambda e: self.itemconfigure(self._shape,
+                                                          fill='#ffffff'))
+
+    def _redraw(self):
+        self.delete('txt')
+        self.create_text(self._wdt // 2 - 6, self._hgt // 2,
+                         text=self._var.get(), fill=TEXT, font=self._font,
+                         tags='txt')
+        self.create_text(self._wdt - 16, self._hgt // 2, text='⌄',
+                         fill=SUBTLE, font=self._font, tags='txt')
+
+    def _next(self, _):
+        idx = self._opts.index(self._var.get())
+        self._var.set(self._opts[(idx + 1) % len(self._opts)])
+        self._redraw()
+
+
+class RoundEntry(tk.Canvas):
+    """Entry inside a rounded border."""
+
+    def __init__(self, parent, variable, width=130, height=30, font=None,
+                 parent_bg=BG):
+        super().__init__(parent, width=width, height=height, bg=parent_bg,
+                         highlightthickness=0, bd=0)
+        round_rect(self, 1, 1, width - 1, height - 1, height // 2 - 1,
+                   fill='#ffffff', outline=BORDER)
+        self.entry = tk.Entry(self, textvariable=variable, relief='flat',
+                              bd=0, highlightthickness=0, font=font,
+                              fg=TEXT, bg='#ffffff', justify='center',
+                              disabledbackground='#ffffff',
+                              disabledforeground='#c7c7cc')
+        self.create_window(width // 2, height // 2, window=self.entry,
+                           width=width - 22, height=height - 10)
 
 
 class Card(tk.Canvas):
@@ -125,17 +239,19 @@ class Card(tk.Canvas):
     def __init__(self, parent, height, width=WIDTH):
         super().__init__(parent, width=width, height=height, bg=BG,
                          highlightthickness=0, bd=0)
-        round_rect(self, 1, 1, width - 1, height - 1, 12,
+        round_rect(self, 1, 2, width - 1, height - 1, 14,
                    fill=CARD, outline=BORDER)
         self.inner = tk.Frame(self, bg=CARD)
         self.create_window(width // 2, height // 2, window=self.inner,
-                           width=width - 24, height=height - 16)
+                           width=width - 28, height=height - 18)
 
+
+# ── The app ──────────────────────────────────────────────────────────────────
 
 class Launcher(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('COLMAG Control Center')
+        self.title('MagPilot Control Center')
         self.configure(bg=BG)
         self.resizable(False, False)
         self._fonts()
@@ -149,53 +265,51 @@ class Launcher(tk.Tk):
                         'Fira Sans', 'Inter', 'Roboto', 'Ubuntu', 'DejaVu Sans'])
         mono = pick_font(['SF Mono', 'Menlo', 'Fira Mono', 'JetBrains Mono',
                           'Ubuntu Mono', 'DejaVu Sans Mono'])
-        self.f_title = (ui, 19, 'bold')
+        self.f_title = (ui, 20, 'bold')
         self.f_h = (ui, 12, 'bold')
         self.f_body = (ui, 11)
         self.f_small = (ui, 9)
         self.f_btn = (ui, 11, 'bold')
         self.f_mono = (mono, 9)
-        s = ttk.Style(self)
-        try:
-            s.theme_use('clam')
-        except tk.TclError:
-            pass
-        s.configure('.', background=BG, foreground=TEXT, font=self.f_body)
-        s.configure('TRadiobutton', background=BG, font=self.f_body)
-        s.map('TRadiobutton', background=[('active', BG)])
-        s.configure('Card.TCheckbutton', background=CARD, font=self.f_body)
-        s.map('Card.TCheckbutton', background=[('active', CARD)])
-        s.configure('TEntry', padding=4)
-        s.configure('TCombobox', padding=3)
-
-    # ── UI ──────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
         head = tk.Frame(self, bg=BG)
-        head.pack(fill='x', padx=22, pady=(16, 0))
-        tk.Label(head, text='COLMAG Control Center', bg=BG, fg=TEXT,
+        head.pack(fill='x', padx=26, pady=(20, 0))
+        title_row = tk.Frame(head, bg=BG)
+        title_row.pack(anchor='w')
+        logo_path = os.path.join(REPO_DIR, 'docs', 'logo_small.png')
+        self._logo_img = None
+        if os.path.exists(logo_path):
+            try:
+                self._logo_img = tk.PhotoImage(file=logo_path)
+                tk.Label(title_row, image=self._logo_img, bg=BG).pack(
+                    side='left', padx=(0, 12))
+            except tk.TclError:
+                self._logo_img = None
+        text_col = tk.Frame(title_row, bg=BG)
+        text_col.pack(side='left')
+        tk.Label(text_col, text='MagPilot', bg=BG, fg=TEXT,
                  font=self.f_title).pack(anchor='w')
-        tk.Label(head, text='Runs the whole pipeline inside the colmag_ros '
-                            'container — no extra terminals.',
-                 bg=BG, fg=SUBTLE, font=self.f_body).pack(anchor='w', pady=(2, 0))
+        tk.Label(text_col, text='Pilot a Franka arm with a magnet — the whole '
+                                'pipeline in one window, no terminals.',
+                 bg=BG, fg=SUBTLE, font=self.f_body).pack(anchor='w',
+                                                          pady=(3, 0))
 
-        # Mode row
+        # Mode row: segmented control + IP field
         mode_row = tk.Frame(self, bg=BG)
-        mode_row.pack(fill='x', padx=22, pady=(12, 6))
+        mode_row.pack(fill='x', padx=26, pady=(14, 8))
         self.mode = tk.StringVar(value='sim')
-        ttk.Radiobutton(mode_row, text='Simulation (Gazebo)', value='sim',
-                        variable=self.mode, command=self._mode_changed
-                        ).pack(side='left')
-        ttk.Radiobutton(mode_row, text='Real robot', value='real',
-                        variable=self.mode, command=self._mode_changed
-                        ).pack(side='left', padx=(18, 10))
-        tk.Label(mode_row, text='robot IP', bg=BG, fg=SUBTLE,
-                 font=self.f_body).pack(side='left')
+        Segmented(mode_row, self.mode,
+                  [('sim', 'Simulation'), ('real', 'Real robot')],
+                  command=self._mode_changed, width=280, height=32,
+                  font=self.f_body, parent_bg=BG).pack(side='left')
         self.robot_ip = tk.StringVar(value='172.16.0.2')
-        self.ip_entry = ttk.Entry(mode_row, textvariable=self.robot_ip,
-                                  width=13, font=self.f_body)
-        self.ip_entry.pack(side='left', padx=(6, 0))
-        self.ip_entry.configure(state='disabled')
+        tk.Label(mode_row, text='robot IP', bg=BG, fg=SUBTLE,
+                 font=self.f_body).pack(side='left', padx=(22, 8))
+        self._ip = RoundEntry(mode_row, self.robot_ip, width=132, height=30,
+                              font=self.f_body, parent_bg=BG)
+        self._ip.pack(side='left')
+        self._ip.entry.configure(state='disabled')
 
         # Stage cards
         self.lights = {}
@@ -206,52 +320,51 @@ class Launcher(tk.Tk):
                             'Teleop (draw) + gestures (robot), one launch',
                             self.start_nodes)
         self.live = tk.BooleanVar(value=True)
-        ttk.Checkbutton(inner, text='live (moves the arm)', variable=self.live,
-                        style='Card.TCheckbutton').pack(side='right', padx=(0, 12))
+        Toggle(inner, self.live).pack(side='right', padx=(0, 10))
+        tk.Label(inner, text='live', bg=CARD, fg=TEXT,
+                 font=self.f_body).pack(side='right', padx=(0, 8))
         inner = self._stage('interface', '3 · Interface',
                             'Writing / teleop UI (opens its own window)',
                             self.start_interface)
         self.input_src = tk.StringVar(value='trackpad')
-        ttk.Combobox(inner, textvariable=self.input_src, width=12,
-                     state='readonly', font=self.f_body,
-                     values=('trackpad', 'magnetometer')
-                     ).pack(side='right', padx=(0, 12))
+        Selector(inner, self.input_src, ('trackpad', 'magnetometer'),
+                 width=138, height=30, font=self.f_body
+                 ).pack(side='right', padx=(0, 12))
 
         # Control row
         row = tk.Frame(self, bg=BG)
-        row.pack(fill='x', padx=22, pady=(12, 4))
-        Pill(row, '■  Stop all', self.stop_all, kind='danger', width=118,
+        row.pack(fill='x', padx=26, pady=(14, 4))
+        Pill(row, 'Stop all', self.stop_all, kind='danger', width=104,
              font=self.f_btn, parent_bg=BG).pack(side='left')
         Pill(row, 'Restart container', self.restart_container, kind='plain',
-             width=165, font=self.f_body, parent_bg=BG
+             width=160, font=self.f_body, parent_bg=BG
              ).pack(side='left', padx=12)
         self.container_light = tk.Label(row, text='●  container', bg=BG,
                                         fg=DOT_OFF, font=self.f_body)
         self.container_light.pack(side='right')
 
         # Log card
-        log_card = Card(self, height=190)
-        log_card.pack(padx=22, pady=(10, 18))
+        log_card = Card(self, height=196)
+        log_card.pack(padx=26, pady=(10, 20))
         top = tk.Frame(log_card.inner, bg=CARD)
         top.pack(fill='x')
         tk.Label(top, text='Log', bg=CARD, fg=SUBTLE,
                  font=self.f_small).pack(side='left')
         self.log_choice = tk.StringVar(value='interface')
-        ttk.Combobox(top, textvariable=self.log_choice, width=10,
-                     state='readonly', values=STAGES,
-                     font=self.f_small).pack(side='right')
+        Selector(top, self.log_choice, STAGES, width=118, height=26,
+                 font=self.f_small).pack(side='right')
         self.log = tk.Text(log_card.inner, height=9, bg='#fbfbfd', fg=TEXT,
                            font=self.f_mono, relief='flat', state='disabled',
                            wrap='none')
-        self.log.pack(fill='both', expand=True, pady=(4, 0))
+        self.log.pack(fill='both', expand=True, pady=(5, 0))
 
     def _stage(self, tag, title, subtitle, command):
-        card = Card(self, height=66)
-        card.pack(padx=22, pady=5)
+        card = Card(self, height=68)
+        card.pack(padx=26, pady=5)
         inner = card.inner
         light = tk.Label(inner, text='●', bg=CARD, fg=DOT_OFF,
                          font=(self.f_body[0], 15))
-        light.pack(side='left', padx=(6, 10))
+        light.pack(side='left', padx=(4, 12))
         self.lights[tag] = light
         col = tk.Frame(inner, bg=CARD)
         col.pack(side='left')
@@ -260,14 +373,14 @@ class Launcher(tk.Tk):
         tk.Label(col, text=subtitle, bg=CARD, fg=SUBTLE, font=self.f_small
                  ).pack(anchor='w')
         Pill(inner, 'Start', command, kind='primary', width=92,
-             font=self.f_btn).pack(side='right', padx=(0, 4))
+             font=self.f_btn).pack(side='right', padx=(0, 2))
         return inner
 
     # ── Actions ─────────────────────────────────────────────────────────────
 
     def _mode_changed(self):
         real = self.mode.get() == 'real'
-        self.ip_entry.configure(state='normal' if real else 'disabled')
+        self._ip.entry.configure(state='normal' if real else 'disabled')
         if real:
             messagebox.showwarning(
                 'Real robot mode',
@@ -288,6 +401,15 @@ class Launcher(tk.Tk):
         if not self._ensure_container():
             return
         if self.mode.get() == 'sim':
+            # Never start a SECOND fr3.launch while the sim is up: its
+            # controller spawner fights the first one and leaves the arm
+            # controller STOPPED (arm ignores all motion). If only the
+            # Gazebo window was closed, just reopen the window.
+            ok, out = in_container(
+                'pgrep -x gzserver >/dev/null && echo up || echo down')
+            if ok and 'up' in out:
+                in_container_detached('window', 'gzclient')
+                return
             cmd = ('roslaunch colmag_ros fr3.launch '
                    'controller:=effort_joint_trajectory_controller')
         else:
@@ -356,7 +478,15 @@ class Launcher(tk.Tk):
         if ok:
             ok2, nodes = in_container('rosnode list 2>/dev/null', timeout=5)
             if ok2:
-                states['robot'] = '/gazebo' in nodes or '/franka_control' in nodes
+                if '/franka_control' in nodes:
+                    states['robot'] = True
+                elif '/gazebo' in nodes:
+                    # Sim backend up; amber when the Gazebo window is closed
+                    # (Start then reopens just the window, never a 2nd sim).
+                    _, win = in_container(
+                        'pgrep -x gzclient >/dev/null && echo w || true',
+                        timeout=5)
+                    states['robot'] = True if 'w' in win else 'nowin'
                 states['nodes'] = ('/colmag_draw_node' in nodes
                                    and '/colmag_robot_node' in nodes)
             # [m] trick: don't match this pgrep's own bash wrapper
@@ -374,7 +504,9 @@ class Launcher(tk.Tk):
     def _apply_status(self, container_ok, states, tail):
         self.container_light.configure(fg=GREEN if container_ok else RED)
         for tag, light in self.lights.items():
-            light.configure(fg=GREEN if states.get(tag) else DOT_OFF)
+            value = states.get(tag)
+            light.configure(fg=GREEN if value is True
+                            else (AMBER if value == 'nowin' else DOT_OFF))
         self.log.configure(state='normal')
         self.log.delete('1.0', 'end')
         self.log.insert('end', tail or '(no log yet)')

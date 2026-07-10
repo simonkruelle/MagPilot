@@ -3,6 +3,12 @@
 Test script for magnetometer reader components
 """
 
+import os as _os, sys as _sys
+_ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+for _p in (_ROOT, _os.path.join(_ROOT, 'tools')):
+    if _p not in _sys.path:
+        _sys.path.insert(0, _p)
+
 import serial.tools.list_ports
 import struct
 import csv

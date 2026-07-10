@@ -35,7 +35,7 @@ python magnetometer_reader.py \
 ## Step 2 — Fit the calibration
 
 ```bash
-python calibrate_touchpad_magnetics.py \
+python tools/calibrate_touchpad_magnetics.py \
   data/lab_2026-05-20/raw/magcal_0930_raw.csv
 ```
 

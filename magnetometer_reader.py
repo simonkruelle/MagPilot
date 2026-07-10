@@ -432,15 +432,6 @@ class MagnetometerReader:
         self.sim_magnet_height_step = 0.005    # 0.5 cm per scroll notch
         self.ee_height_min_cm = 0.0            # EE height at magnet on the board
         self.ee_height_max_cm = 50.0           # EE height at the cutoff (display)
-
-        # Authoritative gripper state from the draw node (latched topic): keeps
-        # the tilt hysteresis and the gyro readout in sync with the REAL gripper
-        # no matter how it was toggled (tilt, taskbar button, Shift+G).
-        if self.ros_bridge is not None:
-            try:
-                self.ros_bridge.subscribe_gripper_state(self._on_gripper_state)
-            except Exception as exc:
-                print(f'[ROS] gripper-state sync unavailable: {exc}')
         self.touchpad_last_speed = 0.0
         self.touchpad_last_speed_report_at = 0.0
         self.touchpad_speed_log_file = None
@@ -460,6 +451,15 @@ class MagnetometerReader:
         self.action_feedback_until = 0.0
         self.touchpad_pen_enabled = True
         self.ros_bridge = _RosBridge() if ros else None
+        # Authoritative gripper state from the draw node (latched topic): keeps
+        # the tilt hysteresis and the gyro readout in sync with the REAL gripper
+        # no matter how it was toggled (tilt, taskbar button, Shift+G). Must be
+        # registered after both the bridge and the _magnet_grip_* fields exist.
+        if self.ros_bridge is not None:
+            try:
+                self.ros_bridge.subscribe_gripper_state(self._on_gripper_state)
+            except Exception as exc:
+                print(f'[ROS] gripper-state sync unavailable: {exc}')
         self.classifier_thread = None
         self.classifier_stop_event = threading.Event()
         self.classifier_input_event = threading.Event()
@@ -481,6 +481,11 @@ class MagnetometerReader:
         self.writing_max_velocity = writing_max_velocity
         self.writing_min_closeness = writing_min_closeness
         self.writing_max_z = writing_max_z
+        # Speed-gate hysteresis: min_velocity only STARTS a stroke; once inking,
+        # keep inking down to min_velocity * this factor. Slow corners and curve
+        # apexes stay connected instead of breaking the letter into fragments,
+        # while a resting magnet still never starts ink on its own.
+        self.writing_velocity_stop_frac = 0.30
         # Edge guard (see writing_sample_mask): within this fraction of the canvas
         # half-extent from a border, only ink strokes slower than
         # writing_min_velocity * writing_edge_speed_factor. Set the fraction to 0
@@ -512,18 +517,16 @@ class MagnetometerReader:
         elif enable_classifier:
             self.latest_prediction_text = self.classifier_unloaded_prediction_text()
 
-        # Fix 5: Pre-compute Gaussian brush kernel once (avoids np.ogrid + np.exp per point per frame)
-        # Slightly thinner than 1 px/64: keeps strokes crisp on the canvas
-        # without the heavy look of the full-width Gaussian.
-        self._brush_radius = max(0.6, self.image_size / 64.0 * 0.75)
+        # Gaussian brush stamped along the stroke. Only the pixel-offset grid
+        # is precomputed; the kernel itself is evaluated per stamp at the true
+        # sub-pixel centre (see _stamp_brush), which is what keeps diagonal
+        # strokes smooth instead of snapping to the 64px grid.
+        self._brush_radius = max(0.6, self.image_size / 64.0 * 0.85)
         self._brush_extent = int(np.ceil(self._brush_radius * 2.5))
-        y_ker, x_ker = np.ogrid[
+        self._brush_yk, self._brush_xk = np.ogrid[
             -self._brush_extent:self._brush_extent + 1,
             -self._brush_extent:self._brush_extent + 1
         ]
-        self._brush_kernel = np.exp(
-            -(x_ker * x_ker + y_ker * y_ker) / (2.0 * self._brush_radius ** 2)
-        )
 
         # Session recording
         self.recording_sessions = []  # List of (session_name, start_time, end_time, data_points)
@@ -1036,7 +1039,7 @@ class MagnetometerReader:
             elif event.command == 'robot:teleop':
                 # Arm-following mode: colmag_draw_node starts tracing the cursor.
                 # Pressing Letters/Digits/Signs leaves teleop again.
-                self._set_key_feedback("Mode: TELEOP — Shift+E exits, Shift+V changes layer")
+                self._set_key_feedback("MagPilot ON — Shift+E exits, Shift+V changes layer")
                 print(f"Virtual joystick: {event.button.name} -> {event.command}")
             else:
                 self._set_key_feedback(f"{event.button.name}: {event.command.split(':', 1)[-1]}")
@@ -1689,6 +1692,19 @@ class MagnetometerReader:
         if self.writing_max_velocity is not None:
             moving &= speed <= self.writing_max_velocity
 
+        # Hysteresis: min_velocity only STARTS ink; an ongoing stroke keeps
+        # inking down to the lower stop threshold, so slow corners and curve
+        # apexes stay connected instead of fragmenting the letter.
+        stop_velocity = self.writing_min_velocity * self.writing_velocity_stop_frac
+        if 0.0 < stop_velocity < self.writing_min_velocity:
+            sustain = speed >= stop_velocity
+            if self.writing_max_velocity is not None:
+                sustain &= speed <= self.writing_max_velocity
+            inking = False
+            for i in range(len(moving)):
+                inking = moving[i] or (inking and sustain[i])
+                moving[i] = inking
+
         # Edge guard: near the canvas boundary, require a higher speed threshold —
         # i.e. reject *fast* strokes there. This kills the line that gets drawn
         # when the cursor flicks in from the edge on entry, while still inking
@@ -1718,7 +1734,12 @@ class MagnetometerReader:
         return finite & moving & close, speed, closeness
 
     def draw_pose_samples_on_image(self, image, pose_x, pose_y, pose_z, sample_mask=None):
-        """Draw pose samples into an existing grayscale OCR image."""
+        """Draw pose samples into an existing grayscale OCR image.
+
+        Consecutive writing samples are joined by interpolated sub-pixel
+        stamps along the connecting segment, so strokes render as smooth
+        anti-aliased lines instead of a chain of per-sample dots.
+        """
         if len(pose_x) == 0:
             return image
 
@@ -1726,6 +1747,9 @@ class MagnetometerReader:
         if extent <= 0:
             raise ValueError("projection_extent must be positive")
 
+        pose_x = np.asarray(pose_x, dtype=float)
+        pose_y = np.asarray(pose_y, dtype=float)
+        pose_z = np.asarray(pose_z, dtype=float)
         finite = np.isfinite(pose_x) & np.isfinite(pose_y) & np.isfinite(pose_z)
         if sample_mask is not None:
             sample_mask = np.asarray(sample_mask, dtype=bool)
@@ -1733,51 +1757,66 @@ class MagnetometerReader:
                 raise ValueError("sample_mask must have the same length as the pose arrays")
             finite &= sample_mask
 
-        pose_x = pose_x[finite]
-        pose_y = pose_y[finite]
-        pose_z = pose_z[finite]
-        if len(pose_x) == 0:
+        kept = np.nonzero(finite)[0]
+        if len(kept) == 0:
             return image
 
-        x_pixels = np.rint((pose_x + extent) / (2 * extent) * (self.image_size - 1)).astype(int)
-        y_pixels = np.rint((extent - pose_y) / (2 * extent) * (self.image_size - 1)).astype(int)
+        scale = (self.image_size - 1) / (2 * extent)
+        fx = (pose_x[kept] + extent) * scale
+        fy = (extent - pose_y[kept]) * scale
+        closeness = self.z_to_closeness(pose_z[kept])
 
-        valid = (
-            (x_pixels >= 0) & (x_pixels < self.image_size) &
-            (y_pixels >= 0) & (y_pixels < self.image_size)
-        )
-        if not np.any(valid):
-            return image
-
-        x_pixels = x_pixels[valid]
-        y_pixels = y_pixels[valid]
-        z_values = pose_z[valid]
-
-        closeness = self.z_to_closeness(z_values)
-
-        # Use pre-computed brush kernel (Fix 5) — avoids np.ogrid + np.exp per point
-        be = self._brush_extent
-        kernel = self._brush_kernel
-
-        for x, y, close in zip(x_pixels, y_pixels, closeness):
-            stroke_strength = 0.18 + 0.82 * float(np.clip(close, 0.0, 1.0))
-
-            # Image slice for this brush
-            x0 = max(0, x - be)
-            x1 = min(self.image_size, x + be + 1)
-            y0 = max(0, y - be)
-            y1 = min(self.image_size, y + be + 1)
-
-            # Corresponding kernel slice (handles edge clipping)
-            kx0 = max(0, be - x)
-            kx1 = min(2 * be + 1, be + self.image_size - x)
-            ky0 = max(0, be - y)
-            ky1 = min(2 * be + 1, be + self.image_size - y)
-
-            patch = 1.0 - stroke_strength * kernel[ky0:ky1, kx0:kx1]
-            image[y0:y1, x0:x1] = np.minimum(image[y0:y1, x0:x1], patch)
+        for j in range(len(kept)):
+            self._stamp_brush(image, fx[j], fy[j], closeness[j])
+            if j == 0:
+                continue
+            # Bridge to the previous writing sample so the stroke is a
+            # continuous line — but only if the two were (near-)adjacent in
+            # the sample stream and reasonably close on the canvas; dropped
+            # stretches and pen jumps must stay gaps.
+            if kept[j] - kept[j - 1] > 2:
+                continue
+            seg = float(np.hypot(fx[j] - fx[j - 1], fy[j] - fy[j - 1]))
+            if seg > 10.0:
+                continue
+            n_mid = int(seg / 0.45)
+            for k in range(1, n_mid + 1):
+                t = k / (n_mid + 1.0)
+                self._stamp_brush(
+                    image,
+                    fx[j - 1] + t * (fx[j] - fx[j - 1]),
+                    fy[j - 1] + t * (fy[j] - fy[j - 1]),
+                    closeness[j - 1] + t * (closeness[j] - closeness[j - 1]),
+                )
 
         return np.clip(image, 0.0, 1.0)
+
+    def _stamp_brush(self, image, fx, fy, close):
+        """Stamp one Gaussian brush dot at a sub-pixel canvas position."""
+        cx = int(round(fx))
+        cy = int(round(fy))
+        if not (0 <= cx < self.image_size and 0 <= cy < self.image_size):
+            return
+        be = self._brush_extent
+        ox = fx - cx
+        oy = fy - cy
+        kernel = np.exp(
+            -((self._brush_xk - ox) ** 2 + (self._brush_yk - oy) ** 2)
+            / (2.0 * self._brush_radius ** 2)
+        )
+        stroke_strength = 0.18 + 0.82 * float(np.clip(close, 0.0, 1.0))
+
+        x0 = max(0, cx - be)
+        x1 = min(self.image_size, cx + be + 1)
+        y0 = max(0, cy - be)
+        y1 = min(self.image_size, cy + be + 1)
+        kx0 = max(0, be - cx)
+        kx1 = min(2 * be + 1, be + self.image_size - cx)
+        ky0 = max(0, be - cy)
+        ky1 = min(2 * be + 1, be + self.image_size - cy)
+
+        patch = 1.0 - stroke_strength * kernel[ky0:ky1, kx0:kx1]
+        image[y0:y1, x0:x1] = np.minimum(image[y0:y1, x0:x1], patch)
 
     def pose_to_digit_image(self, pose_x, pose_y, pose_z, sample_mask=None):
         """
@@ -2051,14 +2090,32 @@ class MagnetometerReader:
         def update_position(event, pen_down=None):
             if self.input_source != 'touchpad':
                 return
-            if event.inaxes is not ax or event.xdata is None or event.ydata is None:
+            xdata, ydata = event.xdata, event.ydata
+            if event.inaxes is not ax:
+                xdata = ydata = None
+                # MagPilot mode: the gyroscope inset overlays part of the
+                # flight deck. Pointer positions over it (or any other inset)
+                # still count as play area — map the pixel position back into
+                # the canvas frame so the whole deck is symmetric.
+                if (self.app_controller.mode.value == 'robot'
+                        and event.x is not None and event.y is not None):
+                    try:
+                        xd, yd = ax.transData.inverted().transform(
+                            (event.x, event.y))
+                    except Exception:
+                        xd = yd = None
+                    ext = self.projection_extent
+                    if (xd is not None and np.isfinite(xd) and np.isfinite(yd)
+                            and -ext <= xd <= ext and -ext <= yd <= ext):
+                        xdata, ydata = float(xd), float(yd)
+            if xdata is None or ydata is None:
                 self.touchpad_state['inside'] = False
                 if pen_down is not None:
                     self.touchpad_state['pen_down'] = pen_down
                 return
 
-            x = float(np.clip(event.xdata, -self.projection_extent, self.projection_extent))
-            y = float(np.clip(event.ydata, -self.projection_extent, self.projection_extent))
+            x = float(np.clip(xdata, -self.projection_extent, self.projection_extent))
+            y = float(np.clip(ydata, -self.projection_extent, self.projection_extent))
             if not self.touchpad_state['inside']:
                 # Cursor just came back inside — start a fresh stroke so we don't
                 # draw a line from the previous (edge/outside) position.
@@ -2097,7 +2154,7 @@ class MagnetometerReader:
                 self.activate_classifier_mode('letters')
                 if self.ros_bridge:
                     self.ros_bridge.publish_command('letter_detection')
-                self._set_key_feedback("TELEOP EXIT → letters")
+                self._set_key_feedback("MagPilot exit → letters")
                 return
             # Numpad rotates the SIMULATED magnet while teleoperating (touchpad):
             # 8/2 tilt, 4/6 twist, 5 upright. Only in teleop, so digit recording
@@ -2445,8 +2502,8 @@ class MagnetometerReader:
             extent * 1.94,
             extent * 0.24,
             boxstyle='round,pad=0.001',
-            facecolor='#eef0f4',
-            edgecolor='#d2d2d7',
+            facecolor='#eaf3fc',
+            edgecolor='#cfe2f3',
             linewidth=1.0,
             alpha=0.92,
             zorder=3,
@@ -2509,6 +2566,27 @@ class MagnetometerReader:
             s=110,
             zorder=6,
         )
+        # MagPilot cursor: while teleoperating the dot becomes a small blue
+        # aircraft (swapped in _sync_teleop_ui via these stored paths).
+        from matplotlib.path import Path as _MplPath
+        from matplotlib.transforms import Affine2D as _Affine2D
+        _plane_verts = [
+            (0.00, 1.00), (0.16, 0.55), (0.95, 0.10), (0.95, -0.16),
+            (0.18, -0.16), (0.14, -0.62), (0.45, -0.84), (0.45, -1.00),
+            (0.00, -0.90), (-0.45, -1.00), (-0.45, -0.84), (-0.14, -0.62),
+            (-0.18, -0.16), (-0.95, -0.16), (-0.95, 0.10), (-0.16, 0.55),
+            (0.00, 1.00),
+        ]
+        self._cursor_plane_base = _MplPath(_plane_verts)   # nose up (+y)
+        self._cursor_heading = np.pi / 2                    # current heading
+        self._cursor_last_xy = None
+        self._cursor_dot_path = cursor_artist.get_paths()[0] if \
+            cursor_artist.get_paths() else None
+
+        def _plane_path_for_heading(heading):
+            return self._cursor_plane_base.transformed(
+                _Affine2D().rotate(heading - np.pi / 2))
+        self._plane_path_for_heading = _plane_path_for_heading
         interface_text = ax.text(
             0.0,
             -0.16,
@@ -2908,13 +2986,43 @@ class MagnetometerReader:
         if ui.get('suptitle') is not None:
             ui['suptitle'].set_visible(not active)
 
+        # Panel cards (clean view only): the side cards follow their panels,
+        # the canvas card stretches with ax5 when teleop expands it.
+        for _card_key in ('card_legend', 'card_ax6'):
+            _card = ui.get(_card_key)
+            if _card is not None:
+                _card.set_visible(not active)
+        _card5 = ui.get('card_ax5')
+        if _card5 is not None:
+            _card5.set_bounds(*(ui['card_ax5_teleop_bounds'] if active
+                                else ui['card_ax5_default_bounds']))
+
+        for _puff in ui.get('teleop_decor', ()):
+            _puff.set_visible(active)
+        # Cursor: red dot while writing, small blue aircraft while piloting.
+        _cursor = ui.get('cursor')
+        if _cursor is not None and getattr(self, '_cursor_plane_base', None) is not None:
+            if active:
+                _cursor.set_paths([self._plane_path_for_heading(
+                    self._cursor_heading)])
+                _cursor.set_sizes([260])
+                _cursor.set_facecolor('#0a84ff')
+            else:
+                if self._cursor_dot_path is not None:
+                    _cursor.set_paths([self._cursor_dot_path])
+                _cursor.set_sizes([110])
+                _cursor.set_facecolor('#ff3b30')
+            _cursor.set_edgecolor('#ffffff')
+
         ax5 = ui['ax5']
         if active:
             ax5.set_position(ui['ax5_teleop_pos'])
-            ax5.set_title('Teleoperation', fontweight='medium')
+            ax5.set_title('MagPilot', fontweight='bold', fontsize=13,
+                          loc='left', color='#1d1d1f')
         else:
             ax5.set_position(ui['ax5_default_pos'])
-            ax5.set_title('Writing Surface', fontweight='medium')
+            ax5.set_title('Writing Surface', fontweight='bold', fontsize=13,
+                          loc='left', color='#1d1d1f')
 
         # One full redraw so the new static layout becomes the blit background.
         ui['fig'].canvas.draw()
@@ -2928,29 +3036,39 @@ class MagnetometerReader:
     def _draw_robot_action_legend(self, ax):
         """Render the gesture → robot action legend panel beside the canvas."""
         ax.axis('off')
-        ax.set_title('Robot actions', fontsize=12, fontweight='bold', pad=12)
+        ax.set_title('Robot Actions', fontsize=13, fontweight='bold', pad=14,
+                     loc='left', color='#1d1d1f')
+        keycap = {
+            'boxstyle': 'round,pad=0.32',
+            'facecolor': '#eef4fb',
+            'edgecolor': '#d3e2f0',
+            'linewidth': 0.8,
+        }
         n = len(ROBOT_ACTION_LEGEND)
-        y0, y_end = 0.95, 0.12
+        y0, y_end = 0.94, 0.13
         dy = (y0 - y_end) / max(n - 1, 1)
         for i, (label, action) in enumerate(ROBOT_ACTION_LEGEND):
             y = y0 - i * dy
             if label is None:
-                # Section header with a subtle rule beneath it
-                ax.text(0.02, y, action, transform=ax.transAxes,
-                        fontsize=8, fontweight='bold', va='center', ha='left',
-                        color='#86868b')
-                ax.plot([0.02, 0.95], [y - dy * 0.42] * 2,
-                        transform=ax.transAxes, color='#e3e3e8', lw=0.8,
-                        clip_on=False)
+                # Section header: small uppercase gray, macOS settings style.
+                ax.text(0.04, y, action.upper(), transform=ax.transAxes,
+                        fontsize=7.5, fontweight='bold', va='center', ha='left',
+                        color='#98989d')
                 continue
-            ax.text(0.06, y, label, transform=ax.transAxes,
-                    fontsize=10.5, fontweight='bold', va='center', ha='left',
-                    family='monospace', color='#0a84ff')
-            ax.text(0.40, y, action, transform=ax.transAxes,
-                    fontsize=9, va='center', ha='left', color='#1d1d1f')
-        ax.text(0.02, 0.02, 'write a character →\ndwell to confirm',
+            if label:
+                # Key rendered as a macOS-style keycap chip.
+                ax.text(0.07, y, label, transform=ax.transAxes,
+                        fontsize=9, fontweight='bold', va='center', ha='left',
+                        color='#1d1d1f', bbox=dict(keycap))
+                ax.text(0.42, y, action, transform=ax.transAxes,
+                        fontsize=9.5, va='center', ha='left', color='#3a3a3c')
+            else:
+                # Continuation line of the row above.
+                ax.text(0.42, y + dy * 0.25, action, transform=ax.transAxes,
+                        fontsize=8.5, va='center', ha='left', color='#98989d')
+        ax.text(0.04, 0.015, 'write a character →  dwell to confirm',
                 transform=ax.transAxes, fontsize=8, va='top', ha='left',
-                style='italic', color='#86868b')
+                style='italic', color='#98989d')
 
     def plot_data(self):
         """Create real-time plot of Bx, By, Bz for the selected sensor."""
@@ -2961,8 +3079,8 @@ class MagnetometerReader:
             'font.family': 'sans-serif',
             'font.sans-serif': ['SF Pro Text', 'SF Pro Display', 'Helvetica Neue',
                                 'Helvetica', 'Arial', 'DejaVu Sans'],
-            'figure.facecolor': '#f5f5f7',   # Apple light-gray backdrop
-            'axes.facecolor': '#ffffff',     # white panels float on the backdrop
+            'figure.facecolor': '#e9f3fc',   # MagPilot sky backdrop
+            'axes.facecolor': '#ffffff',     # white cards float like clouds
             'axes.edgecolor': '#d2d2d7',
             'axes.linewidth': 0.8,
             'axes.titlesize': 13,
@@ -3066,19 +3184,24 @@ class MagnetometerReader:
             cmap='gray',
             vmin=0.0,
             vmax=1.0,
-            interpolation='nearest',
+            interpolation='bilinear',
             extent=(-self.projection_extent, self.projection_extent, -self.projection_extent, self.projection_extent),
             origin='upper',
             alpha=0.58,
             zorder=1,
         )
-        ax5.set_title('Writing Surface', fontweight='medium')
+        ax5.set_title('Writing Surface', fontweight='bold', fontsize=13,
+                      loc='left', color='#1d1d1f')
         ax5.set_xticks([])
         ax5.set_yticks([])
         ax5.set_facecolor('#ffffff')
         for spine in ax5.spines.values():
-            spine.set_color('#d2d2d7')
-            spine.set_linewidth(1.0)
+            if self.clean_view:
+                # The rounded card behind the panel is the border.
+                spine.set_visible(False)
+            else:
+                spine.set_color('#d2d2d7')
+                spine.set_linewidth(1.0)
         if self.input_source == 'touchpad':
             ax5.set_aspect('auto')
             try:
@@ -3087,7 +3210,7 @@ class MagnetometerReader:
                 pass
         else:
             ax5.set_aspect('equal', adjustable='box')
-        _hint_teleop = "Teleop: Shift+E EXIT | move=cursor  numpad 8/2 tilt→grip  4/6 twist→rotate  5 reset  scroll=height"
+        _hint_teleop = "MagPilot: Shift+E EXIT | move=cursor  numpad 8/2 tilt→grip  4/6 twist→rotate  5 reset  scroll=height"
         if self.input_source == 'touchpad':
             _hint_line1 = "Shift+S save   Shift+Q quit   |   A-Z / 0-9 / - / = record"
             _hint_line2 = "Space/click draw   Shift+P pen   |   Shift+L letters   Shift+R digits   Shift+D reset"
@@ -3104,8 +3227,9 @@ class MagnetometerReader:
             ha='center', va='bottom',
             fontsize=6.5,
             family='monospace',
-            color='#222222',
-            bbox={'facecolor': 'white', 'edgecolor': '#aaaaaa', 'boxstyle': 'round,pad=0.3', 'alpha': 0.93},
+            color='#6e6e73',
+            bbox={'facecolor': '#eef6fc', 'edgecolor': 'none',
+                  'boxstyle': 'round,pad=0.45', 'alpha': 0.95},
             zorder=9,
         )
         button_artists, cursor_artist, interface_text, completion_text = self.setup_joystick_artists(ax5)
@@ -3121,6 +3245,21 @@ class MagnetometerReader:
             [], linewidths=2.5, capstyle='round', zorder=6)
         ax5.add_collection(teleop_trail_collection)
 
+        # Faint clouds on the MagPilot flight deck (teleop mode only).
+        from matplotlib.patches import Ellipse as _SkyCloud
+        teleop_decor = []
+        _e = self.projection_extent
+        for cx, cy, size in ((-0.52, 0.38, 0.11), (0.58, -0.34, 0.14),
+                             (0.05, -0.62, 0.09)):
+            for dx, dy, r in ((-1.4, 0.0, 1.0), (-0.2, 0.5, 1.25),
+                              (0.9, 0.15, 1.0), (1.8, -0.15, 0.7)):
+                puff = _SkyCloud((( cx + dx * size) * _e, (cy + dy * size * 0.8) * _e),
+                                 2.6 * r * size * _e, 1.7 * r * size * _e,
+                                 facecolor='#dbeefb', edgecolor='none',
+                                 alpha=0.9, zorder=0.5, visible=False)
+                ax5.add_patch(puff)
+                teleop_decor.append(puff)
+
         z_range = (
             f"calibrated {self.z_near:.4f}->{self.z_far:.4f}"
             if self.z_near is not None and self.z_far is not None
@@ -3132,23 +3271,28 @@ class MagnetometerReader:
         classifier_header_rows = 2.8
         y_positions = np.arange(display_count) + classifier_header_rows
         current_classifier_axis_labels = [classifier_labels[index] for index in display_indices]
-        ax6.set_title('Classifier', fontweight='medium')
+        ax6.set_title('Classifier', fontweight='bold', fontsize=13,
+                      loc='left', color='#1d1d1f')
         ax6.set_xlim(0.0, 1.0)
         ax6.set_ylim(-0.5, display_count + classifier_header_rows - 0.5)
         ax6.set_yticks(y_positions)
-        ax6.set_yticklabels(current_classifier_axis_labels, fontsize=9)
-        ax6.tick_params(axis='y', which='both', left=False, labelleft=True, pad=2)
-        ax6.tick_params(axis='x', which='both', bottom=False)
+        ax6.set_yticklabels(current_classifier_axis_labels, fontsize=10,
+                            fontweight='bold', color='#1d1d1f')
+        ax6.tick_params(axis='y', which='both', left=False, labelleft=True, pad=6)
+        ax6.tick_params(axis='x', which='both', bottom=False, labelbottom=False)
         ax6.invert_yaxis()
-        ax6.set_xlabel('Confidence')
-        for _spine in ('top', 'right', 'left'):
-            ax6.spines[_spine].set_visible(False)
+        for _spine in ax6.spines.values():
+            _spine.set_visible(False)
+        # iOS-style progress rows: a full-width light track with the
+        # confidence fill on top (blue for the top-1 label, gray otherwise).
+        ax6.barh(y_positions, np.ones(display_count),
+                 color='#eef4fb', height=0.58, zorder=1)
         prob_bars = ax6.barh(y_positions, np.zeros(display_count),
-                             color='#e5e5ea', height=0.72)
+                             color='#d1d1d6', height=0.58, zorder=2)
         prob_bar_artists = list(prob_bars)
         info_text = ax6.text(
             0.98,
-            0.98,
+            0.99,
             "Prediction: --\n"
             "Runner-up: --\n"
             "Z: --",
@@ -3156,11 +3300,12 @@ class MagnetometerReader:
             va='top',
             ha='right',
             fontsize=8,
+            color='#3a3a3c',
+            linespacing=1.5,
             bbox={
-                'boxstyle': 'round,pad=0.25',
-                'facecolor': 'white',
+                'boxstyle': 'round,pad=0.55',
+                'facecolor': '#eef6fc',
                 'edgecolor': 'none',
-                'alpha': 0.88,
             },
             zorder=8,
         )
@@ -3170,9 +3315,10 @@ class MagnetometerReader:
             f"X/Y projection, {self.image_size}px, trail {self.trail_length}, Z mode {self.z_close_mode}",
             transform=ax6.transAxes,
             va='top',
-            fontsize=8,
-            # Fix 9: white bbox clears old text during blit
-            bbox={'facecolor': 'white', 'edgecolor': 'none', 'pad': 0},
+            fontsize=7,
+            color='#98989d',
+            # Fix 9: opaque bbox clears old text during blit
+            bbox={'facecolor': '#ffffff', 'edgecolor': 'none', 'pad': 0},
         )
         if self.classifier is None:
             self.latest_prediction_text = self.classifier_unloaded_prediction_text()
@@ -3184,6 +3330,60 @@ class MagnetometerReader:
 
         # tight_layout once at init, not per-frame
         plt.tight_layout()
+
+        # Rounded white cards behind the panels (clean view): the figure keeps
+        # the gray backdrop and each panel floats on its own card, macOS
+        # style. Cards render below the axes, so blitting is unaffected.
+        card_legend = card_ax5 = card_ax6 = None
+        _card_pads = (0.010, 0.010, 0.016, 0.055)  # left, right, bottom, top(title)
+
+        def _card_bounds(rect, extra_left=0.0):
+            pad_l, pad_r, pad_b, pad_t = _card_pads
+            x0, y0, w, h = rect
+            # All cards share one bottom edge, so the three columns read as
+            # equal-height panels and the status/caption texts below the axes
+            # still sit on white.
+            y_bot = min(y0 - pad_b, 0.035)
+            return (x0 - pad_l - extra_left, y_bot,
+                    w + pad_l + pad_r + extra_left, y0 + h + pad_t - y_bot)
+
+        if self.clean_view:
+            from matplotlib.patches import FancyBboxPatch
+            _fig_w, _fig_h = fig.get_size_inches()
+
+            def _panel_card(ax, extra_left=0.0):
+                pos = ax.get_position()
+                card = FancyBboxPatch(
+                    (0, 0), 1, 1,
+                    # pad=0: the default 0.3 pad is in FIGURE-fraction units
+                    # here and would balloon each card over the whole window.
+                    boxstyle='round,pad=0,rounding_size=0.012',
+                    mutation_aspect=float(_fig_w) / float(_fig_h),
+                    transform=fig.transFigure,
+                    facecolor='#ffffff', edgecolor='#d9e6f2',
+                    linewidth=1.0, zorder=-2, clip_on=False)
+                card.set_bounds(*_card_bounds(
+                    (pos.x0, pos.y0, pos.width, pos.height), extra_left))
+                fig.add_artist(card)
+                return card
+
+            card_legend = _panel_card(ax_legend)
+            card_ax5 = _panel_card(ax5)
+            card_ax6 = _panel_card(ax6, extra_left=0.022)
+
+            # Soft clouds peeking out from behind the cards (sky theme).
+            from matplotlib.patches import Circle as _Cloud
+            def _fig_cloud(cx, cy, size, alpha=0.9):
+                for dx, dy, r in [(-1.6, 0.0, 1.0), (-0.4, 0.55, 1.3),
+                                  (0.9, 0.25, 1.05), (2.0, -0.1, 0.75),
+                                  (0.2, -0.3, 1.15)]:
+                    fig.add_artist(_Cloud(
+                        (cx + dx * size, cy + dy * size), r * size,
+                        transform=fig.transFigure, facecolor='#ffffff',
+                        edgecolor='none', alpha=alpha, zorder=-3))
+            _fig_cloud(0.315, 0.975, 0.016, alpha=0.95)
+            _fig_cloud(0.86, 0.99, 0.02, alpha=0.92)
+            _fig_cloud(0.04, 0.018, 0.018, alpha=0.92)
 
         # Magnet gyroscope inset — built after tight_layout (fixed position),
         # starts hidden and is shown only while teleoperating.
@@ -3240,6 +3440,16 @@ class MagnetometerReader:
             'gyro_artists': gyro_artists,
             'ax5_default_pos': _ax5_default_pos,
             'ax5_teleop_pos': [_teleop_left, 0.12, _teleop_width, 0.80],
+            'card_legend': card_legend,
+            'card_ax6': card_ax6,
+            'card_ax5': card_ax5,
+            'card_ax5_default_bounds': _card_bounds(
+                (_ax5_default_pos.x0, _ax5_default_pos.y0,
+                 _ax5_default_pos.width, _ax5_default_pos.height)),
+            'card_ax5_teleop_bounds': _card_bounds(
+                [_teleop_left, 0.12, _teleop_width, 0.80]),
+            'cursor': cursor_artist,
+            'teleop_decor': teleop_decor,
         }
         self._teleop_ui_active = False
 
@@ -3250,7 +3460,7 @@ class MagnetometerReader:
             axis_labels.extend([''] * (display_count - len(axis_labels)))
             if axis_labels != current_classifier_axis_labels:
                 ax6.set_yticks(y_positions)
-                ax6.set_yticklabels(axis_labels, fontsize=8)
+                ax6.set_yticklabels(axis_labels, fontsize=10, fontweight='bold', color='#1d1d1f')
                 fig.canvas.draw()
                 try:
                     ani._blit_cache.clear()
@@ -3376,6 +3586,17 @@ class MagnetometerReader:
                 )
                 if teleop_mode:
                     self.teleop_trail.append((now, float(pose_x[-1]), float(pose_y[-1])))
+                    # Bank the cursor plane into the direction of travel.
+                    if self._cursor_last_xy is not None:
+                        dx = float(pose_x[-1]) - self._cursor_last_xy[0]
+                        dy = float(pose_y[-1]) - self._cursor_last_xy[1]
+                        if dx * dx + dy * dy > (0.004 * self.projection_extent) ** 2:
+                            heading = float(np.arctan2(dy, dx))
+                            if abs(heading - self._cursor_heading) > 0.06:
+                                self._cursor_heading = heading
+                                cursor_artist.set_paths(
+                                    [self._plane_path_for_heading(heading)])
+                self._cursor_last_xy = (float(pose_x[-1]), float(pose_y[-1]))
             else:
                 cursor_artist.set_offsets(np.empty((0, 2)))
                 self.app_controller.update_cursor(999.0, 999.0, now)
@@ -3560,10 +3781,10 @@ class MagnetometerReader:
 
                 for bar in prob_bars:
                     bar.set_width(0.0)
-                    bar.set_color('#e5e5ea')
+                    bar.set_color('#d1d1d6')
                 for bar, index in zip(prob_bars, display_indices):
                     bar.set_width(float(probabilities[index]))
-                    bar.set_color('#0a84ff' if index == top_two[0] and probabilities[index] > 0.0 else '#e5e5ea')
+                    bar.set_color('#0a84ff' if index == top_two[0] and probabilities[index] > 0.0 else '#d1d1d6')
 
             if self.app_controller.mode.value == 'signs':
                 prediction_text = "Prediction: signs need shape recognizer"
@@ -3575,7 +3796,7 @@ class MagnetometerReader:
                 )
                 for bar in prob_bars:
                     bar.set_width(0.0)
-                    bar.set_color('#e5e5ea')
+                    bar.set_color('#d1d1d6')
             elif self.classifier is not None and self.app_controller.mode.value not in ('letters', 'digits'):
                 prediction_text = f"Prediction: paused ({self.app_controller.mode.value} mode)"
                 runner_up_text = "Runner-up: --"
@@ -3932,7 +4153,7 @@ def main():
     parser.add_argument('--touchpad-magnetic-scale', type=float, default=1e-6,
                        help='Scale factor for synthetic magnetic fields in touchpad mode (default: 1e-6)')
     parser.add_argument('--touchpad-magnetic-calibration', type=str, default=None,
-                       help='Calibration JSON from calibrate_touchpad_magnetics.py for touchpad synthetic magnetics')
+                       help='Calibration JSON from tools/calibrate_touchpad_magnetics.py for touchpad synthetic magnetics')
     parser.add_argument('--touchpad-speed-log', type=str, default=None,
                        help='Optional CSV path for touchpad speed calibration samples')
     parser.add_argument('--touchpad-speed-report-interval', type=float, default=0.0,
@@ -4079,18 +4300,20 @@ def main():
         for arg in sys.argv[1:]
     )
     # Auto-tuned ink thresholds: high enough that a relaxed move toward a
-    # button does not register as ink (only deliberate, quicker writing
-    # strokes do), while still catching normal writing speeds. Override with
-    # an explicit --writing-min-velocity; the live "v:" readout in the info
-    # panel shows your actual speeds for tuning.
+    # button does not register as ink (only deliberate writing strokes do),
+    # while comfortable for normal writing speeds. These only START a stroke —
+    # the hysteresis in writing_sample_mask keeps an ongoing stroke inking
+    # down to ~30% of this, so curves and corners can be drawn slowly.
+    # Override with an explicit --writing-min-velocity; the live "v:" readout
+    # in the info panel shows your actual speeds for tuning.
     if (
         args.input_source == 'touchpad'
         and args.touchpad_ink_mode == 'velocity'
         and not writing_min_velocity_was_explicit
     ):
-        args.writing_min_velocity = 0.10
-    if args.input_source == 'serial' and not writing_min_velocity_was_explicit:
         args.writing_min_velocity = 0.06
+    if args.input_source == 'serial' and not writing_min_velocity_was_explicit:
+        args.writing_min_velocity = 0.035
     display_window_was_explicit = any(
         arg == '--display-window' or arg.startswith('--display-window=')
         for arg in sys.argv[1:]

@@ -211,8 +211,12 @@ class ColmagDrawNode:
         self.height_ee_min = float(rospy.get_param('~height_ee_min', 0.12))
         self.height_ee_max = float(rospy.get_param('~height_ee_max', 0.55))
 
-        self.update_rate    = float(rospy.get_param('~update_rate', 15.0))
-        self.command_time   = float(rospy.get_param('~command_time', 0.12))
+        self.update_rate    = float(rospy.get_param('~update_rate', 30.0))
+        self.command_time   = float(rospy.get_param('~command_time', 0.10))
+        # Low-pass on the cursor target (first-order time constant, seconds).
+        # Smooths pointer jitter and direction flips before they reach IK; the
+        # velocity continuity below then carries the smoothness into the spline.
+        self.target_tau     = float(rospy.get_param('~target_smoothing_tau', 0.08))
         self.max_joint_step = float(rospy.get_param('~max_joint_step', 0.05))
         self.max_reach_error = float(rospy.get_param('~max_reach_error', 0.005))
         self.start_enabled  = bool(rospy.get_param('~start_enabled', False))
@@ -280,6 +284,16 @@ class ColmagDrawNode:
         self.traj_client = None
         self.traj_pub = None
         self._q_sent = None
+        # Velocity continuity for streamed segments: each trajectory point
+        # carries the (filtered) joint velocity instead of 0, so the controller
+        # splines THROUGH the waypoints rather than braking to a stop at each
+        # one — that stop-start cycle is what made streaming sound and feel
+        # rougher than the long gesture trajectories.
+        self._desired_filt = None
+        self._qd_filt = np.zeros(7)
+        # While a take-over approach trajectory plays (see
+        # _takeover_approach), streaming ticks stay suspended until this time.
+        self._stream_hold_until = 0.0
         self._grip_clients = None
         self._grip_closed = False
         # Return the arm to the neutral home pose whenever teleop is exited
@@ -380,9 +394,49 @@ class ColmagDrawNode:
         self.q_cmd = _HOME.copy()
         self.p_target = _fk(self.q_cmd)[:3, 3].copy()
         self._q_sent = None
+        self._desired_filt = None
+        self._qd_filt = np.zeros(7)
         self.pen_yaw = 0.0
         self._rotate_layer_ref_yaw = 0.0
         rospy.loginfo('Teleop exit: homing the arm (%.1fs).', duration)
+
+    def _needs_takeover_approach(self):
+        """True when the arm's current posture cannot be followed directly.
+
+        Taking over mid-gesture (e.g. Teleop pressed during the wave) leaves
+        q_cmd at a pose whose wrist orientation is far from the frozen pen
+        orientation, often near the workspace edge — from that seed the plane
+        IK never converges and the tick would hold forever (observed live:
+        'IK residual 5.3 mm — holding' loop after enabling mid-wave)."""
+        T = _fk(self.q_cmd)
+        ori_gap = float(np.linalg.norm(_ori_error(T[:3, :3], self.R_pen)))
+        margin = 0.10
+        outside = bool(np.any(T[:3, 3] < self.box_lo - margin)
+                       or np.any(T[:3, 3] > self.box_hi + margin))
+        return ori_gap > 0.35 or outside
+
+    def _takeover_approach(self, duration=2.5):
+        """One smooth trajectory to the plane-ready pose before following
+        starts; streaming ticks stay suspended while it plays."""
+        if self.traj_client is None:
+            return
+        goal = FollowJointTrajectoryGoal()
+        goal.trajectory.joint_names = list(self.joint_names)
+        pt = JointTrajectoryPoint()
+        pt.positions = self.q_ready.tolist()
+        pt.velocities = [0.0] * len(self.joint_names)
+        pt.time_from_start = rospy.Duration(duration)
+        goal.trajectory.points = [pt]
+        goal.trajectory.header.stamp = rospy.Time.now()
+        self.traj_client.send_goal(goal)
+        self.q_cmd = self.q_ready.copy()
+        self.p_target = _fk(self.q_cmd)[:3, 3].copy()
+        self._q_sent = None
+        self._desired_filt = None
+        self._qd_filt = np.zeros(7)
+        self._stream_hold_until = rospy.get_time() + duration + 0.5
+        rospy.logwarn('Teleop take-over from a gesture pose — moving to the '
+                      'ready pose (%.1fs) before following starts.', duration)
 
     def _publish_active(self):
         pub = getattr(self, '_active_pub', None)
@@ -399,6 +453,9 @@ class ColmagDrawNode:
             if self.latest_joints is not None:
                 self.q_cmd = self.latest_joints.copy()
                 self.p_target = _fk(self.q_cmd)[:3, 3].copy()
+                self._desired_filt = None
+                self._qd_filt = np.zeros(7)
+                self._stream_hold_until = 0.0
             elif not self.dry_run:
                 rospy.logwarn('Cannot enable teleop (%s): no joint state received '
                               'on %s yet — is the arm running?',
@@ -409,6 +466,11 @@ class ColmagDrawNode:
                 self.traj_client.cancel_all_goals()
             self._lift_paused = False
             rospy.logwarn('TELEOP ENABLED (%s) — the arm now follows the cursor.', source)
+            if not self.dry_run and self._needs_takeover_approach():
+                # Wait a beat so the cancel above has landed at the controller
+                # (same race as home-on-exit), then run the approach.
+                time.sleep(0.3)
+                self._takeover_approach()
         elif not enabled and self.enabled:
             # Order matters: stop the streaming ticks FIRST (enabled=False),
             # then halt/cancel, then wait a beat so the empty-trajectory stop
@@ -650,6 +712,10 @@ class ColmagDrawNode:
         if self.latest_pose is None or not self.enabled:
             return
 
+        # Take-over approach still playing: let it finish undisturbed.
+        if rospy.get_time() < self._stream_hold_until:
+            return
+
         if self._lift_gate_paused(self.latest_pose):
             return
 
@@ -670,6 +736,13 @@ class ColmagDrawNode:
         # AND makes the take-over after enable a slow approach instead of a
         # lunge when cursor and arm start far apart.
         desired = self._desired_point(self.latest_pose)
+        if self.target_tau > 0.0:
+            dt = 1.0 / self.update_rate
+            alpha = dt / (self.target_tau + dt)
+            if self._desired_filt is None:
+                self._desired_filt = desired.copy()
+            self._desired_filt += alpha * (desired - self._desired_filt)
+            desired = self._desired_filt
         delta = desired - self.p_target
         dist = float(np.linalg.norm(delta))
         max_step = self.max_lin_speed / self.update_rate
@@ -693,6 +766,11 @@ class ColmagDrawNode:
         step = np.clip(q_new - self.q_cmd, -self.max_joint_step, self.max_joint_step)
         self.q_cmd = self.q_cmd + step
 
+        # Filtered joint velocity for the trajectory point. The low-pass keeps
+        # it continuous across ticks and lets it decay to ~0 as the target
+        # filter/glide converge, so the final segment still ends at rest.
+        self._qd_filt += 0.5 * (step * self.update_rate - self._qd_filt)
+
         if self.dry_run:
             rospy.loginfo_throttle(0.5, '[dry] target %s | IK err %.2f mm',
                                    np.round(target, 3), err * 1000)
@@ -712,7 +790,7 @@ class ColmagDrawNode:
         traj.joint_names = list(self.joint_names)
         pt = JointTrajectoryPoint()
         pt.positions = self.q_cmd.tolist()
-        pt.velocities = [0.0] * 7
+        pt.velocities = self._qd_filt.tolist()
         pt.time_from_start = rospy.Duration(self.command_time)
         traj.points = [pt]
         traj.header.stamp = rospy.Time.now()
