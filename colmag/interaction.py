@@ -64,20 +64,21 @@ class VirtualJoystick:
         )
 
     @classmethod
-    def teleop(cls, extent):
+    def teleop(cls, extent, include_layer=True):
         """Taskbar layout used while teleoperating: a row of buttons along the
         top strip so the rest of the canvas stays a clean teleop area. 'Draw'
         exits back to letter mode; the 'cmd:' buttons publish their command
         verbatim without changing the app mode."""
         radius = extent * 0.10
         bar_y = extent * 0.84
-        return cls(
-            [
-                VirtualButton('Draw', -extent * 0.60, bar_y, radius, 'mode:letters'),
-                VirtualButton('Gripper', 0.0, bar_y, radius, 'cmd:gripper:toggle'),
-                VirtualButton('Layer', extent * 0.60, bar_y, radius, 'cmd:plane:toggle'),
-            ]
-        )
+        buttons = [
+            VirtualButton('Draw', -extent * 0.60, bar_y, radius, 'mode:letters'),
+            VirtualButton('Gripper', 0.0, bar_y, radius, 'cmd:gripper:toggle'),
+        ]
+        if include_layer:
+            buttons.append(VirtualButton(
+                'Layer', extent * 0.60, bar_y, radius, 'cmd:plane:toggle'))
+        return cls(buttons)
 
     def button_at(self, cursor_x, cursor_y):
         for button in self.buttons:

@@ -79,6 +79,24 @@ def test_height_filter_follows_real_motion_smoothly():
     assert 0.050 < moved < 0.070
 
 
+def test_height_filter_resets_when_lift_gate_resumes():
+    node = ColmagDrawNode.__new__(ColmagDrawNode)
+    node.lift_gate_z = 0.150
+    node.lift_reengage_z = 0.140
+    node._lift_paused = True
+    node.height_sensor_min = 0.007
+    node.height_sensor_max = 0.150
+    node._height_filtered_m = 0.120
+    node._desired_filt = np.array([0.45, 0.0, 0.50])
+    node.latest_joints = None
+
+    paused = node._lift_gate_paused(SimpleNamespace(z=0.007))
+
+    assert paused is False
+    assert math.isclose(node._height_filtered_m, 0.007)
+    assert node._desired_filt is None
+
+
 if __name__ == '__main__':
     tests = [value for name, value in sorted(globals().items())
              if name.startswith('test_') and callable(value)]

@@ -32,6 +32,7 @@ class InterfaceCommandTests(unittest.TestCase):
         self.assertIn('--input-source serial', command)
         self.assertIn("--port '/dev/serial/by-id/my sensor'", command)
         self.assertIn('--clean --writing-max-z 0.05', command)
+        self.assertNotIn('--enable-magnet-twist', command)
 
     def test_magnetometer_command_requires_serial_port(self):
         with self.assertRaisesRegex(ValueError, 'serial port'):

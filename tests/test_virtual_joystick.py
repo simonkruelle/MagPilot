@@ -61,6 +61,12 @@ def test_symbols_are_not_in_default_buttons():
     assert controller.mode == InputMode.MENU
 
 
+def test_real_magnet_taskbar_has_no_layer_button():
+    joystick = VirtualJoystick.teleop(extent=0.05, include_layer=False)
+
+    assert [button.name for button in joystick.buttons] == ['Draw', 'Gripper']
+
+
 def test_reset_button_keeps_classification_mode():
     joystick, controller = make_controller()
     controller.mode = InputMode.LETTERS
@@ -108,6 +114,7 @@ def test_moving_away_resets_dwell():
 def main():
     test_mode_buttons()
     test_symbols_are_not_in_default_buttons()
+    test_real_magnet_taskbar_has_no_layer_button()
     test_reset_button_keeps_classification_mode()
     test_choice_buttons_keep_classification_mode()
     test_moving_away_resets_dwell()

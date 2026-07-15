@@ -306,6 +306,7 @@ class MagnetometerReader:
         writing_max_velocity=None,
         writing_min_closeness=None,
         writing_max_z=None,
+        enable_magnet_twist=False,
         joystick_dwell_seconds=1.5,
         letter_labels='letters',
         digit_labels='digits',
@@ -532,6 +533,9 @@ class MagnetometerReader:
         self.writing_max_velocity = writing_max_velocity
         self.writing_min_closeness = writing_min_closeness
         self.writing_max_z = writing_max_z
+        # Temporarily opt-in while isolating the observed real-arm wrist
+        # oscillation. The raw tilt/twist visualizer remains active either way.
+        self.magnet_twist_control_enabled = bool(enable_magnet_twist)
         # Speed-gate hysteresis: min_velocity only STARTS a stroke; once inking,
         # keep inking down to min_velocity * this factor. Slow corners and curve
         # apexes stay connected instead of breaking the letter into fragments,
@@ -545,8 +549,11 @@ class MagnetometerReader:
         self.writing_edge_speed_factor = 4.0
         self.clean_view = clean_view
         self.joystick = VirtualJoystick.default(self.projection_extent)
-        # Taskbar layout shown while teleoperating (Draw = exit, Gripper, Layer).
-        self.teleop_joystick = VirtualJoystick.teleop(self.projection_extent)
+        # The real 3D magnet stays in XYZ control; only the 2D touchpad needs
+        # the alternate Layer modes.
+        self.teleop_joystick = VirtualJoystick.teleop(
+            self.projection_extent,
+            include_layer=self.input_source != 'serial')
         self.app_controller = AppController(
             self.joystick,
             dwell_seconds=joystick_dwell_seconds,
@@ -3112,11 +3119,19 @@ class MagnetometerReader:
         if self.ros_bridge is None:
             return
         now = time.monotonic()
-        robot_phi = self._filtered_robot_twist_phi(phi, theta, now)
         commands = self._magnet_control_decisions(
-            theta, robot_phi, now, twist_enabled=False)
-        commands.extend(self._robot_twist_target_commands(
-            robot_phi, theta, now))
+            theta, phi, now, twist_enabled=False)
+        if self.magnet_twist_control_enabled:
+            robot_phi = self._filtered_robot_twist_phi(phi, theta, now)
+            commands.extend(self._robot_twist_target_commands(
+                robot_phi, theta, now))
+        else:
+            self._magnet_robot_phi_filtered = None
+            self._magnet_robot_phi_filter_at = None
+            self._magnet_robot_phi_reference = None
+            self._magnet_robot_target_deg = 0.0
+            self._magnet_robot_target_sent_deg = 0.0
+            self._magnet_robot_target_at = None
         for cmd in commands:
             self.ros_bridge.publish_command(cmd)
 
@@ -3142,7 +3157,8 @@ class MagnetometerReader:
     def _sync_teleop_ui(self):
         """Swap the interface between classify mode and teleop mode.
 
-        Teleop: buttons move to a top taskbar (Draw = exit, Gripper, Layer),
+        Teleop: buttons move to a top taskbar (Draw, Gripper, plus Layer for
+        the 2D touchpad),
         the legend + classifier panels hide, and the canvas expands into a
         large clean teleoperation screen. Classify: original 3-panel layout.
         Runs every frame but only does work when the mode actually flips
@@ -4424,6 +4440,8 @@ def main():
                        help='Optional normalized Z closeness gate for board/contact mode, 0..1 (default: disabled for air-writing)')
     parser.add_argument('--writing-max-z', type=float, default=None,
                        help='Do not draw when |pose_z| exceeds this value in meters (e.g. 0.05 = 5 cm); useful to ignore magnet when held far from sensor')
+    parser.add_argument('--enable-magnet-twist', action='store_true',
+                       help='Enable real-magnet wrist control (temporarily disabled by default while diagnosing oscillation)')
     parser.add_argument('--clean', action='store_true',
                        help='Clean view: show only the drawing canvas + classifier panel (hides raw sensor graphs)')
     parser.add_argument('--full-view', action='store_true',
@@ -4554,6 +4572,8 @@ def main():
     print(f"Input Source: {args.input_source}")
     if args.input_source == 'serial':
         print(f"Serial Port: {args.port or 'prompt/autodetect'}")
+        print("Robot Twist Control: {}".format(
+            'ENABLED' if args.enable_magnet_twist else 'DISABLED (diagnostic)'))
     print(f"Plotting Sensor: {args.sensor}")
     print(f"Baudrate: {args.baudrate}")
     csv_was_explicit = any(
@@ -4659,6 +4679,7 @@ def main():
         writing_max_velocity=args.writing_max_velocity,
         writing_min_closeness=args.writing_min_closeness,
         writing_max_z=args.writing_max_z,
+        enable_magnet_twist=args.enable_magnet_twist,
         joystick_dwell_seconds=args.joystick_dwell_seconds,
         letter_labels=args.letter_labels,
         digit_labels=args.digit_labels,

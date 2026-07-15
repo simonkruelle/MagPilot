@@ -113,11 +113,14 @@ bails out instantly and the arm returns to neutral.
 - **Motion** — damped least-squares IK streamed at 30 Hz with
   velocity-continuous trajectory points: the controller splines *through*
   the waypoints instead of braking at each one, so following is smooth. Robot
-  wrist control folds phi to ±90°, applies a 350 ms low-pass and 0.6 gain, then
-  sends rate-limited absolute targets with a 3° deadband. The tilt/twist
-  visualizer continues to show the raw full-angle measurement. Robot height
+  wrist control is temporarily disabled by default while diagnosing physical
+  oscillation; `--enable-magnet-twist` restores its folded, filtered and
+  rate-limited absolute targets. The tilt/twist visualizer always shows the raw
+  full-angle measurement. Robot height
   control separately uses a 1 mm noise gate and 350 ms low-pass before the
   nonlinear workspace mapping, without delaying the UI gauge.
+  Real-magnet MagPilot stays in the XYZ layer so an accidental taskbar dwell
+  cannot disconnect magnet height from end-effector height.
 - **Arbitration** — a latched ownership topic coordinates the gesture node
   and the teleop node; startup homing, mid-motion take-over and exit homing
   are all handled gracefully. The interface also latches MagPilot enable state,

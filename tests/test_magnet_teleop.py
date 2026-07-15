@@ -36,6 +36,7 @@ def _reader():
     r.magnet_twist_control_gain = 0.60
     r.magnet_twist_command_deadband_deg = 3.0
     r.magnet_twist_max_rate_deg_s = 30.0
+    r.magnet_twist_control_enabled = True
     r._magnet_grip_closed = False
     r._magnet_grip_pending = None
     r._magnet_twist_ref_phi = None
@@ -188,6 +189,33 @@ def test_real_sample_updates_normalized_angles_and_height_without_ros():
     assert abs(r._last_real_theta - 90.0) < 1e-9
     assert abs(r._last_real_phi - 90.0) < 1e-9
     assert abs(r._last_real_height_m - 0.07) < 1e-9
+
+
+def test_real_twist_can_be_disabled_without_disabling_gripper():
+    class Bridge:
+        def __init__(self):
+            self.commands = []
+
+        def publish_command(self, command):
+            self.commands.append(command)
+
+    r = _reader()
+    r.input_source = 'serial'
+    r.ros_bridge = Bridge()
+    r.magnet_twist_control_enabled = False
+    r._magnet_grip_closed = True
+    r._magnet_grip_pending = (False, 0.0)
+    r._last_real_theta = 0.0
+    r._last_real_phi = 0.0
+    r._last_real_height_m = 0.007
+
+    r.update_magnet_teleop_controls(2.0, 0.0, 0.0, height_m=0.017)
+
+    assert not any(command.startswith('rotate:')
+                   for command in r.ros_bridge.commands)
+    assert r.ros_bridge.commands == ['gripper:open']
+    assert r._last_real_phi == 90.0
+    assert r._magnet_robot_phi_filtered is None
 
 
 def test_physical_pose_data_corrects_height_without_mutating_raw_pose():

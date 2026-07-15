@@ -727,6 +727,9 @@ class ColmagDrawNode:
         if self._lift_paused:
             if z <= self.lift_reengage_z:
                 self._lift_paused = False
+                self._height_filtered_m = float(np.clip(
+                    z, self.height_sensor_min, self.height_sensor_max))
+                self._desired_filt = None
                 if self.latest_joints is not None:
                     self.q_cmd = self.latest_joints.copy()
                     self.p_target = _fk(self.q_cmd)[:3, 3].copy()
