@@ -6,6 +6,7 @@
   <arg name="port"     default=""       doc="Serial port (auto-detect if empty)"/>
   <arg name="baudrate" default="921600" doc="Serial baud rate"/>
   <arg name="verbose"  default="false"  doc="Log every packet"/>
+  <arg name="height_sensor_bias" default="0.010" doc="Bias subtracted from raw magnet height (m)"/>
 
   <node pkg="colmag_ros"
         type="colmag_node.py"
@@ -14,5 +15,6 @@
     <param name="port"     value="$(arg port)"/>
     <param name="baudrate" value="$(arg baudrate)"/>
     <param name="verbose"  value="$(arg verbose)"/>
+    <param name="height_sensor_bias" value="$(arg height_sensor_bias)"/>
   </node>
 </launch>

@@ -37,6 +37,8 @@ from colmag.control_mapping import (
     MAGNET_HEIGHT_GAIN,
     MAGNET_HEIGHT_MAX_M,
     MAGNET_HEIGHT_MIN_M,
+    MAGNET_HEIGHT_SENSOR_BIAS_M,
+    calibrated_magnet_height,
     fold_robot_twist_degrees,
     magnet_angles_degrees,
     map_magnet_height,
@@ -424,12 +426,19 @@ class MagnetometerReader:
         self.magnet_gripper_hold_s    = 0.30   # must sustain past a threshold before firing
         self.magnet_rotate_step_deg   = 15.0   # twist this far ⇒ one wrist-rotate step
         self.magnet_twist_min_tilt_deg = 10.0  # azimuth is singular near upright
-        self.magnet_twist_filter_tau_s = 0.20   # robot-only low-pass; visualizer stays raw
+        self.magnet_twist_filter_tau_s = 0.35   # robot-only low-pass; visualizer stays raw
+        self.magnet_twist_control_gain = 0.60
+        self.magnet_twist_command_deadband_deg = 3.0
+        self.magnet_twist_max_rate_deg_s = 30.0
         self._magnet_grip_closed   = False
         self._magnet_grip_pending  = None      # (target_bool, since_monotonic)
         self._magnet_twist_ref_phi = None       # reference azimuth for twist accumulation
         self._magnet_robot_phi_filtered = None
         self._magnet_robot_phi_filter_at = None
+        self._magnet_robot_phi_reference = None
+        self._magnet_robot_target_deg = 0.0
+        self._magnet_robot_target_sent_deg = 0.0
+        self._magnet_robot_target_at = None
 
         # ── Simulated magnet orientation (touchpad gyroscope) ──────────────────
         # The trackpad has no real dipole, so the numpad drives a simulated
@@ -447,6 +456,7 @@ class MagnetometerReader:
         self.magnet_height_min_m = MAGNET_HEIGHT_MIN_M
         self.magnet_height_cutoff_m = MAGNET_HEIGHT_MAX_M
         self.magnet_height_gain = MAGNET_HEIGHT_GAIN
+        self.magnet_height_sensor_bias_m = MAGNET_HEIGHT_SENSOR_BIAS_M
         self.sim_magnet_height_m = self.magnet_height_cutoff_m  # start "up" (default)
         self.sim_magnet_height_step = 0.005    # 0.5 cm per scroll notch
         self.ee_height_min_m = EE_HEIGHT_MIN_M
@@ -1310,6 +1320,14 @@ class MagnetometerReader:
 
         return mag_data, pose_data
 
+    def physical_pose_data(self, pose_data):
+        """Return a pose copy with raw sensor Z corrected to physical height."""
+        corrected = list(pose_data)
+        corrected[2] = calibrated_magnet_height(
+            corrected[2], self.magnet_height_sensor_bias_m,
+            self.magnet_height_min_m)
+        return corrected
+
     def print_packet_summary(self, mag_data, pose_data):
         """Print one decoded packet. Intended for debugging, not normal real-time use."""
         print(f"\n{'='*60}")
@@ -1392,7 +1410,9 @@ class MagnetometerReader:
                                             self.csv_writer.writerow(row_data)
 
                                         if self.ros_bridge:
-                                            self.ros_bridge.publish_sensor(mag_data, pose_data)
+                                            self.ros_bridge.publish_sensor(
+                                                mag_data,
+                                                self.physical_pose_data(pose_data))
 
                                         self.packet_count += 1
 
@@ -1644,6 +1664,13 @@ class MagnetometerReader:
         pose_x = np.array([row[-6] for row in rows], dtype=float)
         pose_y = np.array([row[-5] for row in rows], dtype=float)
         pose_z = np.array([row[-4] for row in rows], dtype=float)
+        if self.input_source == 'serial':
+            pose_z = np.array([
+                calibrated_magnet_height(
+                    value, self.magnet_height_sensor_bias_m,
+                    self.magnet_height_min_m)
+                for value in pose_z
+            ], dtype=float)
         if include_timestamps:
             return pose_x, pose_y, pose_z, self.rows_to_seconds(rows)
         return pose_x, pose_y, pose_z
@@ -2717,7 +2744,8 @@ class MagnetometerReader:
                 label_artist.set_text(label_text)
                 self._cached_button_texts[button.name] = label_text
 
-    def _magnet_control_decisions(self, theta_deg, phi_deg, now):
+    def _magnet_control_decisions(self, theta_deg, phi_deg, now,
+                                  twist_enabled=True):
         """Decide teleop commands from magnet tilt/twist for one sample.
 
         Pure w.r.t. ROS (no publishing) so it can be unit-tested: it only mutates
@@ -2746,6 +2774,9 @@ class MagnetometerReader:
             self._magnet_grip_closed = want
             self._magnet_grip_pending = None
             cmds.append('gripper:close' if want else 'gripper:open')
+
+        if not twist_enabled:
+            return cmds
 
         # Phi is undefined while the dipole is nearly upright. Resetting the
         # reference prevents a jump when the magnet leaves the singular cone.
@@ -2793,6 +2824,42 @@ class MagnetometerReader:
         self._magnet_robot_phi_filtered = float(filtered)
         self._magnet_robot_phi_filter_at = float(now)
         return float(filtered)
+
+    def _robot_twist_target_commands(self, filtered_phi_deg, theta_deg, now):
+        """Return absolute, rate-limited wrist targets for the real sensor."""
+        stale = (self._magnet_robot_target_at is None
+                 or now <= self._magnet_robot_target_at
+                 or now - self._magnet_robot_target_at > 0.75)
+        if theta_deg < self.magnet_twist_min_tilt_deg:
+            self._magnet_robot_phi_reference = None
+            self._magnet_robot_target_deg = 0.0
+            self._magnet_robot_target_sent_deg = 0.0
+            self._magnet_robot_target_at = None
+            return []
+        if self._magnet_robot_phi_reference is None or stale:
+            self._magnet_robot_phi_reference = float(filtered_phi_deg)
+            self._magnet_robot_target_deg = 0.0
+            self._magnet_robot_target_sent_deg = 0.0
+            self._magnet_robot_target_at = float(now)
+            return ['rotate:reference']
+
+        relative = fold_robot_twist_degrees(
+            filtered_phi_deg - self._magnet_robot_phi_reference)
+        desired = self.magnet_twist_control_gain * relative
+        dt = now - self._magnet_robot_target_at
+        max_delta = self.magnet_twist_max_rate_deg_s * dt
+        delta = float(np.clip(
+            desired - self._magnet_robot_target_deg, -max_delta, max_delta))
+        self._magnet_robot_target_deg += delta
+        self._magnet_robot_target_at = float(now)
+
+        target_change = abs(
+            self._magnet_robot_target_deg
+            - self._magnet_robot_target_sent_deg)
+        if target_change < self.magnet_twist_command_deadband_deg:
+            return []
+        self._magnet_robot_target_sent_deg = self._magnet_robot_target_deg
+        return ['rotate:set:{:.2f}'.format(self._magnet_robot_target_deg)]
 
     def _step_sim_magnet(self, dtheta=0.0, dphi=0.0, reset=False):
         """Nudge the simulated magnet orientation (touchpad numpad control)."""
@@ -3003,7 +3070,9 @@ class MagnetometerReader:
         try:
             theta, phi = magnet_angles_degrees(mx, my, mz)
             if height_m is not None and np.isfinite(float(height_m)):
-                self._last_real_height_m = abs(float(height_m))
+                self._last_real_height_m = calibrated_magnet_height(
+                    height_m, self.magnet_height_sensor_bias_m,
+                    self.magnet_height_min_m)
         except (ValueError, TypeError):
             return
         self._last_real_theta, self._last_real_phi = theta, phi   # raw gyro display
@@ -3011,7 +3080,11 @@ class MagnetometerReader:
             return
         now = time.monotonic()
         robot_phi = self._filtered_robot_twist_phi(phi, theta, now)
-        for cmd in self._magnet_control_decisions(theta, robot_phi, now):
+        commands = self._magnet_control_decisions(
+            theta, robot_phi, now, twist_enabled=False)
+        commands.extend(self._robot_twist_target_commands(
+            robot_phi, theta, now))
+        for cmd in commands:
             self.ros_bridge.publish_command(cmd)
 
     def _set_canvas_aspect(self, ax, teleop_active):

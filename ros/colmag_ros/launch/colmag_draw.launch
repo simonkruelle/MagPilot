@@ -29,6 +29,7 @@
   <arg name="input"          default="touchpad" doc="Gesture input: 'touchpad' (run magnetometer_reader.py separately) or 'magnetometer' (serial sensor node)"/>
   <arg name="port"           default=""       doc="Serial port (magnetometer input only)"/>
   <arg name="baudrate"       default="921600" doc="Serial baud rate (magnetometer input only)"/>
+  <arg name="height_sensor_bias" default="0.010" doc="Bias subtracted from raw magnet height (m)"/>
   <arg name="dry_run"        default="true"   doc="Draw node: log targets/IK residuals but do not move"/>
   <arg name="arm_id"         default="fr3"    doc="Joint prefix '&lt;arm_id&gt;_joint1..7'"/>
   <arg name="arm_controller" default="effort_joint_trajectory_controller" doc="JointTrajectoryController to stream to (Gazebo default; use position_joint_trajectory_controller on the real FR3)"/>
@@ -51,6 +52,8 @@
   <arg name="height_sensor_min" default="0.007" doc="Minimum magnet height over sensors (m), including board offset"/>
   <arg name="height_sensor_max" default="0.150" doc="Magnet height mapped to the workspace top (m)"/>
   <arg name="height_gain"       default="2.0"   doc="Saturating gain that reduces sensitivity at uncertain high distances"/>
+  <arg name="height_smoothing_tau" default="0.35" doc="Robot-only magnet height low-pass time constant (s)"/>
+  <arg name="height_noise_deadband" default="0.001" doc="Robot-only ignored height noise band (m)"/>
   <arg name="height_ee_min"     default="0.121" doc="Minimum flange target z (m), approximately 1 mm fingertip clearance"/>
   <arg name="height_ee_max"     default="0.680" doc="Maximum flange target z (m)"/>
   <arg name="lift_gate_z"       default="0.150" doc="Pause teleop following above this measured magnet height (m)"/>
@@ -65,6 +68,7 @@
         if="$(eval input == 'magnetometer')">
     <param name="port"     value="$(arg port)"/>
     <param name="baudrate" value="$(arg baudrate)"/>
+    <param name="height_sensor_bias" value="$(arg height_sensor_bias)"/>
   </node>
 
   <!-- Cartesian draw / teleop node. -->
@@ -88,6 +92,8 @@
     <param name="height_sensor_min" value="$(arg height_sensor_min)"/>
     <param name="height_sensor_max" value="$(arg height_sensor_max)"/>
     <param name="height_gain"       value="$(arg height_gain)"/>
+    <param name="height_smoothing_tau" value="$(arg height_smoothing_tau)"/>
+    <param name="height_noise_deadband" value="$(arg height_noise_deadband)"/>
     <param name="height_ee_min"     value="$(arg height_ee_min)"/>
     <param name="height_ee_max"     value="$(arg height_ee_max)"/>
     <param name="lift_gate_z"     value="$(arg lift_gate_z)"/>

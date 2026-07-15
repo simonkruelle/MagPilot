@@ -34,6 +34,7 @@
   <arg name="port"         default=""       doc="Serial port (auto-detect if empty; input:=magnetometer only)"/>
   <arg name="baudrate"     default="921600" doc="Serial baud rate (input:=magnetometer only)"/>
   <arg name="verbose"      default="false"  doc="Log every packet from sensor_node"/>
+  <arg name="height_sensor_bias" default="0.010" doc="Bias subtracted from raw magnet height (m)"/>
   <arg name="run_robot"       default="true"   doc="Start the robot node"/>
   <arg name="dry_run"         default="true"   doc="Robot node: log only, do not move"/>
   <arg name="arm_id"          default="fr3"    doc="Robot node: joint prefix '&lt;arm_id&gt;_joint1..7' (fr3 or panda)"/>
@@ -53,6 +54,7 @@
     <param name="port"     value="$(arg port)"/>
     <param name="baudrate" value="$(arg baudrate)"/>
     <param name="verbose"  value="$(arg verbose)"/>
+    <param name="height_sensor_bias" value="$(arg height_sensor_bias)"/>
   </node>
 
   <!-- ── 2. Classifier node — swap this to use your own model ────────────── -->

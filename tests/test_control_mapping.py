@@ -14,6 +14,7 @@ from colmag.control_mapping import (
     EE_HEIGHT_MIN_M,
     MAGNET_HEIGHT_MAX_M,
     MAGNET_HEIGHT_MIN_M,
+    calibrated_magnet_height,
     fold_robot_twist_degrees,
     magnet_angles_degrees,
     map_magnet_height,
@@ -31,6 +32,12 @@ def test_robot_twist_fold_is_continuous_across_180_boundary():
     assert math.isclose(fold_robot_twist_degrees(-179.0), -1.0)
     assert math.isclose(fold_robot_twist_degrees(100.0), 80.0)
     assert math.isclose(fold_robot_twist_degrees(-100.0), -80.0)
+
+
+def test_height_bias_maps_measured_board_contact_to_seven_mm():
+    assert math.isclose(calibrated_magnet_height(0.017), 0.007)
+    assert math.isclose(calibrated_magnet_height(-0.017), 0.007)
+    assert math.isclose(calibrated_magnet_height(0.080), 0.070)
 
 
 def test_height_endpoints_include_board_and_workspace_limits():

@@ -31,12 +31,21 @@ def _reader():
     r.magnet_gripper_hold_s = 0.30
     r.magnet_rotate_step_deg = 70.0
     r.magnet_twist_min_tilt_deg = 10.0
-    r.magnet_twist_filter_tau_s = 0.20
+    r.magnet_twist_filter_tau_s = 0.35
+    r.magnet_twist_control_gain = 0.60
+    r.magnet_twist_command_deadband_deg = 3.0
+    r.magnet_twist_max_rate_deg_s = 30.0
     r._magnet_grip_closed = False
     r._magnet_grip_pending = None
     r._magnet_twist_ref_phi = None
     r._magnet_robot_phi_filtered = None
     r._magnet_robot_phi_filter_at = None
+    r._magnet_robot_phi_reference = None
+    r._magnet_robot_target_deg = 0.0
+    r._magnet_robot_target_sent_deg = 0.0
+    r._magnet_robot_target_at = None
+    r.magnet_height_sensor_bias_m = 0.010
+    r.magnet_height_min_m = 0.007
     return r
 
 
@@ -113,6 +122,26 @@ def test_robot_twist_filter_resets_inside_singular_cone():
     assert r._filtered_robot_twist_phi(30.0, 40.0, 0.04) == 30.0
 
 
+def test_stationary_twist_noise_does_not_send_rotation_targets():
+    r = _reader()
+    commands = r._robot_twist_target_commands(0.0, 40.0, 0.00)
+    for index, phi in enumerate((4.0, -4.0, 3.0, -3.0, 2.0, -2.0), 1):
+        commands.extend(r._robot_twist_target_commands(
+            phi, 40.0, index * 0.05))
+
+    assert commands == ['rotate:reference']
+
+
+def test_real_twist_uses_rate_limited_absolute_targets():
+    r = _reader()
+    assert r._robot_twist_target_commands(
+        0.0, 40.0, 0.00) == ['rotate:reference']
+    command = r._robot_twist_target_commands(30.0, 40.0, 0.10)
+
+    assert command == ['rotate:set:3.00']
+    assert not any(item in ('rotate:cw', 'rotate:ccw') for item in command)
+
+
 def test_serial_magpilot_uses_full_flight_deck_aspect():
     class Axis:
         def __init__(self):
@@ -157,7 +186,17 @@ def test_real_sample_updates_normalized_angles_and_height_without_ros():
 
     assert abs(r._last_real_theta - 90.0) < 1e-9
     assert abs(r._last_real_phi - 90.0) < 1e-9
-    assert abs(r._last_real_height_m - 0.08) < 1e-9
+    assert abs(r._last_real_height_m - 0.07) < 1e-9
+
+
+def test_physical_pose_data_corrects_height_without_mutating_raw_pose():
+    r = _reader()
+    raw = [0.01, -0.02, 0.017, 0.0, 0.0, 1.0]
+
+    physical = r.physical_pose_data(raw)
+
+    assert raw[2] == 0.017
+    assert math.isclose(physical[2], 0.007)
 
 
 def test_real_visualizer_keeps_raw_phi_while_robot_uses_folded_phi():

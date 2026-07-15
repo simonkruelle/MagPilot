@@ -103,15 +103,21 @@ bails out instantly and the arm returns to neutral.
 ## Under the hood
 
 - **Sensing** — 48-channel magnetometer grid (218-byte packets @ 921600 baud);
-  the dipole model recovers position + orientation (θ = tilt, φ = twist).
+  the dipole model recovers position + orientation (θ = tilt, φ = twist). A
+  configurable 10 mm sensor bias maps the observed 17 mm board-contact reading
+  to the physical 7 mm board height for display and robot control; CSV data
+  remains raw.
 - **Recognition** — strokes are anti-aliased into a 64 px canvas with a
   velocity-hysteresis ink gate (slow corners stay connected) and classified
   by an OCR backend.
 - **Motion** — damped least-squares IK streamed at 30 Hz with
   velocity-continuous trajectory points: the controller splines *through*
   the waypoints instead of braking at each one, so following is smooth. Robot
-  wrist control folds phi to ±90° and applies a 200 ms low-pass filter; the
-  tilt/twist visualizer continues to show the raw full-angle measurement.
+  wrist control folds phi to ±90°, applies a 350 ms low-pass and 0.6 gain, then
+  sends rate-limited absolute targets with a 3° deadband. The tilt/twist
+  visualizer continues to show the raw full-angle measurement. Robot height
+  control separately uses a 1 mm noise gate and 350 ms low-pass before the
+  nonlinear workspace mapping, without delaying the UI gauge.
 - **Arbitration** — a latched ownership topic coordinates the gesture node
   and the teleop node; startup homing, mid-motion take-over and exit homing
   are all handled gracefully.

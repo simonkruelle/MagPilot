@@ -6,6 +6,7 @@ import math
 MAGNET_HEIGHT_MIN_M = 0.007
 MAGNET_HEIGHT_MAX_M = 0.150
 MAGNET_HEIGHT_GAIN = 2.0
+MAGNET_HEIGHT_SENSOR_BIAS_M = 0.010
 
 # The IK target is the flange. With the hand mounted, approximately 0.120 m of
 # flange height puts the fingertips at ground level; retain 1 mm clearance.
@@ -37,6 +38,15 @@ def fold_robot_twist_degrees(phi_deg):
     if abs(phi) > 90.0:
         phi = math.copysign(180.0 - abs(phi), phi)
     return phi
+
+
+def calibrated_magnet_height(
+        raw_height_m,
+        sensor_bias_m=MAGNET_HEIGHT_SENSOR_BIAS_M,
+        minimum_m=MAGNET_HEIGHT_MIN_M):
+    """Convert the sensor's biased Z estimate to physical height over sensors."""
+    height = abs(float(raw_height_m)) - float(sensor_bias_m)
+    return max(float(minimum_m), height)
 
 
 def normalized_height_fraction(

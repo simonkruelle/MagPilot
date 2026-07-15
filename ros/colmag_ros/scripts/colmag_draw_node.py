@@ -27,6 +27,8 @@ Mode switching (via /colmag/command, i.e. the touchpad UI buttons)
     (Letters/Digits/Signs buttons)                        -> following DISABLED
   - 'gripper:toggle' / 'gripper:open' / 'gripper:close'
     (Shift+G in the touchpad UI)                          -> franka_gripper action
+  - 'rotate:reference' / 'rotate:set:<degrees>'           -> absolute magnet
+    twist target relative to the captured wrist angle
   - 'plane:toggle' / 'layer:next' (Shift+V / Layer button) -> cycle through
     horizontal (x/y), vertical (y/z), and rotate-wrist. Coordinates not owned by
     the active layer keep their last value, so the layers together position and
@@ -223,6 +225,10 @@ class ColmagDrawNode:
             '~height_sensor_max', MAGNET_HEIGHT_MAX_M))
         self.height_gain = float(rospy.get_param(
             '~height_gain', MAGNET_HEIGHT_GAIN))
+        self.height_smoothing_tau = max(0.0, float(rospy.get_param(
+            '~height_smoothing_tau', 0.35)))
+        self.height_noise_deadband = abs(float(rospy.get_param(
+            '~height_noise_deadband', 0.001)))
         self.height_ee_min = float(rospy.get_param(
             '~height_ee_min', EE_HEIGHT_MIN_M))
         self.height_ee_max = float(rospy.get_param(
@@ -286,6 +292,7 @@ class ColmagDrawNode:
         # every 180 deg) while keeping joint 7 well inside its limits.
         self.R_pen0 = self.R_pen.copy()
         self.pen_yaw = 0.0
+        self._magnet_twist_base_yaw = self.pen_yaw
         self.rotate_step = np.radians(float(rospy.get_param('~rotate_step_deg', 5.0)))
         self.max_pen_yaw = np.radians(float(rospy.get_param('~max_rotate_deg', 92.0)))
         # Smooth hold-to-rotate: while 'rotate:hold:*' keep-alives are fresh,
@@ -315,6 +322,7 @@ class ColmagDrawNode:
         # one — that stop-start cycle is what made streaming sound and feel
         # rougher than the long gesture trajectories.
         self._desired_filt = None
+        self._height_filtered_m = None
         self._qd_filt = np.zeros(7)
         # While a take-over approach trajectory plays (see
         # _takeover_approach), streaming ticks stay suspended until this time.
@@ -420,8 +428,11 @@ class ColmagDrawNode:
         self.p_target = _fk(self.q_cmd)[:3, 3].copy()
         self._q_sent = None
         self._desired_filt = None
+        self._height_filtered_m = None
         self._qd_filt = np.zeros(7)
         self.pen_yaw = 0.0
+        self.R_pen = self.R_pen0.copy()
+        self._magnet_twist_base_yaw = self.pen_yaw
         self._rotate_layer_ref_yaw = 0.0
         rospy.loginfo('Teleop exit: homing the arm (%.1fs).', duration)
 
@@ -458,6 +469,7 @@ class ColmagDrawNode:
         self.p_target = _fk(self.q_cmd)[:3, 3].copy()
         self._q_sent = None
         self._desired_filt = None
+        self._height_filtered_m = None
         self._qd_filt = np.zeros(7)
         self._stream_hold_until = rospy.get_time() + duration + 0.5
         rospy.logwarn('Teleop take-over from a gesture pose — moving to the '
@@ -479,6 +491,7 @@ class ColmagDrawNode:
                 self.q_cmd = self.latest_joints.copy()
                 self.p_target = _fk(self.q_cmd)[:3, 3].copy()
                 self._desired_filt = None
+                self._height_filtered_m = None
                 self._qd_filt = np.zeros(7)
                 self._stream_hold_until = 0.0
             elif not self.dry_run:
@@ -538,6 +551,19 @@ class ColmagDrawNode:
             self._rot_deadline = rospy.get_time() + 0.4
         elif cmd == 'rotate:stop':
             self._rot_dir = 0
+        elif cmd == 'rotate:reference':
+            self._magnet_twist_base_yaw = self.pen_yaw
+            rospy.loginfo('Magnet twist reference captured at %+.1f deg.',
+                          np.degrees(self.pen_yaw))
+        elif cmd.startswith('rotate:set:'):
+            try:
+                relative_deg = float(cmd.split(':', 2)[2])
+            except (IndexError, ValueError):
+                rospy.logwarn('Invalid magnet twist target "%s".', cmd)
+            else:
+                target = (self._magnet_twist_base_yaw
+                          + np.radians(relative_deg))
+                self._set_pen_yaw(target, quiet=True)
         elif cmd in ('rotate:cw', 'rotate:ccw'):
             # Discrete single-step variant (kept for gesture/scripted use).
             self._rotate_pen(self.rotate_step if cmd == 'rotate:cw' else -self.rotate_step)
@@ -662,6 +688,31 @@ class ColmagDrawNode:
         v = np.clip(pos.y / self.input_extent, -1.0, 1.0)
         return float(u), float(v)
 
+    def _robot_height(self, raw_height_m):
+        """Suppress sensor-height noise before the nonlinear robot mapping."""
+        measured = float(np.clip(
+            abs(float(raw_height_m)),
+            self.height_sensor_min,
+            self.height_sensor_max))
+        if self._height_filtered_m is None:
+            self._height_filtered_m = measured
+            return measured
+
+        error = measured - self._height_filtered_m
+        if abs(error) <= self.height_noise_deadband:
+            return self._height_filtered_m
+
+        # Remove the noise band from real motion so crossing it does not create
+        # a discontinuous target step.
+        error -= np.copysign(self.height_noise_deadband, error)
+        if self.height_smoothing_tau <= 1e-9:
+            alpha = 1.0
+        else:
+            dt = 1.0 / self.update_rate
+            alpha = dt / (self.height_smoothing_tau + dt)
+        self._height_filtered_m += alpha * error
+        return self._height_filtered_m
+
     def _lift_gate_paused(self, pos):
         """Pause following while the magnet/cursor is lifted away from the board."""
         if self.lift_gate_z <= 0.0:
@@ -721,7 +772,7 @@ class ColmagDrawNode:
             # Flange height from magnet height, shared with the UI gauge.
             if self.height_from_magnet:
                 target[2] = map_magnet_height(
-                    pos.z,
+                    self._robot_height(pos.z),
                     self.height_sensor_min,
                     self.height_sensor_max,
                     self.height_ee_min,

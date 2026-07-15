@@ -16,12 +16,20 @@ Usage (inside Docker after catkin build):
 """
 
 import struct
+import sys
 import threading
 import time
 
 import rospy
 from std_msgs.msg import Float64MultiArray
 from geometry_msgs.msg import PoseStamped
+
+sys.path.insert(0, '/colmag')
+from colmag.control_mapping import (  # noqa: E402
+    MAGNET_HEIGHT_MIN_M,
+    MAGNET_HEIGHT_SENSOR_BIAS_M,
+    calibrated_magnet_height,
+)
 
 try:
     import serial
@@ -50,6 +58,8 @@ class ColmagSensorNode:
         self.port     = rospy.get_param('~port', '')
         self.baudrate = rospy.get_param('~baudrate', BAUD_DEFAULT)
         self.verbose  = rospy.get_param('~verbose', False)
+        self.height_sensor_bias = float(rospy.get_param(
+            '~height_sensor_bias', MAGNET_HEIGHT_SENSOR_BIAS_M))
 
         if not self.port:
             self.port = find_serial_port() or ''
@@ -127,9 +137,12 @@ class ColmagSensorNode:
 
     def publish(self, mag_data, pose_data):
         now = rospy.Time.now()
+        pose_data = list(pose_data)
+        pose_data[2] = calibrated_magnet_height(
+            pose_data[2], self.height_sensor_bias, MAGNET_HEIGHT_MIN_M)
 
         msg = Float64MultiArray()
-        msg.data = list(mag_data) + list(pose_data)
+        msg.data = list(mag_data) + pose_data
         self.pub_sensor.publish(msg)
 
         pose_msg = PoseStamped()
