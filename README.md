@@ -112,7 +112,9 @@ bails out instantly and the arm returns to neutral.
   by an OCR backend.
 - **Motion** — damped least-squares IK streamed at 30 Hz with
   velocity-continuous trajectory points: the controller splines *through*
-  the waypoints instead of braking at each one, so following is smooth. Robot
+  the waypoints instead of braking at each one. Cartesian targets pass through
+  a jerk-limited S-curve tracker (0.10 m/s, 0.20 m/s² and 0.80 m/s³ defaults)
+  before IK, preventing abrupt vertical acceleration changes. Robot
   wrist control is temporarily disabled by default while diagnosing physical
   oscillation; `--enable-magnet-twist` restores its folded, filtered and
   rate-limited absolute targets. The tilt/twist visualizer always shows the raw

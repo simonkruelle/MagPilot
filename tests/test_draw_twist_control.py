@@ -14,7 +14,7 @@ for path in (ROOT, SCRIPTS):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from colmag_draw_node import ColmagDrawNode
+from colmag_draw_node import ColmagDrawNode, _s_curve_step
 
 
 def _node(yaw=0.2):
@@ -88,6 +88,9 @@ def test_height_filter_resets_when_lift_gate_resumes():
     node.height_sensor_max = 0.150
     node._height_filtered_m = 0.120
     node._desired_filt = np.array([0.45, 0.0, 0.50])
+    node._cart_velocity = np.array([0.0, 0.0, 0.08])
+    node._cart_acceleration = np.array([0.0, 0.0, 0.20])
+    node._qd_filt = np.ones(7)
     node.latest_joints = None
 
     paused = node._lift_gate_paused(SimpleNamespace(z=0.007))
@@ -95,6 +98,61 @@ def test_height_filter_resets_when_lift_gate_resumes():
     assert paused is False
     assert math.isclose(node._height_filtered_m, 0.007)
     assert node._desired_filt is None
+    assert np.allclose(node._cart_velocity, 0.0)
+    assert np.allclose(node._cart_acceleration, 0.0)
+    assert np.allclose(node._qd_filt, 0.0)
+
+
+def test_s_curve_step_is_monotonic_and_respects_derivative_limits():
+    dt = 1.0 / 30.0
+    position = np.zeros(3)
+    velocity = np.zeros(3)
+    acceleration = np.zeros(3)
+    desired = np.array([0.0, 0.0, 0.10])
+    previous_z = position[2]
+
+    for _ in range(150):
+        previous_acceleration = acceleration.copy()
+        position, velocity, acceleration = _s_curve_step(
+            position, velocity, acceleration, desired, dt,
+            min_duration=0.75, max_speed=0.10,
+            max_acceleration=0.20, max_jerk=0.80)
+
+        jerk = (acceleration - previous_acceleration) / dt
+        assert position[2] >= previous_z - 1e-12
+        assert np.linalg.norm(velocity) <= 0.10 + 1e-12
+        assert np.linalg.norm(acceleration) <= 0.20 + 1e-12
+        assert np.linalg.norm(jerk) <= 0.80 + 1e-12
+        previous_z = position[2]
+
+    assert math.isclose(position[2], 0.10, abs_tol=1e-12)
+    assert np.linalg.norm(velocity) < 0.002
+    assert np.linalg.norm(acceleration) < 0.01
+
+
+def test_s_curve_reverses_height_without_breaking_derivative_limits():
+    dt = 1.0 / 30.0
+    position = np.zeros(3)
+    velocity = np.zeros(3)
+    acceleration = np.zeros(3)
+
+    for index in range(240):
+        desired_z = 0.10 if index < 45 else 0.0
+        previous_acceleration = acceleration.copy()
+        position, velocity, acceleration = _s_curve_step(
+            position, velocity, acceleration,
+            np.array([0.0, 0.0, desired_z]), dt,
+            min_duration=0.75, max_speed=0.10,
+            max_acceleration=0.20, max_jerk=0.80)
+
+        jerk = (acceleration - previous_acceleration) / dt
+        assert np.linalg.norm(velocity) <= 0.10 + 1e-12
+        assert np.linalg.norm(acceleration) <= 0.20 + 1e-12
+        assert np.linalg.norm(jerk) <= 0.80 + 1e-12
+
+    assert math.isclose(position[2], 0.0, abs_tol=1e-12)
+    assert np.allclose(velocity, 0.0)
+    assert np.allclose(acceleration, 0.0)
 
 
 if __name__ == '__main__':

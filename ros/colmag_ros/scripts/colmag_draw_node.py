@@ -47,9 +47,8 @@ SAFETY
     the mapping in Gazebo (Stage 3 style) before ever setting dry_run:=false.
   - Until enabled (Teleop button or /colmag/draw_enable) the arm holds position.
     On disable or shutdown, active goals are cancelled.
-  - The tracked target moves toward the cursor at max_linear_speed (default
-    0.10 m/s) — the tool cannot move faster than this, and enabling teleop far
-    from the cursor produces a slow approach, not a lunge.
+  - A minimum-jerk quintic S-curve bounds Cartesian speed, acceleration and
+    jerk; enabling teleop far from the cursor produces a smooth approach.
   - Each update additionally clamps per-joint change to max_joint_step.
   - IK solutions with residual > max_reach_error are rejected; the target holds
     at the last reachable point instead of drifting through dead zones.
@@ -143,6 +142,83 @@ def _jacobian(q, eps=1e-6):
         dR = (Ti[:3, :3] - R0) @ R0.T
         J[3:, i] = np.array([dR[2, 1], dR[0, 2], dR[1, 0]]) / eps
     return J
+
+
+def _limit_norm(vector, limit):
+    """Return vector with its Euclidean norm limited to a positive bound."""
+    vector = np.asarray(vector, dtype=float)
+    norm = float(np.linalg.norm(vector))
+    if norm <= float(limit) or norm <= 1e-12:
+        return vector.copy()
+    return vector * (float(limit) / norm)
+
+
+def _s_curve_step(position, velocity, acceleration, desired, dt,
+                  min_duration, max_speed, max_acceleration, max_jerk):
+    """Advance one receding-horizon minimum-jerk quintic S-curve step."""
+    position = np.asarray(position, dtype=float)
+    velocity = np.asarray(velocity, dtype=float)
+    acceleration = np.asarray(acceleration, dtype=float)
+    desired = np.asarray(desired, dtype=float)
+    dt = float(dt)
+    distance = float(np.linalg.norm(desired - position))
+    if (distance <= 0.00025
+            and np.linalg.norm(velocity) <= max_acceleration * dt
+            and np.linalg.norm(acceleration) <= max_jerk * dt):
+        return desired.copy(), np.zeros_like(velocity), np.zeros_like(acceleration)
+    duration = max(
+        float(min_duration),
+        1.875 * distance / float(max_speed),
+        np.sqrt(5.8 * distance / float(max_acceleration)),
+        np.cbrt(60.0 * distance / float(max_jerk)))
+
+    def sample(horizon):
+        c0 = position
+        c1 = velocity
+        c2 = 0.5 * acceleration
+        rhs = np.vstack([
+            desired - (c0 + c1 * horizon + c2 * horizon ** 2),
+            -c1 - 2.0 * c2 * horizon,
+            -2.0 * c2,
+        ])
+        matrix = np.array([
+            [horizon ** 3, horizon ** 4, horizon ** 5],
+            [3.0 * horizon ** 2, 4.0 * horizon ** 3,
+             5.0 * horizon ** 4],
+            [6.0 * horizon, 12.0 * horizon ** 2,
+             20.0 * horizon ** 3],
+        ])
+        c3, c4, c5 = np.linalg.solve(matrix, rhs)
+        t = min(dt, horizon)
+        next_position = (c0 + c1 * t + c2 * t ** 2 + c3 * t ** 3
+                         + c4 * t ** 4 + c5 * t ** 5)
+        next_velocity = (c1 + 2.0 * c2 * t + 3.0 * c3 * t ** 2
+                         + 4.0 * c4 * t ** 3 + 5.0 * c5 * t ** 4)
+        next_acceleration = (2.0 * c2 + 6.0 * c3 * t
+                             + 12.0 * c4 * t ** 2
+                             + 20.0 * c5 * t ** 3)
+        start_jerk = 6.0 * c3
+        end_jerk = (6.0 * c3 + 24.0 * c4 * t
+                    + 60.0 * c5 * t ** 2)
+        return (next_position, next_velocity, next_acceleration,
+                max(np.linalg.norm(start_jerk), np.linalg.norm(end_jerk)))
+
+    # Non-zero incoming velocity/acceleration can require a longer horizon than
+    # the rest-to-rest estimates above. Expand it until this first control step
+    # satisfies every derivative bound.
+    for _ in range(12):
+        next_position, next_velocity, next_acceleration, jerk_norm = sample(
+            duration)
+        if (np.linalg.norm(next_velocity) <= max_speed + 1e-12
+                and np.linalg.norm(next_acceleration)
+                <= max_acceleration + 1e-12
+                and jerk_norm <= max_jerk + 1e-12):
+            return next_position, next_velocity, next_acceleration
+        duration *= 1.35
+
+    return (next_position,
+            _limit_norm(next_velocity, max_speed),
+            _limit_norm(next_acceleration, max_acceleration))
 
 
 def _ori_error(R_cur, R_des):
@@ -249,11 +325,21 @@ class ColmagDrawNode:
         self.max_joint_step = float(rospy.get_param('~max_joint_step', 0.05))
         self.max_reach_error = float(rospy.get_param('~max_reach_error', 0.005))
         self.start_enabled  = bool(rospy.get_param('~start_enabled', False))
-        # Cartesian speed cap: the tracked target GLIDES toward the cursor at
-        # this speed instead of jumping. This bounds the arm's tool speed during
-        # normal following and turns the take-over after enabling teleop (arm
-        # far from cursor) into a slow, predictable approach.
+        # Receding-horizon minimum-jerk spline limits. Together these produce
+        # an S-shaped speed profile without changing the position controller.
         self.max_lin_speed  = float(rospy.get_param('~max_linear_speed', 0.10))
+        self.max_lin_acceleration = float(rospy.get_param(
+            '~max_linear_acceleration', 0.20))
+        self.max_lin_jerk = float(rospy.get_param(
+            '~max_linear_jerk', 0.80))
+        self.s_curve_min_duration = float(rospy.get_param(
+            '~s_curve_min_duration', 0.75))
+        if (self.max_lin_speed <= 0.0
+                or self.max_lin_acceleration <= 0.0
+                or self.max_lin_jerk <= 0.0
+                or self.s_curve_min_duration <= 0.0):
+            raise ValueError('S-curve speed, acceleration, jerk and duration '
+                             'parameters must be positive')
         # Real magnet input: lifting the magnet away from the board should pause
         # following so the user can travel to taskbar buttons without dragging
         # the robot. Set lift_gate_z<=0 to disable.
@@ -323,6 +409,8 @@ class ColmagDrawNode:
         # rougher than the long gesture trajectories.
         self._desired_filt = None
         self._height_filtered_m = None
+        self._cart_velocity = np.zeros(3)
+        self._cart_acceleration = np.zeros(3)
         self._qd_filt = np.zeros(7)
         # While a take-over approach trajectory plays (see
         # _takeover_approach), streaming ticks stay suspended until this time.
@@ -360,10 +448,12 @@ class ColmagDrawNode:
                      else 'pause above %.1f cm, resume below %.1f cm'
                      % (100.0 * self.lift_gate_z, 100.0 * self.lift_reengage_z))
         rospy.loginfo('colmag_draw_node ready | mode=%s | layer=%s | workspace %.2fx%.2fx%.2f m @ %s | '
-                      'lift_gate=%s | enabled=%s',
+                      'S-curve v/a/j=%.2f/%.2f/%.2f | lift_gate=%s | enabled=%s',
                       'DRY RUN' if self.dry_run else 'LIVE (%s)' % self.controller,
                       self.plane_mode, 2 * self.half_d, 2 * self.half_w,
                       2 * self.half_h, np.round(self.center, 2),
+                      self.max_lin_speed, self.max_lin_acceleration,
+                      self.max_lin_jerk,
                       lift_text, self.enabled)
         if not self.dry_run and not self.enabled:
             rospy.loginfo('Press the Teleop button in the touchpad UI (or publish '
@@ -429,6 +519,8 @@ class ColmagDrawNode:
         self._q_sent = None
         self._desired_filt = None
         self._height_filtered_m = None
+        self._cart_velocity = np.zeros(3)
+        self._cart_acceleration = np.zeros(3)
         self._qd_filt = np.zeros(7)
         self.pen_yaw = 0.0
         self.R_pen = self.R_pen0.copy()
@@ -470,6 +562,8 @@ class ColmagDrawNode:
         self._q_sent = None
         self._desired_filt = None
         self._height_filtered_m = None
+        self._cart_velocity = np.zeros(3)
+        self._cart_acceleration = np.zeros(3)
         self._qd_filt = np.zeros(7)
         self._stream_hold_until = rospy.get_time() + duration + 0.5
         rospy.logwarn('Teleop take-over from a gesture pose — moving to the '
@@ -492,6 +586,8 @@ class ColmagDrawNode:
                 self.p_target = _fk(self.q_cmd)[:3, 3].copy()
                 self._desired_filt = None
                 self._height_filtered_m = None
+                self._cart_velocity = np.zeros(3)
+                self._cart_acceleration = np.zeros(3)
                 self._qd_filt = np.zeros(7)
                 self._stream_hold_until = 0.0
             elif not self.dry_run:
@@ -730,6 +826,9 @@ class ColmagDrawNode:
                 self._height_filtered_m = float(np.clip(
                     z, self.height_sensor_min, self.height_sensor_max))
                 self._desired_filt = None
+                self._cart_velocity = np.zeros(3)
+                self._cart_acceleration = np.zeros(3)
+                self._qd_filt = np.zeros(7)
                 if self.latest_joints is not None:
                     self.q_cmd = self.latest_joints.copy()
                     self.p_target = _fk(self.q_cmd)[:3, 3].copy()
@@ -741,6 +840,9 @@ class ColmagDrawNode:
 
         if z > self.lift_gate_z:
             self._lift_paused = True
+            self._cart_velocity = np.zeros(3)
+            self._cart_acceleration = np.zeros(3)
+            self._qd_filt = np.zeros(7)
             self._halt_streaming()
             rospy.loginfo('Lift gate paused: |pose.z| %.1f cm > %.1f cm; arm holds.',
                           100.0 * z, 100.0 * self.lift_gate_z)
@@ -814,10 +916,8 @@ class ColmagDrawNode:
                                  quiet=True)
         self._update_rotate_layer_from_cursor(self.latest_pose)
 
-        # Glide the tracked target toward the cursor point at max_linear_speed
-        # rather than teleporting it. This caps the tool speed while following
-        # AND makes the take-over after enable a slow approach instead of a
-        # lunge when cursor and arm start far apart.
+        # Smooth the measured destination, then advance the position/velocity/
+        # acceleration state along a bounded minimum-jerk quintic spline.
         desired = self._desired_point(self.latest_pose)
         if self.target_tau > 0.0:
             dt = 1.0 / self.update_rate
@@ -826,12 +926,17 @@ class ColmagDrawNode:
                 self._desired_filt = desired.copy()
             self._desired_filt += alpha * (desired - self._desired_filt)
             desired = self._desired_filt
-        delta = desired - self.p_target
-        dist = float(np.linalg.norm(delta))
-        max_step = self.max_lin_speed / self.update_rate
-        if dist > max_step:
-            delta *= max_step / dist
-        target = self.p_target + delta
+        target, next_cart_velocity, next_cart_acceleration = _s_curve_step(
+            self.p_target,
+            self._cart_velocity,
+            self._cart_acceleration,
+            desired,
+            1.0 / self.update_rate,
+            self.s_curve_min_duration,
+            self.max_lin_speed,
+            self.max_lin_acceleration,
+            self.max_lin_jerk)
+        target = np.clip(target, self.box_lo, self.box_hi)
 
         q_new, err = _solve_ik(target, self.R_pen, self.q_cmd)
 
@@ -844,6 +949,8 @@ class ColmagDrawNode:
                                    self.max_reach_error * 1000)
             return
         self.p_target = target
+        self._cart_velocity = next_cart_velocity
+        self._cart_acceleration = next_cart_acceleration
 
         # Clamp per-joint change so no single update can command a big jump.
         step = np.clip(q_new - self.q_cmd, -self.max_joint_step, self.max_joint_step)

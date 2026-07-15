@@ -49,6 +49,9 @@
   <arg name="plane_height"   default="0.56"   doc="Workspace box Z extent (m); default box bottom puts fingertips at ~base height for pick-ups"/>
   <arg name="max_joint_step" default="0.05"   doc="Max per-joint change per update (rad); secondary safety clamp"/>
   <arg name="max_linear_speed" default="0.10" doc="Cartesian tool-speed cap (m/s); the target glides toward the cursor at this rate"/>
+  <arg name="max_linear_acceleration" default="0.20" doc="Cartesian S-curve acceleration limit (m/s^2)"/>
+  <arg name="max_linear_jerk" default="0.80" doc="Cartesian S-curve jerk limit (m/s^3)"/>
+  <arg name="s_curve_min_duration" default="0.75" doc="Minimum S-curve planning horizon (s)"/>
   <arg name="height_sensor_min" default="0.007" doc="Minimum magnet height over sensors (m), including board offset"/>
   <arg name="height_sensor_max" default="0.150" doc="Magnet height mapped to the workspace top (m)"/>
   <arg name="height_gain"       default="2.0"   doc="Saturating gain that reduces sensitivity at uncertain high distances"/>
@@ -89,6 +92,9 @@
     <param name="plane_center_z"  value="$(arg plane_center_z)"/>
     <param name="max_joint_step"  value="$(arg max_joint_step)"/>
     <param name="max_linear_speed" value="$(arg max_linear_speed)"/>
+    <param name="max_linear_acceleration" value="$(arg max_linear_acceleration)"/>
+    <param name="max_linear_jerk" value="$(arg max_linear_jerk)"/>
+    <param name="s_curve_min_duration" value="$(arg s_curve_min_duration)"/>
     <param name="height_sensor_min" value="$(arg height_sensor_min)"/>
     <param name="height_sensor_max" value="$(arg height_sensor_max)"/>
     <param name="height_gain"       value="$(arg height_gain)"/>
