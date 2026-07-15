@@ -7,7 +7,7 @@
 set -e
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-CONTAINER_NAME="colmag_ros"
+CONTAINER_NAME="colmag_simon"
 IMAGE_NAME="colmag_ros:noetic"
 ROS_WS="/catkin_ws"
 DOCKER_PLATFORM="${DOCKER_PLATFORM:-}"

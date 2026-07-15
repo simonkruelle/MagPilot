@@ -6,7 +6,7 @@ Run on the HOST (not inside Docker):
 
     python3 colmag_launcher.py
 
-Buttons start each pipeline stage inside the `colmag_ros` Docker container via
+Buttons start each pipeline stage inside the `colmag_simon` Docker container via
 `docker exec`, so you never need more than this window plus the GUIs that the
 stages open themselves (Gazebo, the trackpad interface).
 
@@ -28,7 +28,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import messagebox
 
-CONTAINER = 'colmag_ros'
+CONTAINER = 'colmag_simon'
 REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 ROS_SETUP = ('source /opt/ros/noetic/setup.bash; '
              '[ -f /catkin_ws/devel/setup.bash ] && source /catkin_ws/devel/setup.bash; ')

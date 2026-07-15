@@ -2,7 +2,7 @@
 # Reconnects to the running colmag ROS container.
 # Usage: bash ros/docker_connect.sh
 
-CONTAINER_NAME="colmag_ros"
+CONTAINER_NAME="colmag_simon"
 
 if ! docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
     echo "Container '$CONTAINER_NAME' does not exist. Create it first:"
