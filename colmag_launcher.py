@@ -107,9 +107,9 @@ def build_interface_command(input_source, serial_port=''):
 def resolve_serial_port(selection, available_ports):
     selection = selection.strip()
     if not selection:
-        raise ValueError('Enter a serial port number or device path.')
+        raise ValueError('Enter a port number from the Interface log.')
     if not selection.isdigit():
-        return selection
+        raise ValueError('The port selection must be a number from the log.')
 
     index = int(selection) - 1
     if not available_ports:
@@ -122,6 +122,20 @@ def resolve_serial_port(selection, available_ports):
             'Port number {} is not available. Detected ports:\n{}'.format(
                 selection, choices))
     return available_ports[index]
+
+
+def format_serial_port_list(ports):
+    if not ports:
+        return ('Available serial ports inside {}:\n'
+                '  (none found)\n\n'
+                'Reconnect the sensor, then select magnetometer again.'.format(
+                    CONTAINER))
+    choices = '\n'.join(
+        '  {}: {}'.format(index + 1, port)
+        for index, port in enumerate(ports))
+    return ('Available serial ports inside {}:\n{}\n\n'
+            'Enter a port number in the port # field, then click Start.'.format(
+                CONTAINER, choices))
 
 
 def container_serial_ports():
@@ -353,9 +367,10 @@ class Launcher(tk.Tk):
                   [('sim', 'Simulation'), ('real', 'Real robot')],
                   command=self._mode_changed, width=280, height=32,
                   font=self.f_body, parent_bg=BG).pack(side='left')
-        self.sensor_port = tk.StringVar(
-            value=os.environ.get('COLMAG_SERIAL_DEVICE', '/dev/ttyACM0'))
-        tk.Label(mode_row, text='sensor port', bg=BG, fg=SUBTLE,
+        self._detected_serial_ports = []
+        self._interface_notice = None
+        self.sensor_port = tk.StringVar(value='')
+        tk.Label(mode_row, text='port #', bg=BG, fg=SUBTLE,
                  font=self.f_body).pack(side='left', padx=(20, 8))
         self._sensor_port = RoundEntry(
             mode_row, self.sensor_port, width=112, height=30,
@@ -412,8 +427,10 @@ class Launcher(tk.Tk):
         tk.Label(top, text='Log', bg=CARD, fg=SUBTLE,
                  font=self.f_small).pack(side='left')
         self.log_choice = tk.StringVar(value='interface')
-        Selector(top, self.log_choice, STAGES, width=118, height=26,
-                 font=self.f_small).pack(side='right')
+        self._log_selector = Selector(
+            top, self.log_choice, STAGES, width=118, height=26,
+            font=self.f_small)
+        self._log_selector.pack(side='right')
         Pill(top, 'Copy', self.copy_log, kind='plain', width=64, height=26,
              font=self.f_small).pack(side='right', padx=(0, 8))
         self.log = tk.Text(log_card.inner, height=9, bg='#fbfbfd', fg=TEXT,
@@ -462,9 +479,50 @@ class Launcher(tk.Tk):
                 'README: dry-run first, supervisor present, E-stop reachable.')
 
     def _input_changed(self, *_):
-        state = ('normal' if self.input_src.get() == 'magnetometer'
-                 else 'disabled')
+        magnetometer = self.input_src.get() == 'magnetometer'
+        state = 'normal' if magnetometer else 'disabled'
         self._sensor_port.entry.configure(state=state)
+        if magnetometer:
+            self.sensor_port.set('')
+            self._detected_serial_ports = []
+            self._show_interface_notice('Scanning serial ports inside {}...'.format(
+                CONTAINER))
+            self.after_idle(self.refresh_serial_ports)
+        else:
+            self._interface_notice = None
+
+    def _replace_log(self, text):
+        if (not self.log.tag_ranges('sel')
+                and self.log.get('1.0', 'end-1c') != text):
+            self.log.delete('1.0', 'end')
+            self.log.insert('end', text)
+            self.log.see('end')
+
+    def _show_interface_notice(self, text):
+        self._interface_notice = text
+        self.log_choice.set('interface')
+        self._log_selector._redraw()
+        self._replace_log(text)
+
+    def refresh_serial_ports(self):
+        if self.input_src.get() != 'magnetometer':
+            return
+        if not self._ensure_container():
+            self._show_interface_notice(
+                'Could not start the {} Docker container.'.format(CONTAINER))
+            return
+
+        ports = container_serial_ports()
+        if ports is None:
+            self._detected_serial_ports = []
+            self._show_interface_notice(
+                'Could not list serial ports inside {}.'.format(CONTAINER))
+            return
+
+        self._detected_serial_ports = ports
+        self._show_interface_notice(format_serial_port_list(ports))
+        if ports:
+            self._sensor_port.entry.focus_set()
 
     def _copy_log_selection(self, _=None):
         try:
@@ -556,23 +614,14 @@ class Launcher(tk.Tk):
             if not port:
                 messagebox.showerror(
                     'Magnetometer',
-                    'Enter a detected port number (for example 1) or a device '
-                    'path (for example /dev/ttyUSB0).')
+                    'Enter one of the port numbers shown in the Interface log.')
                 return
-            if port.isdigit():
-                available_ports = container_serial_ports()
-                if available_ports is None:
-                    messagebox.showerror(
-                        'Magnetometer',
-                        'Could not list serial ports inside the {} Docker '
-                        'container.'.format(CONTAINER))
-                    return
-                try:
-                    port = resolve_serial_port(port, available_ports)
-                except ValueError as exc:
-                    messagebox.showerror('Magnetometer', str(exc))
-                    return
-                self.sensor_port.set(port)
+            try:
+                port = resolve_serial_port(
+                    port, self._detected_serial_ports)
+            except ValueError as exc:
+                messagebox.showerror('Magnetometer', str(exc))
+                return
             ok, _ = in_container('test -e {}'.format(shlex.quote(port)))
             if not ok:
                 messagebox.showerror(
@@ -582,7 +631,9 @@ class Launcher(tk.Tk):
                     'with that device mounted.'.format(port, CONTAINER))
                 return
         cmd = build_interface_command(input_source, port)
-        in_container_detached('interface', cmd)
+        started, _ = in_container_detached('interface', cmd)
+        if started:
+            self._interface_notice = None
 
     def stop_all(self):
         in_container('pkill -f roslaunch; pkill -f magnetometer_reader; '
@@ -628,6 +679,9 @@ class Launcher(tk.Tk):
             _, tail = in_container(
                 'tail -n 60 /tmp/colmag_gui_%s.log 2>/dev/null || true'
                 % self.log_choice.get(), timeout=5)
+        if (self.log_choice.get() == 'interface'
+                and self._interface_notice is not None):
+            tail = self._interface_notice
         try:
             self.after(0, self._apply_status, ok, states, tail)
         except tk.TclError:
@@ -639,12 +693,7 @@ class Launcher(tk.Tk):
             value = states.get(tag)
             light.configure(fg=GREEN if value is True
                             else (AMBER if value == 'nowin' else DOT_OFF))
-        log_text = tail or '(no log yet)'
-        if (not self.log.tag_ranges('sel')
-                and self.log.get('1.0', 'end-1c') != log_text):
-            self.log.delete('1.0', 'end')
-            self.log.insert('end', log_text)
-            self.log.see('end')
+        self._replace_log(tail or '(no log yet)')
 
     def _on_close(self):
         self._poll_running = False

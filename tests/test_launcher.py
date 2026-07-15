@@ -10,7 +10,11 @@ if _ROOT not in _sys.path:
 
 import unittest
 
-from colmag_launcher import build_interface_command, resolve_serial_port
+from colmag_launcher import (
+    build_interface_command,
+    format_serial_port_list,
+    resolve_serial_port,
+)
 
 
 class InterfaceCommandTests(unittest.TestCase):
@@ -37,13 +41,20 @@ class InterfaceCommandTests(unittest.TestCase):
             resolve_serial_port('2', ['/dev/ttyUSB0', '/dev/ttyACM0']),
             '/dev/ttyACM0')
 
-    def test_device_path_is_accepted_directly(self):
-        self.assertEqual(
-            resolve_serial_port('/dev/ttyUSB3', []), '/dev/ttyUSB3')
+    def test_port_selection_must_be_a_number(self):
+        with self.assertRaisesRegex(ValueError, 'must be a number'):
+            resolve_serial_port('/dev/ttyUSB3', ['/dev/ttyUSB3'])
 
     def test_invalid_port_number_lists_available_choices(self):
         with self.assertRaisesRegex(ValueError, '1: /dev/ttyUSB0'):
             resolve_serial_port('2', ['/dev/ttyUSB0'])
+
+    def test_port_list_is_numbered_for_the_launcher_log(self):
+        text = format_serial_port_list(['/dev/ttyACM0', '/dev/ttyUSB0'])
+
+        self.assertIn('1: /dev/ttyACM0', text)
+        self.assertIn('2: /dev/ttyUSB0', text)
+        self.assertIn('port # field', text)
 
 
 if __name__ == '__main__':
