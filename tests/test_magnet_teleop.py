@@ -9,6 +9,7 @@ isolation — no ROS, no hardware, no display.
 Run:  python3 test_magnet_teleop.py
 """
 
+import math
 import os as _os, sys as _sys
 _ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 for _p in (_ROOT, _os.path.join(_ROOT, 'tools')):
@@ -30,9 +31,12 @@ def _reader():
     r.magnet_gripper_hold_s = 0.30
     r.magnet_rotate_step_deg = 70.0
     r.magnet_twist_min_tilt_deg = 10.0
+    r.magnet_twist_filter_tau_s = 0.20
     r._magnet_grip_closed = False
     r._magnet_grip_pending = None
     r._magnet_twist_ref_phi = None
+    r._magnet_robot_phi_filtered = None
+    r._magnet_robot_phi_filter_at = None
     return r
 
 
@@ -89,6 +93,58 @@ def test_rotate_is_disabled_inside_upright_singularity():
     assert r._magnet_twist_ref_phi == 120.0
 
 
+def test_robot_twist_filter_smooths_raw_wrap_without_jump():
+    r = _reader()
+    first = r._filtered_robot_twist_phi(179.0, 40.0, 0.00)
+    second = r._filtered_robot_twist_phi(-179.0, 40.0, 0.02)
+
+    assert abs(first - 1.0) < 1e-9
+    assert -1.0 < second < first
+
+
+def test_robot_twist_filter_resets_inside_singular_cone():
+    r = _reader()
+    r._filtered_robot_twist_phi(60.0, 40.0, 0.00)
+    reset = r._filtered_robot_twist_phi(-40.0, 5.0, 0.02)
+
+    assert abs(reset + 40.0) < 1e-9
+    assert r._magnet_robot_phi_filtered is None
+    assert r._magnet_robot_phi_filter_at is None
+    assert r._filtered_robot_twist_phi(30.0, 40.0, 0.04) == 30.0
+
+
+def test_serial_magpilot_uses_full_flight_deck_aspect():
+    class Axis:
+        def __init__(self):
+            self.box_aspect = 'unset'
+            self.aspect = None
+
+        def set_box_aspect(self, value):
+            self.box_aspect = value
+
+        def set_aspect(self, *args, **kwargs):
+            self.aspect = (args, kwargs)
+
+    r = _reader()
+    r.input_source = 'serial'
+    axis = Axis()
+
+    r._set_canvas_aspect(axis, True)
+    assert axis.box_aspect is None
+    assert axis.aspect == (('auto',), {})
+
+    r._set_canvas_aspect(axis, False)
+    assert axis.aspect == (('equal',), {'adjustable': 'box'})
+
+
+def test_magpilot_aircraft_remains_visible_at_edges():
+    r = _reader()
+    r.projection_extent = 0.05
+
+    assert r._teleop_cursor_display_xy(-0.05, 0.05) == (-0.048, 0.048)
+    assert r._teleop_cursor_display_xy(0.0, 0.0) == (0.0, 0.0)
+
+
 def test_real_sample_updates_normalized_angles_and_height_without_ros():
     r = _reader()
     r.input_source = 'serial'
@@ -102,6 +158,29 @@ def test_real_sample_updates_normalized_angles_and_height_without_ros():
     assert abs(r._last_real_theta - 90.0) < 1e-9
     assert abs(r._last_real_phi - 90.0) < 1e-9
     assert abs(r._last_real_height_m - 0.08) < 1e-9
+
+
+def test_real_visualizer_keeps_raw_phi_while_robot_uses_folded_phi():
+    class Bridge:
+        def publish_command(self, command):
+            pass
+
+    r = _reader()
+    r.input_source = 'serial'
+    r.ros_bridge = Bridge()
+    r._last_real_theta = 0.0
+    r._last_real_phi = 0.0
+    r._last_real_height_m = 0.007
+    theta = math.radians(40.0)
+    phi = math.radians(-179.0)
+    mx = math.sin(theta) * math.sin(phi)
+    my = math.sin(theta) * math.cos(phi)
+    mz = math.cos(theta)
+
+    r.update_magnet_teleop_controls(mx, my, mz, height_m=0.08)
+
+    assert abs(r._last_real_phi + 179.0) < 1e-9
+    assert abs(r._magnet_robot_phi_filtered + 1.0) < 1e-9
 
 
 if __name__ == '__main__':

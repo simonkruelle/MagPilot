@@ -37,6 +37,7 @@ from colmag.control_mapping import (
     MAGNET_HEIGHT_GAIN,
     MAGNET_HEIGHT_MAX_M,
     MAGNET_HEIGHT_MIN_M,
+    fold_robot_twist_degrees,
     magnet_angles_degrees,
     map_magnet_height,
     normalized_height_fraction,
@@ -231,9 +232,9 @@ ROBOT_ACTION_LEGEND = (
     ('U', 'stretch up'),
     ('L / R', 'point left / right'),
     ('X', 'home'),
-    (None, 'DIGITS · line positions'),
-    ('1 – 9', 'park at slot 1…9'),
-    ('', 'on a left→right line'),
+    (None, 'DIGITS · cube points'),
+    ('1 – 8', 'eight cube corners'),
+    ('9', 'cube center'),
     ('0', 'home / reset'),
 )
 
@@ -423,9 +424,12 @@ class MagnetometerReader:
         self.magnet_gripper_hold_s    = 0.30   # must sustain past a threshold before firing
         self.magnet_rotate_step_deg   = 15.0   # twist this far ⇒ one wrist-rotate step
         self.magnet_twist_min_tilt_deg = 10.0  # azimuth is singular near upright
+        self.magnet_twist_filter_tau_s = 0.20   # robot-only low-pass; visualizer stays raw
         self._magnet_grip_closed   = False
         self._magnet_grip_pending  = None      # (target_bool, since_monotonic)
         self._magnet_twist_ref_phi = None       # reference azimuth for twist accumulation
+        self._magnet_robot_phi_filtered = None
+        self._magnet_robot_phi_filter_at = None
 
         # ── Simulated magnet orientation (touchpad gyroscope) ──────────────────
         # The trackpad has no real dipole, so the numpad drives a simulated
@@ -2542,17 +2546,21 @@ class MagnetometerReader:
                 edgecolor = '#8e8e93'
                 if button.action.startswith('canvas:'):
                     edgecolor = '#b07a1a'
-                circle = patches.Circle(
-                    (button.x, button.y),
-                    button.radius,
-                    facecolor='#ffffff' if is_teleop else '#f2f2f7',
-                    edgecolor=edgecolor,
-                    linewidth=1.1,
-                    alpha=0.95 if is_teleop else 0.34,
-                    zorder=4,
-                    visible=not is_teleop,
-                )
-                ax.add_patch(circle)
+                if is_teleop:
+                    # Screen-space marker stays circular when the MagPilot
+                    # canvas stretches horizontally to fill the flight deck.
+                    circle = ax.scatter(
+                        [button.x], [button.y], s=1400,
+                        facecolor='#ffffff', edgecolor=edgecolor,
+                        linewidth=1.1, alpha=0.95, zorder=4,
+                        visible=False)
+                else:
+                    circle = patches.Circle(
+                        (button.x, button.y), button.radius,
+                        facecolor='#f2f2f7', edgecolor=edgecolor,
+                        linewidth=1.1, alpha=0.34, zorder=4,
+                        visible=True)
+                    ax.add_patch(circle)
                 label = ax.text(
                     button.x,
                     button.y,
@@ -2759,6 +2767,32 @@ class MagnetometerReader:
         """Latched /colmag/gripper_closed from the draw node — ground truth."""
         self._magnet_grip_closed = bool(closed)
         self._magnet_grip_pending = None
+
+    def _filtered_robot_twist_phi(self, raw_phi_deg, theta_deg, now):
+        """Return folded, low-pass phi for robot commands only."""
+        folded = fold_robot_twist_degrees(raw_phi_deg)
+        if theta_deg < self.magnet_twist_min_tilt_deg:
+            self._magnet_robot_phi_filtered = None
+            self._magnet_robot_phi_filter_at = None
+            return folded
+        previous_at = self._magnet_robot_phi_filter_at
+        reset = (
+            self._magnet_robot_phi_filtered is None
+            or previous_at is None
+            or now <= previous_at
+            or now - previous_at > 0.75
+        )
+        if reset:
+            filtered = folded
+        else:
+            dt = now - previous_at
+            tau = max(0.0, float(self.magnet_twist_filter_tau_s))
+            alpha = 1.0 if tau <= 1e-9 else 1.0 - np.exp(-dt / tau)
+            filtered = self._magnet_robot_phi_filtered + alpha * (
+                folded - self._magnet_robot_phi_filtered)
+        self._magnet_robot_phi_filtered = float(filtered)
+        self._magnet_robot_phi_filter_at = float(now)
+        return float(filtered)
 
     def _step_sim_magnet(self, dtheta=0.0, dphi=0.0, reset=False):
         """Nudge the simulated magnet orientation (touchpad numpad control)."""
@@ -2972,11 +3006,32 @@ class MagnetometerReader:
                 self._last_real_height_m = abs(float(height_m))
         except (ValueError, TypeError):
             return
-        self._last_real_theta, self._last_real_phi = theta, phi   # gyro display
+        self._last_real_theta, self._last_real_phi = theta, phi   # raw gyro display
         if self.ros_bridge is None:
             return
-        for cmd in self._magnet_control_decisions(theta, phi, time.monotonic()):
+        now = time.monotonic()
+        robot_phi = self._filtered_robot_twist_phi(phi, theta, now)
+        for cmd in self._magnet_control_decisions(theta, robot_phi, now):
             self.ros_bridge.publish_command(cmd)
+
+    def _set_canvas_aspect(self, ax, teleop_active):
+        """Fill the flight deck in MagPilot; restore writing aspect on exit."""
+        try:
+            box_aspect = (None if teleop_active or self.input_source != 'touchpad'
+                          else 0.62)
+            ax.set_box_aspect(box_aspect)
+        except (AttributeError, TypeError):
+            pass
+        if teleop_active or self.input_source == 'touchpad':
+            ax.set_aspect('auto')
+        else:
+            ax.set_aspect('equal', adjustable='box')
+
+    def _teleop_cursor_display_xy(self, x, y):
+        """Keep the aircraft fully visible at the flight-deck boundary."""
+        limit = 0.96 * self.projection_extent
+        return (float(np.clip(float(x), -limit, limit)),
+                float(np.clip(float(y), -limit, limit)))
 
     def _sync_teleop_ui(self):
         """Swap the interface between classify mode and teleop mode.
@@ -3053,6 +3108,10 @@ class MagnetometerReader:
             _cursor.set_edgecolor('#ffffff')
 
         ax5 = ui['ax5']
+        # The real-sensor writing view is square, but MagPilot deliberately
+        # fills the expanded flight deck. Keeping equal aspect here confined
+        # the aircraft to a centered square after the layout switched.
+        self._set_canvas_aspect(ax5, active)
         if active:
             ax5.set_position(ui['ax5_teleop_pos'])
             ax5.set_title('MagPilot', fontweight='bold', fontsize=13,
@@ -3616,7 +3675,11 @@ class MagnetometerReader:
             now = time.monotonic()
             interface_event = None
             if len(pose_x) > 0 and np.isfinite(pose_x[-1]) and np.isfinite(pose_y[-1]):
-                cursor_artist.set_offsets([[pose_x[-1], pose_y[-1]]])
+                cursor_xy = ((float(pose_x[-1]), float(pose_y[-1]))
+                             if not teleop_mode else
+                             self._teleop_cursor_display_xy(
+                                 pose_x[-1], pose_y[-1]))
+                cursor_artist.set_offsets([cursor_xy])
                 interface_event = self.app_controller.update_cursor(
                     pose_x[-1],
                     pose_y[-1],

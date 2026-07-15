@@ -26,6 +26,19 @@ def magnet_angles_degrees(mx, my, mz):
     return theta, phi
 
 
+def fold_robot_twist_degrees(phi_deg):
+    """Fold raw azimuth into a continuous -90..90 robot wrist command.
+
+    The magnet visualizer keeps the full -180..180 azimuth. The robot wrist is
+    symmetric over 180 degrees, so folding its control signal prevents the
+    numeric jump when raw phi crosses from +180 to -180 degrees.
+    """
+    phi = (float(phi_deg) + 180.0) % 360.0 - 180.0
+    if abs(phi) > 90.0:
+        phi = math.copysign(180.0 - abs(phi), phi)
+    return phi
+
+
 def normalized_height_fraction(
         height_m,
         sensor_min_m=MAGNET_HEIGHT_MIN_M,

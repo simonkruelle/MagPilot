@@ -109,7 +109,9 @@ bails out instantly and the arm returns to neutral.
   by an OCR backend.
 - **Motion** — damped least-squares IK streamed at 30 Hz with
   velocity-continuous trajectory points: the controller splines *through*
-  the waypoints instead of braking at each one, so following is smooth.
+  the waypoints instead of braking at each one, so following is smooth. Robot
+  wrist control folds phi to ±90° and applies a 200 ms low-pass filter; the
+  tilt/twist visualizer continues to show the raw full-angle measurement.
 - **Arbitration** — a latched ownership topic coordinates the gesture node
   and the teleop node; startup homing, mid-motion take-over and exit homing
   are all handled gracefully.
