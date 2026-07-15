@@ -5,7 +5,7 @@
     colmag_draw_node    teleoperation (cursor-following, gripper, rotation,
                         magnet-height → EE height); homes the arm on teleop exit
     colmag_robot_node   discrete gesture motions (letters → tricks,
-                        digits 1-9 → constant-X line); homes on startup when
+                        digits 1-8 → cube corners, 9 → center); homes on startup when
                         teleop is not active
 
   The two nodes coordinate over the latched /colmag/draw_active topic, so the
@@ -26,6 +26,10 @@
   <arg name="time_scale"     default="2.0"   doc="Gesture motion time multiplier (robot node)"/>
   <arg name="home_on_start"  default="true"  doc="Robot node: home the arm at startup (skipped while teleop is active)"/>
   <arg name="home_on_exit"   default="true"  doc="Draw node: home the arm when exiting teleop"/>
+  <arg name="digit_cube_size" default="0.24" doc="Digit target cube edge length (m)"/>
+  <arg name="digit_cube_center_x" default="0.45" doc="Digit cube center X in the robot base frame (m)"/>
+  <arg name="digit_cube_center_y" default="0.0" doc="Digit cube center Y in the robot base frame (m)"/>
+  <arg name="digit_cube_center_z" default="0.40" doc="Digit cube center Z in the robot base frame (m)"/>
   <arg name="height_sensor_min" default="0.007" doc="Minimum magnet height over sensors (m), including board offset"/>
   <arg name="height_sensor_max" default="0.150" doc="Magnet height mapped to the workspace top (m)"/>
   <arg name="height_gain"       default="2.0"   doc="Saturating height gain; reduces sensitivity near the upper range"/>
@@ -62,6 +66,10 @@
     <param name="arm_controller" value="$(arg arm_controller)"/>
     <param name="time_scale"     value="$(arg time_scale)"/>
     <param name="home_on_start"  value="$(arg home_on_start)"/>
+    <param name="digit_cube_size" value="$(arg digit_cube_size)"/>
+    <param name="digit_cube_center_x" value="$(arg digit_cube_center_x)"/>
+    <param name="digit_cube_center_y" value="$(arg digit_cube_center_y)"/>
+    <param name="digit_cube_center_z" value="$(arg digit_cube_center_z)"/>
   </node>
 
 </launch>

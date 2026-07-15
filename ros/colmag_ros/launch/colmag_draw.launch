@@ -34,6 +34,10 @@
   <arg name="arm_controller" default="effort_joint_trajectory_controller" doc="JointTrajectoryController to stream to (Gazebo default; use position_joint_trajectory_controller on the real FR3)"/>
   <arg name="run_robot"      default="true"   doc="Also start colmag_robot_node so Letters/Digits gestures execute"/>
   <arg name="time_scale"     default="2.0"    doc="Robot node: multiplies gesture waypoint times (see colmag_distributed.launch)"/>
+  <arg name="digit_cube_size" default="0.24" doc="Digit target cube edge length (m)"/>
+  <arg name="digit_cube_center_x" default="0.45" doc="Digit cube center X (m)"/>
+  <arg name="digit_cube_center_y" default="0.0" doc="Digit cube center Y (m)"/>
+  <arg name="digit_cube_center_z" default="0.40" doc="Digit cube center Z (m)"/>
   <arg name="start_enabled"  default="false"  doc="Follow immediately on start (else wait for the Teleop button / /colmag/draw_enable)"/>
   <arg name="plane_orientation" default="horizontal" doc="'horizontal' (tabletop in the air) or 'vertical' (upright canvas)"/>
   <arg name="plane_center_x" default="0.45"   doc="Drawing-plane centre X in the robot base frame (m)"/>
@@ -102,6 +106,10 @@
     <param name="arm_id"          value="$(arg arm_id)"/>
     <param name="arm_controller"  value="$(arg arm_controller)"/>
     <param name="time_scale"      value="$(arg time_scale)"/>
+    <param name="digit_cube_size" value="$(arg digit_cube_size)"/>
+    <param name="digit_cube_center_x" value="$(arg digit_cube_center_x)"/>
+    <param name="digit_cube_center_y" value="$(arg digit_cube_center_y)"/>
+    <param name="digit_cube_center_z" value="$(arg digit_cube_center_z)"/>
   </node>
 
   <!-- rosbridge WebSocket — lets the Mac touchpad UI connect over port 9090. -->

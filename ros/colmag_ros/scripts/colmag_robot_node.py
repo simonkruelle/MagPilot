@@ -43,6 +43,8 @@ Parameters:
                                                                     'celebrate' exceed FR3 joint velocity/acceleration
                                                                     limits and trigger reflex stops on the real arm.
                                                                     2.0 keeps every motion under ~70% of the limits.
+  ~digit_cube_size (float, default 0.24)                          — digit-target cube edge length in meters
+  ~digit_cube_center_{x,y,z} (float, defaults 0.45, 0.0, 0.40)  — cube center in the robot base frame
 
 Usage:
   rosrun colmag_ros colmag_robot_node.py
@@ -52,11 +54,19 @@ Usage:
   rosrun colmag_ros colmag_robot_node.py _dry_run:=false _arm_id:=panda
 """
 
+import sys
 import time
 
 import numpy as np
 import rospy
 from std_msgs.msg import Bool, String, Float64
+
+sys.path.insert(0, '/colmag')
+from colmag.robot_targets import (  # noqa: E402
+    DIGIT_CUBE_CENTER_M,
+    DIGIT_CUBE_EDGE_M,
+    digit_cube_target,
+)
 
 # Actionlib + trajectory messages are only needed to actually drive an arm.
 # Import lazily so the node still runs in dry-run on a light image that has no
@@ -72,7 +82,7 @@ except ImportError:
 
 # ── Minimal FR3/Panda kinematics for Cartesian digit targets ────────────────
 # Mirrored from colmag_draw_node.py (keep in sync). Franka modified-DH (Craig);
-# flange row last. Used only to place digits 1..9 on a constant-X line via IK.
+# flange row last. Used only to place digits 1..9 on a Cartesian cube via IK.
 _DH = [
     (0.0,     0.333, 0.0),
     (0.0,     0.0,  -np.pi / 2),
@@ -175,17 +185,21 @@ class ColmagRobotNode:
 
         self.joint_names = ['{}_joint{}'.format(self.arm_id, i) for i in range(1, 8)]
 
-        # ── Digit test line (constant-X, IK-placed) ───────────────────────────
-        # Digits 1..9 park the arm at nine evenly spaced Y slots at the home X/Z
-        # and pen orientation, so each recognised digit lands at a distinct,
-        # ordered spot on a straight lateral line — easy to tell apart when
-        # checking the digit classifier.
-        self.digit_line_span = float(rospy.get_param('~digit_line_span', 0.22))
+        # ── Digit test cube (IK-placed) ───────────────────────────────────────
+        # Digits 1..8 occupy the corners of a 3D cube; digit 9 occupies its
+        # center. This makes classifier results visibly distinct in x, y and z.
+        self.digit_cube_center = np.array([
+            float(rospy.get_param('~digit_cube_center_x', DIGIT_CUBE_CENTER_M[0])),
+            float(rospy.get_param('~digit_cube_center_y', DIGIT_CUBE_CENTER_M[1])),
+            float(rospy.get_param('~digit_cube_center_z', DIGIT_CUBE_CENTER_M[2])),
+        ])
+        self.digit_cube_size = float(rospy.get_param(
+            '~digit_cube_size', DIGIT_CUBE_EDGE_M))
+        if self.digit_cube_size <= 0.0:
+            raise ValueError('~digit_cube_size must be > 0')
         self.digit_reach_tol = float(rospy.get_param('~digit_reach_tol', 0.03))
         _T_home = _fk(np.array(HOME_POSE, dtype=float))
-        self._pen_R   = _T_home[:3, :3]
-        self._home_x  = float(_T_home[0, 3])   # constant-X plane of the line
-        self._digit_z = float(_T_home[2, 3])   # line height (home height)
+        self._pen_R = _T_home[:3, :3]
 
         # ── Gesture → motion map ──────────────────────────────────────────────
         # Edit this (and the motion methods below) to change the robot's tricks.
@@ -196,7 +210,7 @@ class ColmagRobotNode:
             'U': self._stretch_up,                            # reach tall
             'L': self._point_left,  'R': self._point_right,  # point left / right
         }
-        # Digits 1..9 → nine positions on a constant-X line (classifier test).
+        # Digits 1..8 → cube corners; digit 9 → cube center.
         self._motions.update({
             str(n): (lambda n=n: self._go_to_digit(n)) for n in range(1, 10)
         })
@@ -425,24 +439,18 @@ class ColmagRobotNode:
         self._send_trajectory([(HOME_POSE, 2.5)])
 
     def _go_to_digit(self, n):
-        """Move the end-effector to the n-th slot on a constant-X line (n=1..9).
-
-        Nine evenly spaced Y positions at the home X and Z with the home pen
-        orientation, placed by IK — so each recognised digit parks the arm at a
-        distinct, ordered spot on a straight lateral line, easy to differentiate.
-        """
+        """Move to a cube corner (1..8) or the cube center (9) using IK."""
         n = max(1, min(9, int(round(n))))
-        span = self.digit_line_span
-        # digit 1 → +span (robot's left), digit 9 → -span (right); linear.
-        y = span - 2.0 * span * (n - 1) / 8.0
-        target = np.array([self._home_x, y, self._digit_z])
+        target = np.array(digit_cube_target(
+            n, self.digit_cube_center, self.digit_cube_size))
         q, err = _solve_ik(target, self._pen_R, np.array(HOME_POSE, dtype=float))
         if err > self.digit_reach_tol:
-            rospy.logwarn('Digit %d target y=%+.3f unreachable (IK err %.0f mm) — skipping.',
-                          n, y, err * 1000.0)
+            rospy.logwarn('Digit %d cube target %s unreachable (IK err %.0f mm) — skipping.',
+                          n, np.round(target, 3), err * 1000.0)
             return
-        rospy.loginfo('Digit %d → line slot y=%+.3f m (x=%.2f, z=%.2f), IK err %.1f mm',
-                      n, y, self._home_x, self._digit_z, err * 1000.0)
+        point_name = 'center' if n == 9 else 'corner'
+        rospy.loginfo('Digit %d → cube %s at [%.2f, %.2f, %.2f] m, IK err %.1f mm',
+                      n, point_name, target[0], target[1], target[2], err * 1000.0)
         self._send_trajectory([(list(q), self.move_duration)])
 
     def _wave(self):

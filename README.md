@@ -32,7 +32,7 @@ piece of metal. MagPilot turns them into a complete robot interface:
 
 | ✋ You do | 🤖 The robot does |
 |---|---|
-| ✍️ write `A`…`9` over the board | the mapped action — wave, bow, dab, park at slot *n* |
+| ✍️ write `A`…`9` over the board | the mapped action — wave, bow, dab, or move to cube point *n* |
 | 🕹 glide the magnet around | end-effector follows in real time |
 | ↕️ raise / lower it (0.7–15 cm) | end-effector height follows |
 | 📐 tilt past 55° / back under 25° | gripper opens / closes |
@@ -76,10 +76,10 @@ container from the existing image with hot-plug serial access enabled.
 
 | Letter | Action | Digit | Action |
 |:---:|---|:---:|---|
-| `A` | wave 👋 | `1`–`9` | park at slot 1…9 on a left→right line |
+| `A` | wave 👋 | `1`–`8` | move to the eight corners of a 24 cm cube |
 | `B` | bow 🙇 | `0` / `X` | home / reset |
-| `C` | fist pumps 💪 | | *(nine evenly spaced positions at constant depth —* |
-| `D` | dab 😎 | | *a built-in benchmark for the digit classifier)* |
+| `C` | fist pumps 💪 | `9` | move to the cube center |
+| `D` | dab 😎 | | *a 3D benchmark for the digit classifier* |
 | `U` | stretch up 🙆 | `L` / `R` | point left / right |
 
 **Flight deck** — the live gyroscope shows the magnet's tilt and twist against
@@ -179,7 +179,7 @@ ros/colmag_ros/
   launch/fr3_real.launch         real FR3 connection
   launch/colmag_arm_nodes.launch teleop + gesture nodes together
   scripts/colmag_draw_node.py    MagPilot: cursor→EE, height, twist, gripper
-  scripts/colmag_robot_node.py   gestures: letter tricks, digit line, homing
+  scripts/colmag_robot_node.py   gestures: letter tricks, digit cube, homing
 tests/                      unit + smoke tests (run with python3 tests/…)
 tools/                      calibration, CSV visualizer, logo/screenshot makers
 docs/                       images + guides
