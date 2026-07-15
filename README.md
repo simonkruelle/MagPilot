@@ -61,6 +61,10 @@ serial ports visible inside Docker; enter the matching number in **port #** and
 then start the interface. The robot IP field at the top right remains editable
 in either mode.
 
+If Docker reports that it cannot open a serial port, reconnect the sensor and
+run `COLMAG_SKIP_BUILD=1 bash ros/docker_setup.sh` once to recreate the
+container from the existing image with hot-plug serial access enabled.
+
 ## Two modes, one surface
 
 | ✍️ Writing studio | ✈️ MagPilot flight deck |

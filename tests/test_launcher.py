@@ -14,6 +14,7 @@ from colmag_launcher import (
     build_interface_command,
     format_serial_port_list,
     resolve_serial_port,
+    serial_port_label,
 )
 
 
@@ -47,14 +48,19 @@ class InterfaceCommandTests(unittest.TestCase):
 
     def test_invalid_port_number_lists_available_choices(self):
         with self.assertRaisesRegex(ValueError, '1: /dev/ttyUSB0'):
-            resolve_serial_port('2', ['/dev/ttyUSB0'])
+            resolve_serial_port('2', ['/host/dev/ttyUSB0'])
 
     def test_port_list_is_numbered_for_the_launcher_log(self):
-        text = format_serial_port_list(['/dev/ttyACM0', '/dev/ttyUSB0'])
+        text = format_serial_port_list(
+            ['/host/dev/ttyACM0', '/host/dev/ttyUSB0'])
 
         self.assertIn('1: /dev/ttyACM0', text)
         self.assertIn('2: /dev/ttyUSB0', text)
         self.assertIn('port # field', text)
+
+    def test_host_device_mount_is_hidden_from_display_name(self):
+        self.assertEqual(
+            serial_port_label('/host/dev/ttyACM0'), '/dev/ttyACM0')
 
 
 if __name__ == '__main__':

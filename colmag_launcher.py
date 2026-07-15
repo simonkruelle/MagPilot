@@ -104,6 +104,10 @@ def build_interface_command(input_source, serial_port=''):
     return 'cd /colmag && {}'.format(' '.join(shlex.quote(arg) for arg in args))
 
 
+def serial_port_label(port):
+    return port[5:] if port.startswith('/host/dev/') else port
+
+
 def resolve_serial_port(selection, available_ports):
     selection = selection.strip()
     if not selection:
@@ -116,7 +120,7 @@ def resolve_serial_port(selection, available_ports):
         raise ValueError('No serial ports are visible inside Docker.')
     if index < 0 or index >= len(available_ports):
         choices = '\n'.join(
-            '{}: {}'.format(i + 1, port)
+            '{}: {}'.format(i + 1, serial_port_label(port))
             for i, port in enumerate(available_ports))
         raise ValueError(
             'Port number {} is not available. Detected ports:\n{}'.format(
@@ -131,7 +135,7 @@ def format_serial_port_list(ports):
                 'Reconnect the sensor, then select magnetometer again.'.format(
                     CONTAINER))
     choices = '\n'.join(
-        '  {}: {}'.format(index + 1, port)
+        '  {}: {}'.format(index + 1, serial_port_label(port))
         for index, port in enumerate(ports))
     return ('Available serial ports inside {}:\n{}\n\n'
             'Enter a port number in the port # field, then click Start.'.format(
@@ -139,13 +143,29 @@ def format_serial_port_list(ports):
 
 
 def container_serial_ports():
-    script = ('import serial.tools.list_ports as p; '
-              'print("\\n".join(port.device for port in p.comports()))')
+    script = (
+        'import glob, os, serial.tools.list_ports as p; '
+        'devices=[port.device for port in p.comports()]; '
+        'mapped=[("/host"+device if os.path.exists("/host"+device) else device) '
+        'for device in devices]; '
+        'mapped=glob.glob("/host/dev/ttyACM*")+'
+        'glob.glob("/host/dev/ttyUSB*")+mapped; '
+        'mapped=list(dict.fromkeys(path for path in mapped if os.path.exists(path))); '
+        'print("\\n".join(mapped))')
     ok, output = in_container(
         'python3 -c {}'.format(shlex.quote(script)), timeout=10)
     if not ok:
         return None
     return [line.strip() for line in output.splitlines() if line.strip()]
+
+
+def probe_container_serial_port(port):
+    script = ('import os, sys; '
+              'fd=os.open(sys.argv[1], os.O_RDWR | os.O_NONBLOCK); '
+              'os.close(fd)')
+    return in_container(
+        'python3 -c {} {}'.format(shlex.quote(script), shlex.quote(port)),
+        timeout=10)
 
 
 def round_rect(canvas, x1, y1, x2, y2, r, **kw):
@@ -622,13 +642,14 @@ class Launcher(tk.Tk):
             except ValueError as exc:
                 messagebox.showerror('Magnetometer', str(exc))
                 return
-            ok, _ = in_container('test -e {}'.format(shlex.quote(port)))
+            ok, error = probe_container_serial_port(port)
             if not ok:
                 messagebox.showerror(
                     'Magnetometer',
-                    'Serial port "{}" is not available inside the {} Docker '
-                    'container. Reconnect the sensor or recreate the container '
-                    'with that device mounted.'.format(port, CONTAINER))
+                    'Docker cannot open serial port "{}".\n\nReconnect the '
+                    'sensor and recreate the container once with:\n'
+                    'COLMAG_SKIP_BUILD=1 bash ros/docker_setup.sh\n\n{}'.format(
+                        serial_port_label(port), error))
                 return
         cmd = build_interface_command(input_source, port)
         started, _ = in_container_detached('interface', cmd)

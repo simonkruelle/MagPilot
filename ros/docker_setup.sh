@@ -3,6 +3,7 @@
 # Run once. Afterwards use docker_connect.sh to reopen it.
 #
 # Usage: bash ros/docker_setup.sh
+# Recreate from the existing image: COLMAG_SKIP_BUILD=1 bash ros/docker_setup.sh
 
 set -e
 
@@ -11,6 +12,7 @@ CONTAINER_NAME="colmag_simon"
 IMAGE_NAME="colmag_ros:noetic"
 ROS_WS="/catkin_ws"
 DOCKER_PLATFORM="${DOCKER_PLATFORM:-}"
+SKIP_BUILD="${COLMAG_SKIP_BUILD:-0}"
 # EasyOCR (CPU-only) is on by default so the classifier stack is always baked
 # into the image. Build a light ROS-only image with INSTALL_EASYOCR=0.
 INSTALL_EASYOCR="${INSTALL_EASYOCR:-${INSTALL_FULL_PYTHON_DEPS:-1}}"
@@ -52,6 +54,16 @@ for device in "${SERIAL_DEVICES[@]}"; do
         echo "WARNING: serial device '$device' does not exist; not mounting it."
     fi
 done
+
+# Keep USB serial devices usable when they are connected or reconnected after
+# container creation. The host /dev mount only exposes device nodes at
+# /host/dev; these cgroup rules grant access solely to ttyACM (major 166) and
+# USB-serial (major 188) devices.
+SERIAL_HOTPLUG_ARGS=(
+    --device-cgroup-rule "c 166:* rmw"
+    --device-cgroup-rule "c 188:* rmw"
+    -v "/dev:/host/dev"
+)
 
 DISPLAY_ARGS=()
 if [ -n "${DISPLAY:-}" ] && [ -d /tmp/.X11-unix ]; then
@@ -119,6 +131,7 @@ if [ "${#DEVICE_ARGS[@]}" -gt 0 ]; then
 else
     echo "Serial devices: none mounted"
 fi
+echo "Serial hot-plug: enabled for ttyACM* and ttyUSB*"
 if [ "${#DISPLAY_ARGS[@]}" -gt 0 ]; then
     echo "Display: $DISPLAY"
 else
@@ -126,19 +139,27 @@ else
 fi
 echo ""
 
-# Build the image
-echo "[1/3] Building Docker image ($IMAGE_NAME)..."
-docker build \
-    "${BUILD_PLATFORM_ARGS[@]}" \
-    --build-arg "INSTALL_EASYOCR=$INSTALL_EASYOCR" \
-    --build-arg "INSTALL_FULL_PYTHON_DEPS=$INSTALL_FULL_PYTHON_DEPS" \
-    --build-arg "INSTALL_GAZEBO=$INSTALL_GAZEBO" \
-    --build-arg "INSTALL_MOVEIT=$INSTALL_MOVEIT" \
-    --build-arg "LIBFRANKA_VERSION=$LIBFRANKA_VERSION" \
-    --build-arg "FRANKA_ROS_VERSION=$FRANKA_ROS_VERSION" \
-    -f "$PROJECT_DIR/ros/Dockerfile" \
-    -t "$IMAGE_NAME" \
-    "$PROJECT_DIR"
+# Build the image unless this is only a container recreation.
+if [ "$SKIP_BUILD" = "1" ]; then
+    echo "[1/3] Reusing Docker image ($IMAGE_NAME)..."
+    if ! docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
+        echo "ERROR: Image '$IMAGE_NAME' does not exist; rerun without COLMAG_SKIP_BUILD=1."
+        exit 1
+    fi
+else
+    echo "[1/3] Building Docker image ($IMAGE_NAME)..."
+    docker build \
+        "${BUILD_PLATFORM_ARGS[@]}" \
+        --build-arg "INSTALL_EASYOCR=$INSTALL_EASYOCR" \
+        --build-arg "INSTALL_FULL_PYTHON_DEPS=$INSTALL_FULL_PYTHON_DEPS" \
+        --build-arg "INSTALL_GAZEBO=$INSTALL_GAZEBO" \
+        --build-arg "INSTALL_MOVEIT=$INSTALL_MOVEIT" \
+        --build-arg "LIBFRANKA_VERSION=$LIBFRANKA_VERSION" \
+        --build-arg "FRANKA_ROS_VERSION=$FRANKA_ROS_VERSION" \
+        -f "$PROJECT_DIR/ros/Dockerfile" \
+        -t "$IMAGE_NAME" \
+        "$PROJECT_DIR"
+fi
 
 # Validate the GPU runtime actually WORKS before baking it into the container.
 # Detecting that the binary exists is not enough: a mismatched/outdated
@@ -174,6 +195,7 @@ docker run -dit \
     --name "$CONTAINER_NAME" \
     "${RUN_PLATFORM_ARGS[@]}" \
     "${DEVICE_ARGS[@]}" \
+    "${SERIAL_HOTPLUG_ARGS[@]}" \
     "${DISPLAY_ARGS[@]}" \
     "${GPU_ARGS[@]}" \
     --network host \
