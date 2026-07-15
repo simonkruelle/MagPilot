@@ -34,10 +34,10 @@ piece of metal. MagPilot turns them into a complete robot interface:
 |---|---|
 | ✍️ write `A`…`9` over the board | the mapped action — wave, bow, dab, park at slot *n* |
 | 🕹 glide the magnet around | end-effector follows in real time |
-| ↕️ raise / lower it (0–5 cm) | end-effector height follows |
-| 📐 tilt past 55° / back under 25° | gripper closes / opens |
-| 🔄 twist it | end-effector rotates |
-| ⬆️ lift above 5 cm | arm pauses — walk away safely |
+| ↕️ raise / lower it (0.7–15 cm) | end-effector height follows |
+| 📐 tilt past 55° / back under 25° | gripper opens / closes |
+| 🔄 twist it while tilted at least 10° | end-effector rotates |
+| ⬆️ lift above 15 cm | arm pauses — walk away safely |
 
 </div>
 
@@ -90,10 +90,10 @@ the deck is play area.
 | Magnet input | Controls | Simulate on the trackpad |
 |---|---|---|
 | move over the board | end-effector X/Y | move the cursor |
-| height over board (0–5 cm) | end-effector height | mouse **scroll wheel** |
-| lift above 5 cm | pause — arm holds | scroll to the top |
-| tilt ≥ 55° / ≤ 25° | gripper close / open | numpad **2** / **8** |
-| twist (15° steps) | rotate the end-effector | numpad **4** / **6** |
+| height over sensors (0.7–15 cm) | nonlinear end-effector height | mouse **scroll wheel** |
+| lift above 15 cm | pause — arm holds | scroll to the top |
+| tilt ≥ 55° / ≤ 25° | gripper open / close | numpad **2** / **8** |
+| twist while tilt ≥ 10° (15° steps) | rotate the end-effector | numpad **4** / **6** |
 | — | reset magnet upright | numpad **5** |
 
 Switch modes any time — **even mid-motion**: entering MagPilot cancels the
@@ -162,6 +162,7 @@ the E-stop reachable at all times.
 |---|---|
 | Robot dot is **amber** | Sim runs but the Gazebo window is closed — press Start to reopen it. |
 | Stage dot stays gray | Check that stage's log in the app's log pane. |
+| `franka_control` is missing | Rebuild the full robot image: `INSTALL_GAZEBO=1 bash ros/docker_setup.sh`. |
 | *"new node registered with same name"* | Two copies of a stage — **Stop all**, then start again. |
 | Anything weird / stuck | **Restart container** (bulletproof reset). |
 | GUI window doesn't open | `xhost +local:root` on the host once. |

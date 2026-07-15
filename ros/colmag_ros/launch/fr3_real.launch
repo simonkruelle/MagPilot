@@ -13,7 +13,7 @@
   <arg name="robot_ip" doc="IP address of the real FR3 controller" />
   <arg name="robot" default="fr3" doc="franka_ros robot model: panda or fr3" />
   <arg name="arm_id" default="fr3" doc="Joint prefix: fr3_joint1..7" />
-  <arg name="load_gripper" default="false" doc="Set true only if the gripper is attached and needed" />
+  <arg name="load_gripper" default="true" doc="Load the attached Franka gripper; override false for an arm without a hand" />
   <arg name="controller" default="position_joint_trajectory_controller" doc="Trajectory controller to spawn for smoke tests" />
   <arg name="xacro_args" default="" doc="Additional xacro args forwarded to franka_control.launch" />
   <arg name="realtime_config" default="ignore" doc="libfranka realtime mode [enforce|ignore]. 'ignore' is required in Docker without an RT kernel / SYS_NICE" />

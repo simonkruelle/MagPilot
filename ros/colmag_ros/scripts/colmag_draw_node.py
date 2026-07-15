@@ -51,7 +51,7 @@ SAFETY
   - Each update additionally clamps per-joint change to max_joint_step.
   - IK solutions with residual > max_reach_error are rejected; the target holds
     at the last reachable point instead of drifting through dead zones.
-  - If pose.z is farther than lift_gate_z (default 0.05 m), following pauses and
+  - If pose.z is farther than lift_gate_z (default 0.15 m), following pauses and
     the controller holds. Lowering the magnet below the hysteresis band resumes.
 
 Parameters (see below for defaults). Usage:
@@ -67,6 +67,16 @@ import rospy
 from std_msgs.msg import Bool, String
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import JointState
+
+sys.path.insert(0, '/colmag')
+from colmag.control_mapping import (  # noqa: E402
+    EE_HEIGHT_MAX_M,
+    EE_HEIGHT_MIN_M,
+    MAGNET_HEIGHT_GAIN,
+    MAGNET_HEIGHT_MAX_M,
+    MAGNET_HEIGHT_MIN_M,
+    map_magnet_height,
+)
 
 try:
     import actionlib
@@ -202,14 +212,27 @@ class ColmagDrawNode:
         self.sign_w = float(rospy.get_param('~map_x_sign', 1.0))
         self.sign_h = float(rospy.get_param('~map_y_sign', 1.0))
 
-        # Magnet height → end-effector height (horizontal plane). pose.z in
-        # 0..lift_gate_z maps EE z from height_ee_min (magnet lying on the board
-        # → EE near the ground) to height_ee_max (magnet at the cutoff → default
-        # height). Above the cutoff the lift gate disengages. Set
-        # height_from_magnet:=false to keep the old fixed-height plane.
+        # Magnet height → flange height (horizontal plane). The 7 mm lower
+        # bound accounts for the board between magnet and sensors. A saturating
+        # curve maps 7..150 mm to the full vertical workspace while reducing
+        # sensitivity where high-distance measurements are least certain.
         self.height_from_magnet = bool(rospy.get_param('~height_from_magnet', True))
-        self.height_ee_min = float(rospy.get_param('~height_ee_min', 0.12))
-        self.height_ee_max = float(rospy.get_param('~height_ee_max', 0.55))
+        self.height_sensor_min = float(rospy.get_param(
+            '~height_sensor_min', MAGNET_HEIGHT_MIN_M))
+        self.height_sensor_max = float(rospy.get_param(
+            '~height_sensor_max', MAGNET_HEIGHT_MAX_M))
+        self.height_gain = float(rospy.get_param(
+            '~height_gain', MAGNET_HEIGHT_GAIN))
+        self.height_ee_min = float(rospy.get_param(
+            '~height_ee_min', EE_HEIGHT_MIN_M))
+        self.height_ee_max = float(rospy.get_param(
+            '~height_ee_max', EE_HEIGHT_MAX_M))
+        if self.height_sensor_max <= self.height_sensor_min:
+            raise ValueError('~height_sensor_max must exceed ~height_sensor_min')
+        if self.height_ee_max <= self.height_ee_min:
+            raise ValueError('~height_ee_max must exceed ~height_ee_min')
+        if self.height_gain < 0.0:
+            raise ValueError('~height_gain must be non-negative')
 
         self.update_rate    = float(rospy.get_param('~update_rate', 30.0))
         self.command_time   = float(rospy.get_param('~command_time', 0.10))
@@ -228,8 +251,10 @@ class ColmagDrawNode:
         # Real magnet input: lifting the magnet away from the board should pause
         # following so the user can travel to taskbar buttons without dragging
         # the robot. Set lift_gate_z<=0 to disable.
-        self.lift_gate_z = float(rospy.get_param('~lift_gate_z', 0.05))
-        self.lift_gate_hysteresis = abs(float(rospy.get_param('~lift_gate_hysteresis', 0.005)))
+        self.lift_gate_z = float(rospy.get_param(
+            '~lift_gate_z', self.height_sensor_max))
+        self.lift_gate_hysteresis = abs(float(rospy.get_param(
+            '~lift_gate_hysteresis', 0.010)))
         self.lift_reengage_z = max(0.0, self.lift_gate_z - self.lift_gate_hysteresis)
         self._lift_paused = False
         # Grasp force in N (Franka hand: up to 70 N continuous). 20 N holds
@@ -693,11 +718,15 @@ class ColmagDrawNode:
             # from that viewpoint), cursor right -> viewer's right (+y).
             target[0] = self.center[0] - self.sign_h * v * self.half_d
             target[1] = self.center[1] + self.sign_w * u * self.half_w
-            # EE height from magnet height (pose.z): press the magnet down to
-            # lower the tool toward the board, lift it to raise toward default.
-            if self.height_from_magnet and self.lift_gate_z > 0.0:
-                frac = float(np.clip(abs(float(pos.z)) / self.lift_gate_z, 0.0, 1.0))
-                target[2] = self.height_ee_min + frac * (self.height_ee_max - self.height_ee_min)
+            # Flange height from magnet height, shared with the UI gauge.
+            if self.height_from_magnet:
+                target[2] = map_magnet_height(
+                    pos.z,
+                    self.height_sensor_min,
+                    self.height_sensor_max,
+                    self.height_ee_min,
+                    self.height_ee_max,
+                    self.height_gain)
         elif self.plane_mode == 'vertical':
             # Upright canvas: cursor up -> higher (+z), cursor right -> +y.
             target[1] = self.center[1] + self.sign_w * u * self.half_w

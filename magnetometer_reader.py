@@ -30,6 +30,17 @@ from datetime import datetime
 import select
 
 from colmag.interaction import AppController, InputMode, VirtualJoystick
+from colmag.control_mapping import (
+    EE_HEIGHT_MAX_M,
+    EE_HEIGHT_MIN_M,
+    FLANGE_GROUND_OFFSET_M,
+    MAGNET_HEIGHT_GAIN,
+    MAGNET_HEIGHT_MAX_M,
+    MAGNET_HEIGHT_MIN_M,
+    magnet_angles_degrees,
+    map_magnet_height,
+    normalized_height_fraction,
+)
 from colmag.magnetic_sim import (
     apply_magnetic_calibration,
     load_magnetic_calibration,
@@ -407,10 +418,11 @@ class MagnetometerReader:
         #   theta = acos(mz)      tilt away from vertical  → GRIPPER open/close
         #   phi   = atan2(mx,my)  twist in the board plane → END-EFFECTOR ROTATION
         #   height (pose.z)       distance above the board → END-EFFECTOR HEIGHT
-        self.magnet_gripper_close_deg = 55.0   # tilt >= this ⇒ request close
-        self.magnet_gripper_open_deg  = 25.0   # tilt <= this ⇒ request open (hysteresis)
+        self.magnet_gripper_close_deg = 25.0   # upright/low tilt ⇒ request close
+        self.magnet_gripper_open_deg  = 55.0   # high tilt ⇒ request open (hysteresis)
         self.magnet_gripper_hold_s    = 0.30   # must sustain past a threshold before firing
         self.magnet_rotate_step_deg   = 15.0   # twist this far ⇒ one wrist-rotate step
+        self.magnet_twist_min_tilt_deg = 10.0  # azimuth is singular near upright
         self._magnet_grip_closed   = False
         self._magnet_grip_pending  = None      # (target_bool, since_monotonic)
         self._magnet_twist_ref_phi = None       # reference azimuth for twist accumulation
@@ -424,14 +436,17 @@ class MagnetometerReader:
         self.sim_magnet_twist_step = 15.0  # deg per numpad twist press (4/6)
         self._last_real_theta = 0.0        # last real-sensor tilt (gyro display)
         self._last_real_phi = 0.0
+        self._last_real_height_m = MAGNET_HEIGHT_MIN_M
         # Simulated magnet height over the sensor (scroll wheel controls it).
-        # 0 = lying on the board → EE to the ground; height_cutoff = lifted away
-        # → EE at default height; above the cutoff disengages (lift gate).
-        self.magnet_height_cutoff_m = 0.05     # 5 cm cutoff = default / disengage
+        # 7 mm is the physical board/sensor offset; 15 cm reaches the workspace
+        # top. The shared gain reduces sensitivity in the uncertain high range.
+        self.magnet_height_min_m = MAGNET_HEIGHT_MIN_M
+        self.magnet_height_cutoff_m = MAGNET_HEIGHT_MAX_M
+        self.magnet_height_gain = MAGNET_HEIGHT_GAIN
         self.sim_magnet_height_m = self.magnet_height_cutoff_m  # start "up" (default)
         self.sim_magnet_height_step = 0.005    # 0.5 cm per scroll notch
-        self.ee_height_min_cm = 0.0            # EE height at magnet on the board
-        self.ee_height_max_cm = 50.0           # EE height at the cutoff (display)
+        self.ee_height_min_m = EE_HEIGHT_MIN_M
+        self.ee_height_max_m = EE_HEIGHT_MAX_M
         self.touchpad_last_speed = 0.0
         self.touchpad_last_speed_report_at = 0.0
         self.touchpad_speed_log_file = None
@@ -1010,7 +1025,7 @@ class MagnetometerReader:
                 self.ros_bridge.publish_command(event.command)
             if event.command == 'gripper:toggle':
                 # Taskbar Gripper button: keep the magnet-tilt state machine in
-                # lockstep so tilting up still opens after a button close.
+                # lockstep with the draw node's authoritative gripper state.
                 self._magnet_grip_closed = not self._magnet_grip_closed
             if event.command.startswith('choice:'):
                 self.confirm_classifier_candidate(event.command, event.button.name)
@@ -2700,20 +2715,20 @@ class MagnetometerReader:
         Pure w.r.t. ROS (no publishing) so it can be unit-tested: it only mutates
         the teleop state fields and returns a list of /colmag/command strings.
 
-        - Gripper: tilt theta past magnet_gripper_close_deg (held for
-          magnet_gripper_hold_s) closes; dropping below magnet_gripper_open_deg
-          (held) opens. The hysteresis band + hold time stop it firing by accident.
+        - Gripper: upright below magnet_gripper_close_deg (held for
+          magnet_gripper_hold_s) closes; tilting past magnet_gripper_open_deg
+          (held) opens. The hysteresis band + hold time stop accidental firing.
         - Rotation: accumulate azimuth phi; each magnet_rotate_step_deg of twist
           emits one 'rotate:cw' / 'rotate:ccw' to turn the end-effector wrist
-          (twisting the magnet twists the tool — no more layer cycling).
+          while theta is safely outside the upright singularity.
         """
         cmds = []
 
         # Gripper from tilt (hysteresis + sustained hold)
         want = None
-        if theta_deg >= self.magnet_gripper_close_deg and not self._magnet_grip_closed:
+        if theta_deg <= self.magnet_gripper_close_deg and not self._magnet_grip_closed:
             want = True
-        elif theta_deg <= self.magnet_gripper_open_deg and self._magnet_grip_closed:
+        elif theta_deg >= self.magnet_gripper_open_deg and self._magnet_grip_closed:
             want = False
         if want is None:
             self._magnet_grip_pending = None
@@ -2723,6 +2738,12 @@ class MagnetometerReader:
             self._magnet_grip_closed = want
             self._magnet_grip_pending = None
             cmds.append('gripper:close' if want else 'gripper:open')
+
+        # Phi is undefined while the dipole is nearly upright. Resetting the
+        # reference prevents a jump when the magnet leaves the singular cone.
+        if theta_deg < self.magnet_twist_min_tilt_deg:
+            self._magnet_twist_ref_phi = None
+            return cmds
 
         # End-effector rotation from twist (each step of twist → one wrist step)
         if self._magnet_twist_ref_phi is None:
@@ -2752,7 +2773,8 @@ class MagnetometerReader:
         """Change the simulated magnet height (scroll wheel), clamped a touch
         above the cutoff so lifting off disengages via the draw-node lift gate."""
         hi = self.magnet_height_cutoff_m + self.sim_magnet_height_step
-        self.sim_magnet_height_m = float(np.clip(self.sim_magnet_height_m + dz, 0.0, hi))
+        self.sim_magnet_height_m = float(np.clip(
+            self.sim_magnet_height_m + dz, self.magnet_height_min_m, hi))
 
     def sim_teleop_pose_z(self):
         """Pose-z to publish while teleoperating on the touchpad (= magnet height
@@ -2865,8 +2887,8 @@ class MagnetometerReader:
         hx = 1.30
         ax.plot([hx, hx], [-1.0, 1.0], color='#e0e0e5', lw=7,
                 solid_capstyle='round', zorder=2)
-        ax.text(hx, 1.06, '5cm', ha='center', va='bottom', fontsize=6, color='#8e8e93')
-        ax.text(hx, -1.06, '0', ha='center', va='top', fontsize=6, color='#8e8e93')
+        ax.text(hx, 1.06, '15cm', ha='center', va='bottom', fontsize=6, color='#8e8e93')
+        ax.text(hx, -1.06, '0.7', ha='center', va='top', fontsize=6, color='#8e8e93')
         ax.text(hx + 0.16, 0.0, 'height', rotation=90, ha='left', va='center',
                 fontsize=6.5, color='#6e6e73')
         height_fill, = ax.plot([], [], color='#0a84ff', lw=7,
@@ -2905,38 +2927,54 @@ class MagnetometerReader:
         ub, vb = self._gyro_project(base)
         g['azimuth'].set_data(ub, vb)
         g['azimuth_head'].set_data([ub[1]], [vb[1]])
-        if theta >= self.magnet_gripper_close_deg:
+        if theta <= self.magnet_gripper_close_deg:
             g['tip'].set_markerfacecolor('#ff3b30')     # in the close cone
-        elif theta <= self.magnet_gripper_open_deg:
+        elif theta >= self.magnet_gripper_open_deg:
             g['tip'].set_markerfacecolor('#34c759')     # in the open cone
         else:
             g['tip'].set_markerfacecolor('#ffd60a')     # between thresholds
         g['readout'].set_text('tilt %2.0f°  twist %3.0f°\ngrip %s'
                               % (theta, phi,
                                  'CLOSED' if self._magnet_grip_closed else 'open'))
-        # Height gauge: magnet height over the board → EE height.
-        frac_h = float(np.clip(self.sim_magnet_height_m / self.magnet_height_cutoff_m,
-                               0.0, 1.0))
+        # Height gauge uses the same nonlinear mapping as colmag_draw_node.
+        height_m = (self._last_real_height_m if self.input_source == 'serial'
+                    else self.sim_magnet_height_m)
+        frac_h = normalized_height_fraction(
+            height_m,
+            self.magnet_height_min_m,
+            self.magnet_height_cutoff_m,
+            self.magnet_height_gain)
         hx = g['hx']
         g['height_fill'].set_data([hx, hx], [-1.0, -1.0 + 2.0 * frac_h])
-        ee_cm = self.ee_height_min_cm + frac_h * (self.ee_height_max_cm - self.ee_height_min_cm)
-        g['height_text'].set_text('%.1fcm\nEE %2.0f' % (100.0 * self.sim_magnet_height_m, ee_cm))
+        ee_height_m = map_magnet_height(
+            height_m,
+            self.magnet_height_min_m,
+            self.magnet_height_cutoff_m,
+            self.ee_height_min_m,
+            self.ee_height_max_m,
+            self.magnet_height_gain)
+        tip_clearance_cm = 100.0 * max(
+            0.0, ee_height_m - FLANGE_GROUND_OFFSET_M)
+        g['height_text'].set_text(
+            'mag %.1fcm\ntip~%.1f' % (100.0 * abs(height_m), tip_clearance_cm))
 
-    def update_magnet_teleop_controls(self, mx, my, mz):
-        """Serial teleop: turn magnet orientation into gripper/layer commands.
+    def update_magnet_teleop_controls(self, mx, my, mz, height_m=None):
+        """Serial teleop: turn magnet orientation into gripper/wrist commands.
 
         Only active with the real sensor (the trackpad has no true orientation).
-        theta = acos(mz), phi = atan2(mx, my), per the tracking-pipeline convention.
+        The dipole vector is normalized before theta/phi are calculated.
         """
-        if self.input_source != 'serial' or self.ros_bridge is None:
+        if self.input_source != 'serial':
             return
         try:
-            mz_c = float(np.clip(float(mz), -1.0, 1.0))
-            theta = float(np.degrees(np.arccos(mz_c)))       # tilt from vertical
-            phi = float(np.degrees(np.arctan2(float(mx), float(my))))  # azimuth in plane
+            theta, phi = magnet_angles_degrees(mx, my, mz)
+            if height_m is not None and np.isfinite(float(height_m)):
+                self._last_real_height_m = abs(float(height_m))
         except (ValueError, TypeError):
             return
         self._last_real_theta, self._last_real_phi = theta, phi   # gyro display
+        if self.ros_bridge is None:
+            return
         for cmd in self._magnet_control_decisions(theta, phi, time.monotonic()):
             self.ros_bridge.publish_command(cmd)
 
@@ -3555,16 +3593,16 @@ class MagnetometerReader:
                 # Teleop: no ink on the OCR canvas — the fading trail below
                 # shows the path instead, so the canvas never fills up.
                 ocr_mask = np.zeros_like(ocr_mask, dtype=bool)
-                # Simulated magnet (touchpad numpad) → gripper/layer commands,
-                # and refresh the gyroscope dipole for either input source.
-                self.update_sim_magnet_teleop()
-                self._update_gyro()
-                # Magnet orientation (real sensor only) drives gripper + layers.
-                # mx,my,mz are the last three values of each pose row.
+                # Update controls from the newest sample before rendering the
+                # gyroscope so real orientation and height are current.
                 if self.input_source == 'serial' and len(data) > 0:
                     last_row = data[-1]
                     self.update_magnet_teleop_controls(
-                        last_row[-3], last_row[-2], last_row[-1])
+                        last_row[-3], last_row[-2], last_row[-1],
+                        height_m=last_row[-4])
+                else:
+                    self.update_sim_magnet_teleop()
+                self._update_gyro()
             ink_count = int(np.count_nonzero(ocr_mask))
             digit_image = self.live_pose_to_digit_image(
                 pose_rows,

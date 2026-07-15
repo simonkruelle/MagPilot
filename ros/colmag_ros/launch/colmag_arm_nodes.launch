@@ -26,6 +26,13 @@
   <arg name="time_scale"     default="2.0"   doc="Gesture motion time multiplier (robot node)"/>
   <arg name="home_on_start"  default="true"  doc="Robot node: home the arm at startup (skipped while teleop is active)"/>
   <arg name="home_on_exit"   default="true"  doc="Draw node: home the arm when exiting teleop"/>
+  <arg name="height_sensor_min" default="0.007" doc="Minimum magnet height over sensors (m), including board offset"/>
+  <arg name="height_sensor_max" default="0.150" doc="Magnet height mapped to the workspace top (m)"/>
+  <arg name="height_gain"       default="2.0"   doc="Saturating height gain; reduces sensitivity near the upper range"/>
+  <arg name="height_ee_min"     default="0.121" doc="Minimum flange target z (m), approximately 1 mm fingertip clearance"/>
+  <arg name="height_ee_max"     default="0.680" doc="Maximum flange target z (m)"/>
+  <arg name="lift_gate_z"       default="0.150" doc="Pause following above this magnet height (m)"/>
+  <arg name="lift_gate_hysteresis" default="0.010" doc="Height below lift gate required to resume (m)"/>
 
   <!-- Teleoperation: cursor following, gripper, wrist rotation, height. -->
   <node pkg="colmag_ros"
@@ -36,6 +43,13 @@
     <param name="dry_run"        value="$(arg dry_run)"/>
     <param name="arm_controller" value="$(arg arm_controller)"/>
     <param name="home_on_exit"   value="$(arg home_on_exit)"/>
+    <param name="height_sensor_min" value="$(arg height_sensor_min)"/>
+    <param name="height_sensor_max" value="$(arg height_sensor_max)"/>
+    <param name="height_gain"       value="$(arg height_gain)"/>
+    <param name="height_ee_min"     value="$(arg height_ee_min)"/>
+    <param name="height_ee_max"     value="$(arg height_ee_max)"/>
+    <param name="lift_gate_z"       value="$(arg lift_gate_z)"/>
+    <param name="lift_gate_hysteresis" value="$(arg lift_gate_hysteresis)"/>
   </node>
 
   <!-- Discrete gesture motions (letters/digits). -->

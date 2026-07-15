@@ -598,12 +598,22 @@ class Launcher(tk.Tk):
             if not ip:
                 messagebox.showerror('Real robot', 'Enter the robot IP first.')
                 return
+            stack_ok, _ = in_container('rospack find franka_control')
+            if not stack_ok:
+                messagebox.showerror(
+                    'Real robot',
+                    'This Docker image does not contain franka_control, so it '
+                    'can run the interface but cannot drive the FR3.\n\n'
+                    'Rebuild the full robot image with:\n'
+                    'INSTALL_GAZEBO=1 bash ros/docker_setup.sh')
+                return
             if not messagebox.askokcancel(
                     'Real robot',
                     'Connect to the REAL FR3 at %s?\n\nWorkspace clear, '
                     'E-stop reachable, supervisor present?' % ip):
                 return
-            cmd = 'roslaunch colmag_ros fr3_real.launch robot_ip:=%s' % ip
+            cmd = ('roslaunch colmag_ros fr3_real.launch robot_ip:=%s '
+                   'load_gripper:=true' % ip)
         in_container_detached('robot', cmd)
 
     def start_nodes(self):
