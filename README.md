@@ -55,7 +55,10 @@ The **Control Center** drives the whole stack inside Docker: robot, arm nodes
 and interface each start with one button, and the status dots poll live.
 Green = running · **amber = the Gazebo window was closed** (Start simply
 reopens the window — it never launches a second sim into a running one) ·
-the log pane streams whichever stage you select.
+the log pane streams whichever stage you select and can be selected or copied.
+For the real sensor, select **magnetometer** and enter its detected port number
+or mounted device path in **sensor port** before starting the interface. The
+robot IP field at the top right remains editable in either mode.
 
 ## Two modes, one surface
 
