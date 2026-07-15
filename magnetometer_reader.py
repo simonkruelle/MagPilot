@@ -100,6 +100,8 @@ class _RosBridge:
             self._pub_sensor = rospy.Publisher('/colmag/sensor_data', Float64MultiArray, queue_size=5)
             self._pub_pose   = rospy.Publisher('/colmag/pose',         PoseStamped,        queue_size=5)
             self._pub_cmd    = rospy.Publisher('/colmag/command',      String,             queue_size=10)
+            self._pub_draw_enable = rospy.Publisher(
+                '/colmag/draw_enable', Bool, queue_size=1, latch=True)
             self._pub_label  = rospy.Publisher('/colmag/classifier',   String,             queue_size=5)
             self._pub_conf   = rospy.Publisher('/colmag/confidence',   Float64,            queue_size=5)
             print('[ROS] native rospy — node registered with ROS Master')
@@ -121,6 +123,11 @@ class _RosBridge:
                 t = roslibpy.Topic(self._client, topic, msg_type)
                 t.advertise()
                 self._pubs[name] = t
+            draw_enable = roslibpy.Topic(
+                self._client, '/colmag/draw_enable', 'std_msgs/Bool',
+                queue_size=1, latch=True)
+            draw_enable.advertise()
+            self._pubs['draw_enable'] = draw_enable
             print(f'[ROS] roslibpy connecting to rosbridge at {self._ROSBRIDGE_HOST}:{self._ROSBRIDGE_PORT}...')
             print(f'[ROS] Make sure Docker container has rosbridge running:')
             print(f'[ROS]   roslaunch rosbridge_server rosbridge_websocket.launch')
@@ -131,7 +138,8 @@ class _RosBridge:
                 'Run:  pip install roslibpy'
             )
 
-        print('[ROS] Topics: /colmag/{sensor_data, pose, command, classifier, confidence}')
+        print('[ROS] Topics: /colmag/{sensor_data, pose, command, draw_enable, '
+              'classifier, confidence}')
 
     def subscribe_gripper_state(self, callback):
         """Sync to the draw node's authoritative gripper state (latched Bool).
@@ -195,6 +203,19 @@ class _RosBridge:
         else:
             self._pubs['cmd'].publish(roslibpy.Message({'data': command}))
         print(f'[ROS] /colmag/command → "{command}"')
+
+    def publish_draw_enable(self, enabled):
+        """Latch MagPilot ownership so arm-node restarts cannot lose it."""
+        if not self._ros_connected():
+            return
+        enabled = bool(enabled)
+        if self._mode == 'rospy':
+            self._pub_draw_enable.publish(Bool(data=enabled))
+        else:
+            self._pubs['draw_enable'].publish(
+                roslibpy.Message({'data': enabled}))
+        print('[ROS] /colmag/draw_enable → {}'.format(
+            'true' if enabled else 'false'))
 
     def publish_classifier(self, label, confidence):
         if not self._ros_connected():
@@ -489,6 +510,7 @@ class MagnetometerReader:
                 self.ros_bridge.subscribe_gripper_state(self._on_gripper_state)
             except Exception as exc:
                 print(f'[ROS] gripper-state sync unavailable: {exc}')
+            self.ros_bridge.publish_draw_enable(False)
         self.classifier_thread = None
         self.classifier_stop_event = threading.Event()
         self.classifier_input_event = threading.Event()
@@ -1037,6 +1059,12 @@ class MagnetometerReader:
         if event.command:
             if self.ros_bridge:
                 self.ros_bridge.publish_command(event.command)
+                if event.command == 'robot:teleop':
+                    self.ros_bridge.publish_draw_enable(True)
+                elif event.command in (
+                        'letter_detection', 'number_detection',
+                        'symbol_detection'):
+                    self.ros_bridge.publish_draw_enable(False)
             if event.command == 'gripper:toggle':
                 # Taskbar Gripper button: keep the magnet-tilt state machine in
                 # lockstep with the draw node's authoritative gripper state.
@@ -1154,13 +1182,19 @@ class MagnetometerReader:
             self.app_controller.classifier_labels = self.app_controller.letter_labels
             self.app_controller.last_command = 'letter_detection'
             self.set_classifier_labels(self.app_controller.letter_labels)
+            command = 'letter_detection'
         elif mode_name == 'digits':
             self.app_controller.mode = InputMode.DIGITS
             self.app_controller.classifier_labels = self.app_controller.digit_labels
             self.app_controller.last_command = 'number_detection'
             self.set_classifier_labels(self.app_controller.digit_labels)
+            command = 'number_detection'
         else:
             return
+
+        if self.ros_bridge:
+            self.ros_bridge.publish_command(command)
+            self.ros_bridge.publish_draw_enable(False)
 
         rows = self.get_data_copy()
         if rows:
@@ -1184,6 +1218,7 @@ class MagnetometerReader:
         self.latest_runner_up_text = "Runner-up: --"
         if self.ros_bridge:
             self.ros_bridge.publish_command('symbol_detection')
+            self.ros_bridge.publish_draw_enable(False)
         print("Touchpad mode: signs active")
 
     def list_ports(self):
@@ -2198,8 +2233,6 @@ class MagnetometerReader:
             if (raw_key in ('E', 'shift+e')
                     and self.app_controller.mode.value == 'robot'):
                 self.activate_classifier_mode('letters')
-                if self.ros_bridge:
-                    self.ros_bridge.publish_command('letter_detection')
                 self._set_key_feedback("MagPilot exit → letters")
                 return
             # Numpad rotates the SIMULATED magnet while teleoperating (touchpad):

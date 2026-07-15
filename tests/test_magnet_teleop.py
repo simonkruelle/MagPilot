@@ -11,6 +11,7 @@ Run:  python3 test_magnet_teleop.py
 
 import math
 import os as _os, sys as _sys
+from types import SimpleNamespace
 _ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 for _p in (_ROOT, _os.path.join(_ROOT, 'tools')):
     if _p not in _sys.path:
@@ -197,6 +198,32 @@ def test_physical_pose_data_corrects_height_without_mutating_raw_pose():
 
     assert raw[2] == 0.017
     assert math.isclose(physical[2], 0.007)
+
+
+def test_magpilot_mode_latches_draw_enable_state():
+    class Bridge:
+        def __init__(self):
+            self.commands = []
+            self.enabled = []
+
+        def publish_command(self, command):
+            self.commands.append(command)
+
+        def publish_draw_enable(self, enabled):
+            self.enabled.append(enabled)
+
+    r = _reader()
+    r.ros_bridge = Bridge()
+    r._set_key_feedback = lambda *args, **kwargs: None
+    button = SimpleNamespace(name='MagPilot')
+
+    r.handle_interface_event(SimpleNamespace(
+        classifier_labels=None, command='robot:teleop', button=button))
+    r.handle_interface_event(SimpleNamespace(
+        classifier_labels=None, command='letter_detection', button=button))
+
+    assert r.ros_bridge.commands == ['robot:teleop', 'letter_detection']
+    assert r.ros_bridge.enabled == [True, False]
 
 
 def test_real_visualizer_keeps_raw_phi_while_robot_uses_folded_phi():

@@ -120,7 +120,8 @@ bails out instantly and the arm returns to neutral.
   nonlinear workspace mapping, without delaying the UI gauge.
 - **Arbitration** — a latched ownership topic coordinates the gesture node
   and the teleop node; startup homing, mid-motion take-over and exit homing
-  are all handled gracefully.
+  are all handled gracefully. The interface also latches MagPilot enable state,
+  so restarting the arm nodes while MagPilot is open does not disable following.
 
 ## Quick start
 
