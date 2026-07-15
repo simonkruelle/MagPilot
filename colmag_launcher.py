@@ -437,6 +437,11 @@ class Launcher(tk.Tk):
                 return
         cmd = ('roslaunch colmag_ros colmag_arm_nodes.launch '
                'dry_run:=%s arm_id:=fr3' % ('false' if live else 'true'))
+        if self.mode.get() == 'real':
+            # fr3_real.launch spawns the position controller (franka_ros
+            # default for real hardware); the nodes must target the same one,
+            # not the Gazebo effort controller they default to.
+            cmd += ' arm_controller:=position_joint_trajectory_controller'
         in_container_detached('nodes', cmd)
 
     def start_interface(self):
