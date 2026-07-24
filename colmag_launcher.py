@@ -379,6 +379,37 @@ def build_live_ros_nodes_command(nodes=TRACKED_ROS_NODES):
     ).format(nodes=nodes)
 
 
+def build_local_stage_status_command():
+    """Report pipeline stages backed by processes in this container."""
+    return (
+        "real=false; sim=false; "
+        "pgrep -f '[f]ranka_control_node' >/dev/null && real=true || true; "
+        "pgrep -x gzserver >/dev/null && sim=true || true; "
+        'if $real && $sim; then echo robot:conflict; '
+        'elif $real; then echo robot:real; '
+        'elif $sim; then '
+        'if pgrep -x gzclient >/dev/null; then echo robot:sim; '
+        'else echo robot:sim-nowin; fi; fi; '
+        "if pgrep -f '[c]olmag_draw_node.py' >/dev/null && "
+        "pgrep -f '[c]olmag_robot_node.py' >/dev/null; "
+        'then echo nodes:up; fi'
+    )
+
+
+def parse_local_stage_status(output):
+    """Convert build_local_stage_status_command output to launcher lights."""
+    lines = set(line.strip() for line in output.splitlines())
+    if 'robot:conflict' in lines:
+        robot = 'conflict'
+    elif 'robot:sim-nowin' in lines:
+        robot = 'nowin'
+    elif 'robot:real' in lines or 'robot:sim' in lines:
+        robot = True
+    else:
+        robot = False
+    return robot, 'nodes:up' in lines
+
+
 def controller_is_running(service_output, controller):
     current_name = None
     states = {}
@@ -1238,20 +1269,14 @@ class Launcher(tk.Tk):
         states = {'robot': False, 'nodes': False, 'interface': False}
         tail = '(container not running)'
         if ok:
-            ok2, nodes = in_container(
-                build_live_ros_nodes_command(), timeout=6)
-            if ok2:
-                if '/franka_control' in nodes:
-                    states['robot'] = True
-                elif '/gazebo' in nodes:
-                    # Sim backend up; amber when the Gazebo window is closed
-                    # (Start then reopens just the window, never a 2nd sim).
-                    _, win = in_container(
-                        'pgrep -x gzclient >/dev/null && echo w || true',
-                        timeout=5)
-                    states['robot'] = True if 'w' in win else 'nowin'
-                states['nodes'] = ('/colmag_draw_node' in nodes
-                                   and '/colmag_robot_node' in nodes)
+            # Status LEDs describe this container, not every process visible
+            # through the host-network ROS master. Otherwise an external or
+            # stale /franka_control registration can light Robot at startup.
+            local_ok, local_status = in_container(
+                build_local_stage_status_command(), timeout=5)
+            if local_ok:
+                states['robot'], states['nodes'] = parse_local_stage_status(
+                    local_status)
             # [m] trick: don't match this pgrep's own bash wrapper
             _, procs = in_container("pgrep -f '[m]agnetometer_reader' || true",
                                     timeout=5)
@@ -1274,7 +1299,8 @@ class Launcher(tk.Tk):
         for tag, light in self.lights.items():
             value = states.get(tag)
             light.configure(fg=GREEN if value is True
-                            else (AMBER if value == 'nowin' else DOT_OFF))
+                            else (AMBER if value == 'nowin'
+                                  else (RED if value == 'conflict' else DOT_OFF)))
         self._replace_log(tail or '(no log yet)')
 
     def _install_signal_handlers(self):

@@ -16,6 +16,7 @@ from colmag_launcher import (
     build_clear_stale_launcher_state_command,
     build_detached_inner,
     build_interface_command,
+    build_local_stage_status_command,
     build_live_ros_nodes_command,
     build_pipeline_probe_command,
     build_ros_pipeline_shutdown_command,
@@ -25,6 +26,7 @@ from colmag_launcher import (
     controller_is_running,
     detect_robot_backend,
     format_serial_port_list,
+    parse_local_stage_status,
     parse_franka_robot_mode,
     resolve_serial_port,
     serial_port_label,
@@ -119,6 +121,27 @@ class ProcessLifecycleTests(unittest.TestCase):
         self.assertIn('[m]agnetometer_reader.py', command)
         self.assertIn('/tmp/colmag_gui_robot.pid', command)
         self.assertNotIn("'roslaunch'", command)
+
+    def test_status_probe_uses_local_processes_not_shared_ros_nodes(self):
+        command = build_local_stage_status_command()
+
+        self.assertIn("[f]ranka_control_node", command)
+        self.assertIn('pgrep -x gzserver', command)
+        self.assertIn("[c]olmag_draw_node.py", command)
+        self.assertIn("[c]olmag_robot_node.py", command)
+        self.assertNotIn('rosnode', command)
+
+    def test_local_status_parser_distinguishes_backend_states(self):
+        self.assertEqual(
+            parse_local_stage_status('robot:real\nnodes:up\n'),
+            (True, True))
+        self.assertEqual(
+            parse_local_stage_status('robot:sim-nowin\n'),
+            ('nowin', False))
+        self.assertEqual(
+            parse_local_stage_status('robot:conflict\n'),
+            ('conflict', False))
+        self.assertEqual(parse_local_stage_status(''), (False, False))
 
     def test_startup_clear_removes_only_launcher_pid_and_log_files(self):
         command = build_clear_stale_launcher_state_command()

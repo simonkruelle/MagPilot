@@ -116,6 +116,17 @@ _Q_MIN = np.array([-2.7437, -1.7628, -2.8973, -3.0421, -2.8065, 0.5445, -2.8973]
 _Q_MAX = np.array([2.7437, 1.7628, 2.8973, -0.1518, 2.8065, 3.7525, 2.8973])
 _HOME = np.array([0.0, -0.785398163, 0.0, -2.35619449, 0.0, 1.57079632679, 0.785398163397])
 
+# Responsive but still conservative MagPilot defaults. The target and
+# height filters remove sensor chatter; the quintic planner remains the
+# authoritative speed, acceleration and jerk limiter.
+DEFAULT_TARGET_SMOOTHING_TAU = 0.04
+DEFAULT_HEIGHT_SMOOTHING_TAU = 0.25
+DEFAULT_HEIGHT_SMOOTHING_TAU_FAR = 0.65
+DEFAULT_MAX_LINEAR_SPEED = 0.12
+DEFAULT_MAX_LINEAR_ACCELERATION = 0.30
+DEFAULT_MAX_LINEAR_JERK = 1.50
+DEFAULT_S_CURVE_MIN_DURATION = 0.50
+
 
 def _dh_T(a, d, alpha, theta):
     ct, st, ca, sa = np.cos(theta), np.sin(theta), np.cos(alpha), np.sin(alpha)
@@ -325,9 +336,9 @@ class ColmagDrawNode:
         # ~height_smoothing_tau_far == ~height_smoothing_tau for the old fixed
         # behaviour.
         self.height_smoothing_tau = max(0.0, float(rospy.get_param(
-            '~height_smoothing_tau', 0.35)))
+            '~height_smoothing_tau', DEFAULT_HEIGHT_SMOOTHING_TAU)))
         self.height_smoothing_tau_far = max(0.0, float(rospy.get_param(
-            '~height_smoothing_tau_far', 0.90)))
+            '~height_smoothing_tau_far', DEFAULT_HEIGHT_SMOOTHING_TAU_FAR)))
         self.height_noise_deadband = abs(float(rospy.get_param(
             '~height_noise_deadband', 0.001)))
         self.height_ee_min = float(rospy.get_param(
@@ -346,19 +357,21 @@ class ColmagDrawNode:
         # Low-pass on the cursor target (first-order time constant, seconds).
         # Smooths pointer jitter and direction flips before they reach IK; the
         # velocity continuity below then carries the smoothness into the spline.
-        self.target_tau     = float(rospy.get_param('~target_smoothing_tau', 0.08))
+        self.target_tau     = float(rospy.get_param(
+            '~target_smoothing_tau', DEFAULT_TARGET_SMOOTHING_TAU))
         self.max_joint_step = float(rospy.get_param('~max_joint_step', 0.05))
         self.max_reach_error = float(rospy.get_param('~max_reach_error', 0.005))
         self.start_enabled  = bool(rospy.get_param('~start_enabled', False))
         # Receding-horizon minimum-jerk spline limits. Together these produce
         # an S-shaped speed profile without changing the position controller.
-        self.max_lin_speed  = float(rospy.get_param('~max_linear_speed', 0.10))
+        self.max_lin_speed  = float(rospy.get_param(
+            '~max_linear_speed', DEFAULT_MAX_LINEAR_SPEED))
         self.max_lin_acceleration = float(rospy.get_param(
-            '~max_linear_acceleration', 0.20))
+            '~max_linear_acceleration', DEFAULT_MAX_LINEAR_ACCELERATION))
         self.max_lin_jerk = float(rospy.get_param(
-            '~max_linear_jerk', 0.80))
+            '~max_linear_jerk', DEFAULT_MAX_LINEAR_JERK))
         self.s_curve_min_duration = float(rospy.get_param(
-            '~s_curve_min_duration', 0.75))
+            '~s_curve_min_duration', DEFAULT_S_CURVE_MIN_DURATION))
         if (self.max_lin_speed <= 0.0
                 or self.max_lin_acceleration <= 0.0
                 or self.max_lin_jerk <= 0.0

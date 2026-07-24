@@ -33,13 +33,14 @@
   <arg name="height_sensor_min" default="0.007" doc="Minimum magnet height over sensors (m), including board offset"/>
   <arg name="height_sensor_max" default="0.150" doc="Magnet height mapped to the workspace top (m)"/>
   <arg name="height_gain"       default="2.0"   doc="Saturating height gain; reduces sensitivity near the upper range"/>
-  <arg name="height_smoothing_tau" default="0.35" doc="Robot-only magnet height low-pass time constant near the board (s)"/>
-  <arg name="height_smoothing_tau_far" default="0.90" doc="Robot-only magnet height low-pass time constant at the top of the range (s); heavier where the sensor is least certain"/>
+  <arg name="height_smoothing_tau" default="0.25" doc="Robot-only magnet height low-pass time constant near the board (s)"/>
+  <arg name="height_smoothing_tau_far" default="0.65" doc="Robot-only magnet height low-pass time constant at the top of the range (s); heavier where the sensor is least certain"/>
   <arg name="height_noise_deadband" default="0.001" doc="Robot-only ignored height noise band (m)"/>
-  <arg name="max_linear_speed" default="0.10" doc="MagPilot Cartesian S-curve speed limit (m/s)"/>
-  <arg name="max_linear_acceleration" default="0.20" doc="MagPilot Cartesian S-curve acceleration limit (m/s^2)"/>
-  <arg name="max_linear_jerk" default="0.80" doc="MagPilot Cartesian S-curve jerk limit (m/s^3)"/>
-  <arg name="s_curve_min_duration" default="0.75" doc="Minimum MagPilot S-curve planning horizon (s)"/>
+  <arg name="target_smoothing_tau" default="0.04" doc="Robot-only cursor target low-pass time constant (s)"/>
+  <arg name="max_linear_speed" default="0.12" doc="MagPilot Cartesian S-curve speed limit (m/s)"/>
+  <arg name="max_linear_acceleration" default="0.30" doc="MagPilot Cartesian S-curve acceleration limit (m/s^2)"/>
+  <arg name="max_linear_jerk" default="1.50" doc="MagPilot Cartesian S-curve jerk limit (m/s^3)"/>
+  <arg name="s_curve_min_duration" default="0.50" doc="Minimum MagPilot S-curve planning horizon (s)"/>
   <arg name="height_ee_min"     default="0.121" doc="Minimum flange target z (m), approximately 1 mm fingertip clearance"/>
   <arg name="height_ee_max"     default="0.680" doc="Maximum flange target z (m)"/>
   <arg name="lift_gate_z"       default="0.150" doc="Pause following above this magnet height (m)"/>
@@ -60,6 +61,7 @@
     <param name="height_smoothing_tau" value="$(arg height_smoothing_tau)"/>
     <param name="height_smoothing_tau_far" value="$(arg height_smoothing_tau_far)"/>
     <param name="height_noise_deadband" value="$(arg height_noise_deadband)"/>
+    <param name="target_smoothing_tau" value="$(arg target_smoothing_tau)"/>
     <param name="max_linear_speed" value="$(arg max_linear_speed)"/>
     <param name="max_linear_acceleration" value="$(arg max_linear_acceleration)"/>
     <param name="max_linear_jerk" value="$(arg max_linear_jerk)"/>
