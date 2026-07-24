@@ -1086,9 +1086,14 @@ class Launcher(tk.Tk):
         if self.mode.get() == 'real':
             # fr3_real.launch spawns the position controller (franka_ros
             # default for real hardware); the nodes must target the same one,
-            # not the Gazebo effort controller they default to. This is the
-            # only sim/real difference the nodes stage needs.
+            # not the Gazebo effort controller they default to.
             cmd += ' arm_controller:=position_joint_trajectory_controller'
+            # Do NOT auto-home the real arm the instant the node starts: that
+            # lurch to HOME (and the reflex it can trip on the FR3) is exactly
+            # the "it locks the end-effector when I start the node" surprise.
+            # The arm stays put until you command a gesture or teleop; send a
+            # "0"/"X" gesture to home deliberately.
+            cmd += ' home_on_start:=false'
         self._launch_stage('nodes', cmd)
 
     def start_interface(self):
