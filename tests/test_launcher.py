@@ -13,8 +13,10 @@ from unittest import mock
 
 from colmag_launcher import (
     Launcher,
+    build_clear_stale_launcher_state_command,
     build_detached_inner,
     build_interface_command,
+    build_live_ros_nodes_command,
     build_pipeline_probe_command,
     build_stage_probe_command,
     build_stop_all_command,
@@ -24,6 +26,7 @@ from colmag_launcher import (
     parse_franka_robot_mode,
     resolve_serial_port,
     serial_port_label,
+    stop_legacy_containers,
 )
 
 
@@ -114,8 +117,36 @@ class ProcessLifecycleTests(unittest.TestCase):
         self.assertIn('/tmp/colmag_gui_robot.pid', command)
         self.assertNotIn("'roslaunch'", command)
 
+    def test_startup_clear_removes_only_launcher_pid_and_log_files(self):
+        command = build_clear_stale_launcher_state_command()
+
+        self.assertIn('/tmp/colmag_gui_robot.log', command)
+        self.assertIn('/tmp/colmag_gui_nodes.pid', command)
+        self.assertNotIn('*', command)
+
+    @mock.patch('colmag_launcher.sh')
+    def test_legacy_host_network_container_is_stopped(self, run):
+        run.side_effect = [(True, ''), (True, '')]
+
+        ok, stopped = stop_legacy_containers()
+
+        self.assertTrue(ok)
+        self.assertEqual(stopped, 'colmag_ros')
+        self.assertIn(
+            'docker ps --format "{{.Names}}"',
+            run.call_args_list[0].args[0])
+        self.assertIn('docker stop -t 5 colmag_ros', run.call_args_list[1].args[0])
+
 
 class RobotReadinessTests(unittest.TestCase):
+    def test_backend_status_requires_live_node_ping(self):
+        command = build_live_ros_nodes_command()
+
+        self.assertIn('rosnode ping -c 1', command)
+        self.assertIn('/gazebo', command)
+        self.assertIn('/franka_control', command)
+        self.assertNotIn('rosnode cleanup', command)
+
     def test_backend_detection(self):
         self.assertEqual(
             detect_robot_backend('/rosout\n/franka_control\n'), 'real')

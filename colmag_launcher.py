@@ -30,6 +30,7 @@ import tkinter.font as tkfont
 from tkinter import messagebox
 
 CONTAINER = 'colmag_simon'
+LEGACY_CONTAINERS = ('colmag_ros',)
 REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 ROS_SETUP = ('source /opt/ros/noetic/setup.bash; '
              '[ -f /catkin_ws/devel/setup.bash ] && source /catkin_ws/devel/setup.bash; ')
@@ -59,6 +60,12 @@ FRANKA_ROBOT_MODES = {
     5: 'User stopped',
     6: 'Automatic error recovery',
 }
+TRACKED_ROS_NODES = (
+    '/franka_control',
+    '/gazebo',
+    '/colmag_draw_node',
+    '/colmag_robot_node',
+)
 WIDTH = 780
 
 
@@ -80,6 +87,29 @@ def sh(cmd, timeout=10):
         return out.returncode == 0, (out.stdout + out.stderr).strip()
     except subprocess.TimeoutExpired:
         return False, '(timeout)'
+
+
+def stop_legacy_containers():
+    """Stop old host-network COLMAG containers that can leak ROS nodes."""
+    stopped = []
+    for name in LEGACY_CONTAINERS:
+        running, _ = sh(
+            'docker ps --format "{{.Names}}" | grep -qx %s'
+            % shlex.quote(name),
+            timeout=5)
+        if not running:
+            continue
+        ok, detail = sh(
+            'docker stop -t 5 {}'.format(shlex.quote(name)), timeout=12)
+        if not ok:
+            ok, detail = sh(
+                'docker kill {}'.format(shlex.quote(name)), timeout=8)
+        if not ok:
+            return False, (
+                'could not stop legacy container {}: {}'.format(
+                    name, detail or 'unknown Docker error'))
+        stopped.append(name)
+    return True, ', '.join(stopped)
 
 
 def _stage_path(tag, suffix):
@@ -173,6 +203,7 @@ def _legacy_process_signals(signal, groups=('interface', 'nodes', 'robot')):
             '[c]olmag_arm_nodes[.]launch',
             '[c]olmag_draw_node.py',
             '[c]olmag_robot_node.py',
+            '[r]ostopic.*[/]colmag/',
         ),
         'robot': (
             '[f]r3_real[.]launch',
@@ -209,6 +240,7 @@ def build_pipeline_probe_command():
         '[c]olmag_arm_nodes[.]launch',
         '[c]olmag_draw_node.py',
         '[c]olmag_robot_node.py',
+        '[r]ostopic.*[/]colmag/',
         '[f]r3(_real)?[.]launch',
         '[f]ranka_control_node',
         '[f]ranka_gripper_node',
@@ -231,6 +263,14 @@ def build_pipeline_probe_command():
         "if pgrep -f '{patterns}' >/dev/null || pgrep -x gzclient >/dev/null || "
         'pgrep -x gzserver >/dev/null; then echo running; fi'
     ).format(pid_files=pid_files, patterns='|'.join(patterns))
+
+
+def build_clear_stale_launcher_state_command():
+    paths = []
+    for tag in DETACHED_TAGS:
+        paths.extend((_stage_path(tag, 'pid'), _stage_path(tag, 'log')))
+    return 'rm -f {}'.format(
+        ' '.join(shlex.quote(path) for path in paths))
 
 
 def build_stop_all_command():
@@ -268,6 +308,18 @@ def detect_robot_backend(ros_nodes):
     if simulation:
         return 'sim'
     return None
+
+
+def build_live_ros_nodes_command():
+    nodes = ' '.join(shlex.quote(node) for node in TRACKED_ROS_NODES)
+    return (
+        'listed=$(rosnode list 2>/dev/null) || exit 0; '
+        'for node in {nodes}; do '
+        'printf "%s\\n" "$listed" | grep -Fxq "$node" || continue; '
+        'timeout 1 rosnode ping -c 1 "$node" >/dev/null 2>&1 && '
+        'printf "%s\\n" "$node"; '
+        'done'
+    ).format(nodes=nodes)
 
 
 def controller_is_running(service_output, controller):
@@ -751,7 +803,7 @@ class Launcher(tk.Tk):
         self._replace_log(notice)
 
     def _running_ros_nodes(self):
-        ok, nodes = in_container('rosnode list 2>/dev/null', timeout=5)
+        ok, nodes = in_container(build_live_ros_nodes_command(), timeout=6)
         return nodes if ok else ''
 
     def _pipeline_action_ready(self):
@@ -1136,6 +1188,14 @@ class Launcher(tk.Tk):
             target=self._stop_all_worker, args=(reason,), daemon=True).start()
 
     def _stop_all_worker(self, reason):
+        ok, detail = stop_legacy_containers()
+        if not ok:
+            try:
+                self.after(0, self._finish_stop_all, ok, detail, reason)
+            except tk.TclError:
+                pass
+            return
+
         running, _ = sh(
             'docker ps --format "{{.Names}}" | grep -qx %s' % CONTAINER,
             timeout=5)
@@ -1160,6 +1220,9 @@ class Launcher(tk.Tk):
                     detail = '{}; container restart failed: {}'.format(
                         detail or 'cleanup failed',
                         restart_detail or 'unknown Docker error')
+            if ok and reason == 'startup':
+                in_container(
+                    build_clear_stale_launcher_state_command(), timeout=5)
         else:
             ok, detail = True, ''
         try:
@@ -1210,7 +1273,8 @@ class Launcher(tk.Tk):
         states = {'robot': False, 'nodes': False, 'interface': False}
         tail = '(container not running)'
         if ok:
-            ok2, nodes = in_container('rosnode list 2>/dev/null', timeout=5)
+            ok2, nodes = in_container(
+                build_live_ros_nodes_command(), timeout=6)
             if ok2:
                 if '/franka_control' in nodes:
                     states['robot'] = True

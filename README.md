@@ -62,10 +62,13 @@ then start the interface. The robot IP field at the top right remains editable
 in either mode.
 
 On startup the Control Center clears any pipeline processes left by an earlier
-crash before enabling new starts. Closing the window, pressing `Ctrl+C`, or
-sending `SIGTERM` stops the interface and arm nodes first, lets the arm
-controller settle, and then stops the robot backend. A forced `kill -9` cannot
-run cleanup code, but the next startup still clears its surviving processes.
+crash before enabling new starts. It also stops the former `colmag_ros`
+container name, whose host-network ROS processes would otherwise appear inside
+`colmag_simon`, and clears stale launcher logs after cleanup. Closing the
+window, pressing `Ctrl+C`, or sending `SIGTERM` stops the interface and arm
+nodes first, lets the arm controller settle, and then stops the robot backend.
+A forced `kill -9` cannot run cleanup code, but the next startup still clears
+its surviving processes.
 
 If Docker reports that it cannot open a serial port, reconnect the sensor and
 run `COLMAG_SKIP_BUILD=1 bash ros/docker_setup.sh` once to recreate the

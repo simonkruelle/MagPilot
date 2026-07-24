@@ -9,6 +9,7 @@ set -e
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CONTAINER_NAME="colmag_simon"
+LEGACY_CONTAINER_NAME="colmag_ros"
 IMAGE_NAME="colmag_ros:noetic"
 ROS_WS="/catkin_ws"
 DOCKER_PLATFORM="${DOCKER_PLATFORM:-}"
@@ -181,6 +182,13 @@ if [ "${#GPU_ARGS[@]}" -gt 0 ]; then
         GPU_ARGS=()
         GPU_MODE="none (software rendering; GPU probe failed)"
     fi
+fi
+
+# Remove the former container name first. Both containers use host networking,
+# so leaving the legacy one alive can leak Gazebo/ROS nodes into colmag_simon.
+if docker ps -a --format '{{.Names}}' | grep -q "^${LEGACY_CONTAINER_NAME}$"; then
+    echo "Removing legacy container '$LEGACY_CONTAINER_NAME'..."
+    docker rm -f "$LEGACY_CONTAINER_NAME"
 fi
 
 # Remove existing container if present
