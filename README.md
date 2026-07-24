@@ -61,6 +61,12 @@ serial ports visible inside Docker; enter the matching number in **port #** and
 then start the interface. The robot IP field at the top right remains editable
 in either mode.
 
+On startup the Control Center clears any pipeline processes left by an earlier
+crash before enabling new starts. Closing the window, pressing `Ctrl+C`, or
+sending `SIGTERM` stops the interface and arm nodes first, lets the arm
+controller settle, and then stops the robot backend. A forced `kill -9` cannot
+run cleanup code, but the next startup still clears its surviving processes.
+
 If Docker reports that it cannot open a serial port, reconnect the sensor and
 run `COLMAG_SKIP_BUILD=1 bash ros/docker_setup.sh` once to recreate the
 container from the existing image with hot-plug serial access enabled.
@@ -185,7 +191,8 @@ the E-stop reachable at all times.
 | Robot dot is **amber** | Sim runs but the Gazebo window is closed — press Start to reopen it. |
 | Stage dot stays gray | Check that stage's log in the app's log pane. |
 | `franka_control` is missing | Rebuild the full robot image: `INSTALL_GAZEBO=1 bash ros/docker_setup.sh`. |
-| *"new node registered with same name"* | Two copies of a stage — **Stop all**, then start again. |
+| FR3 reports **Reflex** / gripper works but arm does not | Release the activation device, unlock the joints in Franka Desk, confirm FCI, then click **Recover**. |
+| *"new node registered with same name"* | Two copies of a stage from an older launcher — **Stop all**, then start each stage once. |
 | Anything weird / stuck | **Restart container** (bulletproof reset). |
 | GUI window doesn't open | `xhost +local:root` on the host once. |
 </details>

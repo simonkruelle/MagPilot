@@ -22,6 +22,7 @@ and tailed in the bottom pane.
 
 import os
 import shlex
+import signal
 import subprocess
 import threading
 import tkinter as tk
@@ -48,6 +49,16 @@ TRACK = '#dcebf7'
 DOT_OFF = '#c6d6e3'
 
 STAGES = ('robot', 'nodes', 'interface')
+DETACHED_TAGS = STAGES + ('window',)
+FRANKA_ROBOT_MODES = {
+    0: 'Other',
+    1: 'Idle',
+    2: 'Move',
+    3: 'Guiding',
+    4: 'Reflex',
+    5: 'User stopped',
+    6: 'Automatic error recovery',
+}
 WIDTH = 780
 
 
@@ -71,17 +82,216 @@ def sh(cmd, timeout=10):
         return False, '(timeout)'
 
 
+def _stage_path(tag, suffix):
+    if tag not in DETACHED_TAGS:
+        raise ValueError('Unknown launcher stage: {}'.format(tag))
+    return '/tmp/colmag_gui_{}.{}'.format(tag, suffix)
+
+
+def build_detached_inner(tag, command):
+    """Build a detached stage runner whose complete process group we own."""
+    pid_file = _stage_path(tag, 'pid')
+    log_file = _stage_path(tag, 'log')
+    runner = (
+        'echo $$ > {pid}; '
+        'cleanup() {{ rm -f {pid}; }}; trap cleanup EXIT; '
+        'printf "[launcher] starting {tag}\\n"; '
+        '{command}; status=$?; '
+        'printf "[launcher] {tag} exited with status %s\\n" "$status"; '
+        'exit "$status"'
+    ).format(pid=shlex.quote(pid_file), tag=tag, command=command)
+    return (
+        'export PYTHONUNBUFFERED=1; {setup}'
+        'rm -f {pid}; '
+        'exec setsid bash -lc {runner} > {log} 2>&1'
+    ).format(
+        setup=ROS_SETUP,
+        pid=shlex.quote(pid_file),
+        runner=shlex.quote(runner),
+        log=shlex.quote(log_file),
+    )
+
+
 def in_container_detached(tag, command):
-    # PYTHONUNBUFFERED: python ROS nodes block-buffer stdout when redirected
-    # to a file, which left the log pane empty until the process exited.
-    inner = 'export PYTHONUNBUFFERED=1; {}{} > /tmp/colmag_gui_{}.log 2>&1'.format(
-        ROS_SETUP, command, tag)
+    # The setsid runner gives each stage its own process group. This lets a new
+    # launcher stop jobs that survived an earlier launcher crash.
+    inner = build_detached_inner(tag, command)
     return sh('docker exec -d {} bash -lc {}'.format(CONTAINER, shlex.quote(inner)))
 
 
 def in_container(command, timeout=8):
     return sh('docker exec {} bash -lc {}'.format(
         CONTAINER, shlex.quote(ROS_SETUP + command)), timeout=timeout)
+
+
+def _managed_stage_signal(tag, signal):
+    pid_file = _stage_path(tag, 'pid')
+    return (
+        '(pid_file={pid}; '
+        'if [ -s "$pid_file" ]; then '
+        'stage_pid=$(cat "$pid_file"); '
+        'case "$stage_pid" in ""|*[!0-9]*) rm -f "$pid_file";; '
+        '*) if ps -o args= -p "$stage_pid" 2>/dev/null | '
+        'grep -Fq "$pid_file"; then '
+        'kill -{signal} -- "-$stage_pid" 2>/dev/null || '
+        'kill -{signal} "$stage_pid" 2>/dev/null || true; '
+        'else rm -f "$pid_file"; fi;; esac; fi)'
+    ).format(pid=shlex.quote(pid_file), signal=signal)
+
+
+def build_stage_probe_command(tag):
+    pid_file = _stage_path(tag, 'pid')
+    legacy_probe = {
+        'robot': (
+            "pgrep -f '[f]r3(_real)?[.]launch|[f]ranka_control_node' "
+            '>/dev/null || pgrep -x gzserver >/dev/null'),
+        'nodes': (
+            "pgrep -f '[c]olmag_arm_nodes[.]launch|[c]olmag_draw_node.py|"
+            "[c]olmag_robot_node.py' >/dev/null"),
+        'interface': (
+            "pgrep -f '[m]agnetometer_reader.py' >/dev/null"),
+        'window': 'pgrep -x gzclient >/dev/null',
+    }[tag]
+    return (
+        'managed=false; '
+        'pid_file={pid}; '
+        'if [ -s "$pid_file" ]; then '
+        'stage_pid=$(cat "$pid_file"); '
+        'if ps -o args= -p "$stage_pid" 2>/dev/null | '
+        'grep -Fq "$pid_file"; then managed=true; '
+        'else rm -f "$pid_file"; fi; fi'
+        '; if $managed || {legacy}; then echo running; fi'
+    ).format(pid=shlex.quote(pid_file), legacy=legacy_probe)
+
+
+def _legacy_process_signals(signal, groups=('interface', 'nodes', 'robot')):
+    # Bracketed patterns deliberately cannot match this cleanup shell's own
+    # command line. The old "pkill -f roslaunch" did, aborting Stop All early.
+    by_group = {
+        'interface': ('[m]agnetometer_reader.py',),
+        'nodes': (
+            '[c]olmag_arm_nodes[.]launch',
+            '[c]olmag_draw_node.py',
+            '[c]olmag_robot_node.py',
+        ),
+        'robot': (
+            '[f]r3_real[.]launch',
+            '[f]r3[.]launch',
+            '[f]ranka_control_node',
+            '[f]ranka_gripper_node',
+            '[c]ontroller_manager/spawner',
+            '[r]obot_state_publisher',
+            '[j]oint_state_publisher',
+            '[r]oslaunch',
+            '[r]osmaster',
+            '[r]oscore',
+            '[r]osout',
+        ),
+    }
+    patterns = tuple(
+        pattern for group in groups for pattern in by_group[group])
+    commands = [
+        "pkill -{} -f '{}' 2>/dev/null || true".format(
+            signal, pattern)
+        for pattern in patterns
+    ]
+    if 'robot' in groups:
+        commands.extend(
+            'pkill -{} -x {} 2>/dev/null || true'.format(signal, process)
+            for process in ('gzclient', 'gzserver')
+        )
+    return commands
+
+
+def build_pipeline_probe_command():
+    patterns = (
+        '[m]agnetometer_reader.py',
+        '[c]olmag_arm_nodes[.]launch',
+        '[c]olmag_draw_node.py',
+        '[c]olmag_robot_node.py',
+        '[f]r3(_real)?[.]launch',
+        '[f]ranka_control_node',
+        '[f]ranka_gripper_node',
+        '[c]ontroller_manager/spawner',
+        '[r]obot_state_publisher',
+        '[j]oint_state_publisher',
+        '[r]oslaunch',
+        '[r]osmaster',
+        '[r]oscore',
+        '[r]osout',
+    )
+    pid_files = ' '.join(
+        shlex.quote(_stage_path(tag, 'pid')) for tag in DETACHED_TAGS)
+    return (
+        'for pid_file in {pid_files}; do '
+        'if [ -s "$pid_file" ]; then stage_pid=$(cat "$pid_file"); '
+        'if ps -o args= -p "$stage_pid" 2>/dev/null | '
+        'grep -Fq "$pid_file"; then echo running; exit 0; '
+        'else rm -f "$pid_file"; fi; fi; done; '
+        "if pgrep -f '{patterns}' >/dev/null || pgrep -x gzclient >/dev/null || "
+        'pgrep -x gzserver >/dev/null; then echo running; fi'
+    ).format(pid_files=pid_files, patterns='|'.join(patterns))
+
+
+def build_stop_all_command():
+    """Stop current managed jobs plus processes from older launcher versions."""
+    stop_order = ('interface', 'nodes', 'window', 'robot')
+    commands = [_managed_stage_signal('interface', 'TERM')]
+    commands.extend(_legacy_process_signals('TERM', ('interface',)))
+    commands.append(_managed_stage_signal('nodes', 'TERM'))
+    commands.extend(_legacy_process_signals('TERM', ('nodes',)))
+    # Give the arm nodes time to cancel/empty their trajectories and leave the
+    # hardware controller holding position before franka_control is stopped.
+    commands.append('sleep 1')
+    commands.extend(
+        _managed_stage_signal(tag, 'TERM') for tag in ('window', 'robot'))
+    commands.extend(_legacy_process_signals('TERM', ('robot',)))
+    commands.append('sleep 2')
+    commands.extend(_managed_stage_signal(tag, 'KILL') for tag in stop_order)
+    commands.extend(_legacy_process_signals('KILL'))
+    commands.extend(
+        'rm -f {}'.format(shlex.quote(_stage_path(tag, 'pid')))
+        for tag in DETACHED_TAGS
+    )
+    commands.append('true')
+    return '; '.join(commands)
+
+
+def detect_robot_backend(ros_nodes):
+    nodes = set(line.strip() for line in ros_nodes.splitlines())
+    real = '/franka_control' in nodes
+    simulation = '/gazebo' in nodes
+    if real and simulation:
+        return 'conflict'
+    if real:
+        return 'real'
+    if simulation:
+        return 'sim'
+    return None
+
+
+def controller_is_running(service_output, controller):
+    current_name = None
+    states = {}
+    for line in service_output.splitlines():
+        field = line.strip()
+        if field.startswith('name:'):
+            current_name = field.split(':', 1)[1].strip().strip('"\'')
+        elif field.startswith('state:') and current_name:
+            states[current_name] = field.split(':', 1)[1].strip().strip('"\'')
+    return states.get(controller) == 'running'
+
+
+def parse_franka_robot_mode(topic_output):
+    for line in topic_output.splitlines():
+        field = line.strip()
+        if field.startswith('robot_mode:'):
+            field = field.split(':', 1)[1].strip()
+        if field.isdigit():
+            value = int(field)
+            if value in FRANKA_ROBOT_MODES:
+                return value
+    return None
 
 
 def build_interface_command(input_source, serial_port=''):
@@ -338,11 +548,18 @@ class Launcher(tk.Tk):
         self.title('MagPilot Control Center')
         self.configure(bg=BG)
         self.resizable(False, False)
+        self._pipeline_notice = None
+        self._stopping = False
+        self._recovering = False
+        self._closing = False
+        self._close_after_stop = False
         self._fonts()
         self._build_ui()
         self._poll_running = True
         threading.Thread(target=self._poll_loop, daemon=True).start()
         self.protocol('WM_DELETE_WINDOW', self._on_close)
+        self._install_signal_handlers()
+        self.after_idle(self._cleanup_on_startup)
 
     def _fonts(self):
         ui = pick_font(['SF Pro Text', 'SF Pro Display', 'Helvetica Neue',
@@ -408,9 +625,12 @@ class Launcher(tk.Tk):
 
         # Stage cards
         self.lights = {}
-        self._stage('robot', '1 · Robot',
-                    'Gazebo FR3 + controllers (sim) · franka_control (real)',
-                    self.start_robot)
+        inner = self._stage(
+            'robot', '1 · Robot',
+            'Gazebo FR3 + controllers (sim) · franka_control (real)',
+            self.start_robot)
+        Pill(inner, 'Recover', self.recover_robot, kind='plain', width=82,
+             font=self.f_small).pack(side='right', padx=(0, 8))
         inner = self._stage('nodes', '2 · Arm nodes',
                             'Teleop (draw) + gestures (robot), one launch',
                             self.start_nodes)
@@ -524,8 +744,58 @@ class Launcher(tk.Tk):
         self._log_selector._redraw()
         self._replace_log(text)
 
+    def _select_stage_log(self, tag, notice):
+        self._pipeline_notice = None
+        self.log_choice.set(tag)
+        self._log_selector._redraw()
+        self._replace_log(notice)
+
+    def _running_ros_nodes(self):
+        ok, nodes = in_container('rosnode list 2>/dev/null', timeout=5)
+        return nodes if ok else ''
+
+    def _pipeline_action_ready(self):
+        if not self._stopping:
+            return True
+        messagebox.showinfo(
+            'Pipeline cleanup',
+            'Please wait for the current pipeline cleanup to finish.')
+        return False
+
+    def _franka_robot_mode(self):
+        ok, output = in_container(
+            'timeout 4 rostopic echo -n 1 '
+            '/franka_state_controller/franka_states/robot_mode 2>/dev/null',
+            timeout=6)
+        return parse_franka_robot_mode(output) if ok else None
+
+    def _launch_stage(self, tag, command):
+        _, active = in_container(build_stage_probe_command(tag), timeout=5)
+        if active.strip() == 'running':
+            self._select_stage_log(
+                tag, '{} is already being started or is running.'.format(tag))
+            messagebox.showwarning(
+                'Stage already running',
+                'The {} stage already has a launcher-owned process.\n\n'
+                'Press Stop all before starting another copy.'.format(tag))
+            return False
+        self._select_stage_log(
+            tag, 'Starting {}... output will appear here.'.format(tag))
+        started, error = in_container_detached(tag, command)
+        if not started:
+            detail = error or 'docker exec failed'
+            self._replace_log('Could not start {}:\n{}'.format(tag, detail))
+            messagebox.showerror(
+                'Start failed',
+                'Could not start the {} stage.\n\n{}'.format(tag, detail))
+        return started
+
     def refresh_serial_ports(self):
         if self.input_src.get() != 'magnetometer':
+            return
+        if self._stopping:
+            if not self._closing:
+                self.after(500, self.refresh_serial_ports)
             return
         if not self._ensure_container():
             self._show_interface_notice(
@@ -579,21 +849,58 @@ class Launcher(tk.Tk):
         return ok2
 
     def start_robot(self):
+        if not self._pipeline_action_ready():
+            return
         if not self._ensure_container():
+            return
+        running_backend = detect_robot_backend(self._running_ros_nodes())
+        selected_backend = self.mode.get()
+        if running_backend == 'conflict':
+            self._select_stage_log(
+                'robot', 'Both simulation and real robot backends are running.')
+            messagebox.showerror(
+                'Robot backend conflict',
+                'Simulation and real robot processes are both active.\n\n'
+                'Press Stop all before starting the pipeline again.')
+            return
+        if running_backend and running_backend != selected_backend:
+            self._select_stage_log(
+                'robot',
+                'Running backend: {}. Selected mode: {}.'.format(
+                    running_backend, selected_backend))
+            messagebox.showerror(
+                'Robot mode mismatch',
+                'The running backend is {}, but the Control Center is set to '
+                '{}.\n\nPress Stop all, select the intended mode, then start '
+                'the robot again.'.format(running_backend, selected_backend))
             return
         if self.mode.get() == 'sim':
             # Never start a SECOND fr3.launch while the sim is up: its
             # controller spawner fights the first one and leaves the arm
             # controller STOPPED (arm ignores all motion). If only the
             # Gazebo window was closed, just reopen the window.
-            ok, out = in_container(
-                'pgrep -x gzserver >/dev/null && echo up || echo down')
-            if ok and 'up' in out:
-                in_container_detached('window', 'gzclient')
+            if running_backend == 'sim':
+                _, window = in_container(
+                    'pgrep -x gzclient >/dev/null && echo open || true')
+                if 'open' in window:
+                    self._select_stage_log(
+                        'robot', 'Simulation and Gazebo are already running.')
+                else:
+                    self._select_stage_log(
+                        'robot',
+                        'Simulation is already running; opening Gazebo.')
+                    _, active = in_container(
+                        build_stage_probe_command('window'), timeout=5)
+                    if active.strip() != 'running':
+                        in_container_detached('window', 'gzclient')
                 return
             cmd = ('roslaunch colmag_ros fr3.launch '
                    'controller:=effort_joint_trajectory_controller')
         else:
+            if running_backend == 'real':
+                self._select_stage_log(
+                    'robot', 'The real robot backend is already running.')
+                return
             ip = self.robot_ip.get().strip()
             if not ip:
                 messagebox.showerror('Real robot', 'Enter the robot IP first.')
@@ -614,12 +921,133 @@ class Launcher(tk.Tk):
                 return
             cmd = ('roslaunch colmag_ros fr3_real.launch robot_ip:=%s '
                    'load_gripper:=true' % ip)
-        in_container_detached('robot', cmd)
+        self._launch_stage('robot', cmd)
+
+    def recover_robot(self):
+        if not self._pipeline_action_ready():
+            return
+        if not self._ensure_container():
+            return
+        backend = detect_robot_backend(self._running_ros_nodes())
+        if self.mode.get() != 'real' or backend != 'real':
+            messagebox.showinfo(
+                'FR3 recovery',
+                'Recovery is available when the Control Center is in Real '
+                'robot mode and franka_control is running.')
+            return
+        if self._recovering:
+            return
+        mode = self._franka_robot_mode()
+        mode_name = FRANKA_ROBOT_MODES.get(mode, 'unknown')
+        if not messagebox.askokcancel(
+                'Recover real FR3',
+                'Current FR3 mode: {}\n\nRelease the E-stop/activation device, '
+                'unlock the joints in Franka Desk, and confirm FCI is active.\n\n'
+                'Send the explicit error-recovery request?'.format(mode_name)):
+            return
+        self._recovering = True
+        self._pipeline_notice = 'Requesting FR3 error recovery...'
+        self._replace_log(self._pipeline_notice)
+        threading.Thread(target=self._recover_robot_worker, daemon=True).start()
+
+    def _recover_robot_worker(self):
+        ok, detail = in_container(
+            'rosrun colmag_ros fr3_recover.py', timeout=20)
+        mode = self._franka_robot_mode()
+        try:
+            self.after(0, self._finish_robot_recovery, ok, detail, mode)
+        except tk.TclError:
+            pass
+
+    def _finish_robot_recovery(self, ok, detail, mode):
+        self._recovering = False
+        mode_name = FRANKA_ROBOT_MODES.get(mode, 'unknown')
+        recovered = ok and mode in (None, 1, 2)
+        if recovered:
+            notice = 'FR3 recovery succeeded.'
+            if mode is not None:
+                notice += ' Robot mode: {}.'.format(mode_name)
+        else:
+            notice = (
+                'FR3 recovery did not reach Idle/Move mode (mode: {}).\n\n{}'
+                .format(mode_name, detail or 'No recovery response.'))
+        self._pipeline_notice = notice
+        self._replace_log(notice)
+        if not recovered:
+            messagebox.showerror('FR3 recovery', notice)
+        self.after(5000, self._clear_pipeline_notice, notice)
 
     def start_nodes(self):
+        if not self._pipeline_action_ready():
+            return
         if not self._ensure_container():
             return
         live = self.live.get()
+        ros_nodes = self._running_ros_nodes()
+        existing = [
+            node for node in ('/colmag_draw_node', '/colmag_robot_node')
+            if node in set(ros_nodes.splitlines())
+        ]
+        if existing:
+            self._select_stage_log(
+                'nodes', 'Arm nodes are already running:\n{}'.format(
+                    '\n'.join(existing)))
+            messagebox.showwarning(
+                'Arm nodes already running',
+                'Arm nodes are already active. Press Stop all before changing '
+                'live/dry-run mode or starting them again.')
+            return
+        if live:
+            running_backend = detect_robot_backend(ros_nodes)
+            selected_backend = self.mode.get()
+            if running_backend != selected_backend:
+                self._select_stage_log(
+                    'robot',
+                    'Robot backend is {} while {} mode is selected.'.format(
+                        running_backend or 'not running', selected_backend))
+                messagebox.showerror(
+                    'Robot backend not ready',
+                    'Live arm nodes require a running {} backend.\n\nStart the '
+                    'robot first. If another backend is active, press Stop all '
+                    'before changing modes.'.format(selected_backend))
+                return
+            controller = (
+                'position_joint_trajectory_controller'
+                if selected_backend == 'real'
+                else 'effort_joint_trajectory_controller'
+            )
+            controllers_ok, controllers = in_container(
+                'rosservice call /controller_manager/list_controllers "{}"',
+                timeout=8)
+            if (not controllers_ok
+                    or not controller_is_running(controllers, controller)):
+                self._select_stage_log(
+                    'robot',
+                    'Required controller is not running: {}\n\n{}'.format(
+                        controller, controllers or '(no controller response)'))
+                messagebox.showerror(
+                    'Arm controller not ready',
+                    'The required controller "{}" is not running, so arm '
+                    'commands would be ignored.\n\nCheck the Robot log or '
+                    'press Stop all and restart the pipeline.'.format(
+                        controller))
+                return
+            if selected_backend == 'real':
+                robot_mode = self._franka_robot_mode()
+                if robot_mode not in (None, 1, 2):
+                    mode_name = FRANKA_ROBOT_MODES.get(
+                        robot_mode, 'unknown ({})'.format(robot_mode))
+                    self._select_stage_log(
+                        'robot',
+                        'FR3 is not ready for motion. Robot mode: {}.'.format(
+                            mode_name))
+                    messagebox.showerror(
+                        'FR3 motion blocked',
+                        'The controller is loaded, but the FR3 mode is {}.\n\n'
+                        'Release the activation device, unlock the joints in '
+                        'Franka Desk, confirm FCI is active, then click Recover.'
+                        .format(mode_name))
+                    return
         if live and self.mode.get() == 'real':
             if not messagebox.askokcancel(
                     'Real robot — LIVE',
@@ -633,10 +1061,22 @@ class Launcher(tk.Tk):
             # default for real hardware); the nodes must target the same one,
             # not the Gazebo effort controller they default to.
             cmd += ' arm_controller:=position_joint_trajectory_controller'
-        in_container_detached('nodes', cmd)
+        self._launch_stage('nodes', cmd)
 
     def start_interface(self):
+        if not self._pipeline_action_ready():
+            return
         if not self._ensure_container():
+            return
+        _, processes = in_container(
+            "pgrep -f '[m]agnetometer_reader.py' || true", timeout=5)
+        if processes.strip():
+            self._select_stage_log(
+                'interface', 'The MagPilot interface is already running.')
+            messagebox.showwarning(
+                'Interface already running',
+                'The interface process is already active. Press Stop all '
+                'before starting another copy.')
             return
         input_source = self.input_src.get()
         port = self.sensor_port.get().strip()
@@ -662,16 +1102,96 @@ class Launcher(tk.Tk):
                         serial_port_label(port), error))
                 return
         cmd = build_interface_command(input_source, port)
-        started, _ = in_container_detached('interface', cmd)
+        started = self._launch_stage('interface', cmd)
         if started:
             self._interface_notice = None
 
     def stop_all(self):
-        in_container('pkill -f roslaunch; pkill -f magnetometer_reader; '
-                     'sleep 2; pkill -f gzserver; pkill -f gzclient; '
-                     'pkill -f rosmaster; true', timeout=20)
+        self._begin_pipeline_cleanup('manual')
+
+    def _cleanup_on_startup(self):
+        self._begin_pipeline_cleanup('startup')
+
+    def _begin_pipeline_cleanup(self, reason):
+        if self._stopping:
+            if reason == 'close':
+                self._close_after_stop = True
+                self._pipeline_notice = (
+                    'Closing Control Center after pipeline cleanup...')
+            return
+        self._stopping = True
+        if reason == 'close':
+            self._close_after_stop = True
+        self._interface_notice = None
+        self._pipeline_notice = {
+            'startup': (
+                'Startup safety check: clearing stale MagPilot processes...'),
+            'manual': (
+                'Stopping interface, arm nodes, controllers, and robot backend...'),
+            'close': (
+                'Stopping the MagPilot pipeline before closing...'),
+        }[reason]
+        self._replace_log(self._pipeline_notice)
+        threading.Thread(
+            target=self._stop_all_worker, args=(reason,), daemon=True).start()
+
+    def _stop_all_worker(self, reason):
+        running, _ = sh(
+            'docker ps --format "{{.Names}}" | grep -qx %s' % CONTAINER,
+            timeout=5)
+        if running:
+            _, active = in_container(build_pipeline_probe_command(), timeout=5)
+            if active.strip() == 'running':
+                ok, detail = in_container(build_stop_all_command(), timeout=20)
+                if ok:
+                    _, remaining = in_container(
+                        build_pipeline_probe_command(), timeout=5)
+                    if remaining.strip() == 'running':
+                        ok = False
+                        detail = 'pipeline processes survived graceful cleanup'
+            else:
+                ok, detail = True, ''
+            if not ok:
+                restarted, restart_detail = sh(
+                    'docker restart %s' % CONTAINER, timeout=60)
+                if restarted:
+                    ok, detail = True, ''
+                else:
+                    detail = '{}; container restart failed: {}'.format(
+                        detail or 'cleanup failed',
+                        restart_detail or 'unknown Docker error')
+        else:
+            ok, detail = True, ''
+        try:
+            self.after(0, self._finish_stop_all, ok, detail, reason)
+        except tk.TclError:
+            pass
+
+    def _finish_stop_all(self, ok, detail, reason):
+        self._stopping = False
+        if self._close_after_stop:
+            self.destroy()
+            return
+        if ok:
+            notice = (
+                'Startup cleanup complete. MagPilot is ready.'
+                if reason == 'startup'
+                else 'All MagPilot pipeline processes stopped.')
+        else:
+            notice = (
+                'Stop All did not complete: {}\n\nUse Restart container.'
+                .format(detail or 'Docker command failed'))
+        self._pipeline_notice = notice
+        self._replace_log(notice)
+        self.after(3500, self._clear_pipeline_notice, notice)
+
+    def _clear_pipeline_notice(self, notice):
+        if self._pipeline_notice == notice:
+            self._pipeline_notice = None
 
     def restart_container(self):
+        if not self._pipeline_action_ready():
+            return
         if messagebox.askokcancel('Restart', 'Restart the container? '
                                   'All pipeline processes stop.'):
             sh('docker restart %s' % CONTAINER, timeout=60)
@@ -710,8 +1230,10 @@ class Launcher(tk.Tk):
             _, tail = in_container(
                 'tail -n 60 /tmp/colmag_gui_%s.log 2>/dev/null || true'
                 % self.log_choice.get(), timeout=5)
-        if (self.log_choice.get() == 'interface'
-                and self._interface_notice is not None):
+        if self._pipeline_notice is not None:
+            tail = self._pipeline_notice
+        elif (self.log_choice.get() == 'interface'
+              and self._interface_notice is not None):
             tail = self._interface_notice
         try:
             self.after(0, self._apply_status, ok, states, tail)
@@ -726,9 +1248,27 @@ class Launcher(tk.Tk):
                             else (AMBER if value == 'nowin' else DOT_OFF))
         self._replace_log(tail or '(no log yet)')
 
+    def _install_signal_handlers(self):
+        for name in ('SIGINT', 'SIGTERM', 'SIGHUP'):
+            sig = getattr(signal, name, None)
+            if sig is not None:
+                try:
+                    signal.signal(sig, self._on_signal)
+                except ValueError:
+                    pass  # Tk launcher was embedded outside the main thread.
+
+    def _on_signal(self, _signum, _frame):
+        try:
+            self.after(0, self._on_close)
+        except tk.TclError:
+            pass
+
     def _on_close(self):
+        if self._closing:
+            return
+        self._closing = True
         self._poll_running = False
-        self.destroy()
+        self._begin_pipeline_cleanup('close')
 
 
 def _ensure_good_tk():

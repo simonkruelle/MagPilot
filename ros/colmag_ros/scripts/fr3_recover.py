@@ -26,10 +26,12 @@ import rospy
 def main():
     try:
         import actionlib
+        from actionlib_msgs.msg import GoalStatus
         from franka_msgs.msg import ErrorRecoveryAction, ErrorRecoveryGoal
     except ImportError as exc:
-        print("franka_msgs/actionlib not importable ({}). Run this inside the "
-              "Franka Docker image (INSTALL_GAZEBO=1 build).".format(exc))
+        print("Franka recovery dependencies are not importable ({}). Run this "
+              "inside the Franka Docker image (INSTALL_GAZEBO=1 build)."
+              .format(exc))
         return 1
 
     rospy.init_node("fr3_recover", anonymous=True)
@@ -49,8 +51,14 @@ def main():
                       "activation device, unlock the joints in Desk, then retry.")
         return 1
 
-    rospy.loginfo("Recovery request done (action state %s). The arm should accept "
-                  "trajectories again.", client.get_state())
+    state = client.get_state()
+    if state != GoalStatus.SUCCEEDED:
+        rospy.logerr("Recovery request finished with action state %s instead of "
+                     "SUCCEEDED. Check the activation device, joint locks, and "
+                     "FCI mode in Franka Desk.", state)
+        return 1
+
+    rospy.loginfo("Recovery succeeded. The arm should accept trajectories again.")
     return 0
 
 
