@@ -18,6 +18,16 @@
   <arg name="xacro_args" default="" doc="Additional xacro args forwarded to franka_control.launch" />
   <arg name="realtime_config" default="ignore" doc="libfranka realtime mode [enforce|ignore]. 'ignore' is required in Docker without an RT kernel / SYS_NICE" />
 
+  <!-- Force wall-clock time on the real robot. fr3.launch (the Gazebo sim) sets
+       /use_sim_time=true, and that parameter PERSISTS on the ROS master until the
+       master is restarted. If a prior sim session leaves it true, ROS time freezes
+       at 0 here (nothing publishes /clock on the real robot), which silently stops
+       every rospy.Timer — including the MagPilot teleop streaming loop. The result
+       is exactly "gestures move the arm but MagPilot does not", because gestures
+       are callback-driven while teleop streams from a timer. Setting it false makes
+       the real robot immune to a leftover sim parameter. -->
+  <param name="/use_sim_time" value="false" />
+
   <include file="$(find franka_control)/launch/franka_control.launch">
     <arg name="robot_ip" value="$(arg robot_ip)" />
     <arg name="robot" value="$(arg robot)" />
