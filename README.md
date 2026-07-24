@@ -194,6 +194,7 @@ the E-stop reachable at all times.
 | Robot dot is **amber** | Sim runs but the Gazebo window is closed — press Start to reopen it. |
 | Stage dot stays gray | Check that stage's log in the app's log pane. |
 | `franka_control` is missing | Rebuild the full robot image: `INSTALL_GAZEBO=1 bash ros/docker_setup.sh`. |
+| Simulation and real robot both active | **Stop all** shuts down the named ROS nodes across host-network containers; startup remains blocked if either node survives. |
 | FR3 reports **Reflex** / gripper works but arm does not | Release the activation device, unlock the joints in Franka Desk, confirm FCI, then click **Recover**. |
 | *"new node registered with same name"* | Two copies of a stage from an older launcher — **Stop all**, then start each stage once. |
 | Anything weird / stuck | **Restart container** (bulletproof reset). |

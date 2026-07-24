@@ -18,6 +18,8 @@ from colmag_launcher import (
     build_interface_command,
     build_live_ros_nodes_command,
     build_pipeline_probe_command,
+    build_ros_pipeline_shutdown_command,
+    build_ros_node_shutdown_command,
     build_stage_probe_command,
     build_stop_all_command,
     controller_is_running,
@@ -26,7 +28,7 @@ from colmag_launcher import (
     parse_franka_robot_mode,
     resolve_serial_port,
     serial_port_label,
-    stop_legacy_containers,
+    stop_conflicting_colmag_containers,
 )
 
 
@@ -104,6 +106,7 @@ class ProcessLifecycleTests(unittest.TestCase):
             self.assertIn('/tmp/colmag_gui_{}.pid'.format(tag), command)
         self.assertIn("'[r]oslaunch'", command)
         self.assertNotIn("pkill -TERM -f 'roslaunch'", command)
+        self.assertNotIn('rosnode kill', command)
         self.assertIn('sleep 1', command)
         self.assertIn('sleep 2', command)
         self.assertIn('pkill -KILL', command)
@@ -125,17 +128,42 @@ class ProcessLifecycleTests(unittest.TestCase):
         self.assertNotIn('*', command)
 
     @mock.patch('colmag_launcher.sh')
-    def test_legacy_host_network_container_is_stopped(self, run):
-        run.side_effect = [(True, ''), (True, '')]
+    def test_conflicting_host_network_containers_are_stopped(self, run):
+        run.side_effect = [
+            (True, 'colmag_simon|colmag_ros:noetic\n'
+                   'colmag_ros|old-image\n'
+                   'test_box|colmag_ros:noetic\n'
+                   'database|postgres:latest'),
+            (True, ''),
+            (True, ''),
+        ]
 
-        ok, stopped = stop_legacy_containers()
+        ok, stopped = stop_conflicting_colmag_containers()
 
         self.assertTrue(ok)
-        self.assertEqual(stopped, 'colmag_ros')
+        self.assertEqual(stopped, 'colmag_ros, test_box')
         self.assertIn(
-            'docker ps --format "{{.Names}}"',
+            'docker ps --format "{{.Names}}|{{.Image}}"',
             run.call_args_list[0].args[0])
         self.assertIn('docker stop -t 5 colmag_ros', run.call_args_list[1].args[0])
+        self.assertIn('docker stop -t 5 test_box', run.call_args_list[2].args[0])
+
+    def test_remote_ros_shutdown_is_scoped_to_named_nodes(self):
+        command = build_ros_node_shutdown_command(
+            ('/colmag_draw_node', '/gazebo'))
+
+        self.assertIn('/colmag_draw_node', command)
+        self.assertIn('/gazebo', command)
+        self.assertIn('rosnode kill "$node"', command)
+
+    def test_remote_shutdown_precedes_robot_backend(self):
+        command = build_ros_pipeline_shutdown_command()
+
+        self.assertIn('/colmag_draw_node', command)
+        self.assertIn('/gazebo', command)
+        self.assertIn('/franka_control', command)
+        self.assertLess(
+            command.index('/colmag_draw_node'), command.index('/franka_control'))
 
 
 class RobotReadinessTests(unittest.TestCase):

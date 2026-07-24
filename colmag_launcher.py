@@ -66,6 +66,29 @@ TRACKED_ROS_NODES = (
     '/colmag_draw_node',
     '/colmag_robot_node',
 )
+INTERFACE_ROS_NODES = (
+    '/colmag_node',
+    '/colmag_sensor_node',
+    '/colmag_classifier_node',
+    '/colmag_joystick_node',
+    '/colmag_listener',
+)
+ARM_ROS_NODES = (
+    '/colmag_draw_node',
+    '/colmag_robot_node',
+)
+ROBOT_ROS_NODES = (
+    '/gazebo_gui',
+    '/gazebo',
+    '/position_joint_trajectory_controller_spawner',
+    '/state_controller_spawner',
+    '/joint_state_publisher',
+    '/robot_state_publisher',
+    '/franka_gripper',
+    '/franka_control',
+)
+PIPELINE_ROS_NODES = (
+    INTERFACE_ROS_NODES + ARM_ROS_NODES + ROBOT_ROS_NODES)
 WIDTH = 780
 
 
@@ -89,16 +112,26 @@ def sh(cmd, timeout=10):
         return False, '(timeout)'
 
 
-def stop_legacy_containers():
-    """Stop old host-network COLMAG containers that can leak ROS nodes."""
-    stopped = []
-    for name in LEGACY_CONTAINERS:
-        running, _ = sh(
-            'docker ps --format "{{.Names}}" | grep -qx %s'
-            % shlex.quote(name),
-            timeout=5)
-        if not running:
+def stop_conflicting_colmag_containers():
+    """Stop other COLMAG containers whose host-network ROS nodes leak in."""
+    ok, output = sh(
+        'docker ps --format "{{.Names}}|{{.Image}}"', timeout=5)
+    if not ok:
+        return False, output or 'could not list Docker containers'
+
+    candidates = []
+    for line in output.splitlines():
+        name, _, image = line.partition('|')
+        name = name.strip()
+        if not name or name == CONTAINER:
             continue
+        if (name in LEGACY_CONTAINERS
+                or 'colmag' in name.lower()
+                or 'colmag' in image.lower()):
+            candidates.append(name)
+
+    stopped = []
+    for name in candidates:
         ok, detail = sh(
             'docker stop -t 5 {}'.format(shlex.quote(name)), timeout=12)
         if not ok:
@@ -106,7 +139,7 @@ def stop_legacy_containers():
                 'docker kill {}'.format(shlex.quote(name)), timeout=8)
         if not ok:
             return False, (
-                'could not stop legacy container {}: {}'.format(
+                'could not stop conflicting container {}: {}'.format(
                     name, detail or 'unknown Docker error'))
         stopped.append(name)
     return True, ', '.join(stopped)
@@ -273,8 +306,32 @@ def build_clear_stale_launcher_state_command():
         ' '.join(shlex.quote(path) for path in paths))
 
 
+def build_ros_node_shutdown_command(nodes):
+    quoted_nodes = ' '.join(shlex.quote(node) for node in nodes)
+    return (
+        'listed=$(rosnode list 2>/dev/null) || listed=""; '
+        'for node in {nodes}; do '
+        'printf "%s\\n" "$listed" | grep -Fxq "$node" || continue; '
+        'timeout 3 rosnode kill "$node" >/dev/null 2>&1 || true; '
+        'done'
+    ).format(nodes=quoted_nodes)
+
+
+def build_ros_pipeline_shutdown_command():
+    commands = [
+        build_ros_node_shutdown_command(INTERFACE_ROS_NODES),
+        build_ros_node_shutdown_command(ARM_ROS_NODES),
+        # Let the arm nodes cancel their trajectories before stopping the
+        # controller/backend nodes on a real robot.
+        'sleep 1',
+        build_ros_node_shutdown_command(ROBOT_ROS_NODES),
+        'true',
+    ]
+    return '; '.join(commands)
+
+
 def build_stop_all_command():
-    """Stop current managed jobs plus processes from older launcher versions."""
+    """Stop local managed jobs plus processes from older launcher versions."""
     stop_order = ('interface', 'nodes', 'window', 'robot')
     commands = [_managed_stage_signal('interface', 'TERM')]
     commands.extend(_legacy_process_signals('TERM', ('interface',)))
@@ -310,8 +367,8 @@ def detect_robot_backend(ros_nodes):
     return None
 
 
-def build_live_ros_nodes_command():
-    nodes = ' '.join(shlex.quote(node) for node in TRACKED_ROS_NODES)
+def build_live_ros_nodes_command(nodes=TRACKED_ROS_NODES):
+    nodes = ' '.join(shlex.quote(node) for node in nodes)
     return (
         'listed=$(rosnode list 2>/dev/null) || exit 0; '
         'for node in {nodes}; do '
@@ -605,6 +662,7 @@ class Launcher(tk.Tk):
         self._recovering = False
         self._closing = False
         self._close_after_stop = False
+        self._cleanup_error = None
         self._fonts()
         self._build_ui()
         self._poll_running = True
@@ -807,12 +865,19 @@ class Launcher(tk.Tk):
         return nodes if ok else ''
 
     def _pipeline_action_ready(self):
-        if not self._stopping:
-            return True
-        messagebox.showinfo(
-            'Pipeline cleanup',
-            'Please wait for the current pipeline cleanup to finish.')
-        return False
+        if self._stopping:
+            messagebox.showinfo(
+                'Pipeline cleanup',
+                'Please wait for the current pipeline cleanup to finish.')
+            return False
+        if self._cleanup_error:
+            messagebox.showerror(
+                'Pipeline conflict',
+                'The Control Center is blocked because cleanup could not '
+                'guarantee an idle ROS pipeline.\n\n{}'.format(
+                    self._cleanup_error))
+            return False
+        return True
 
     def _franka_robot_mode(self):
         ok, output = in_container(
@@ -1188,7 +1253,7 @@ class Launcher(tk.Tk):
             target=self._stop_all_worker, args=(reason,), daemon=True).start()
 
     def _stop_all_worker(self, reason):
-        ok, detail = stop_legacy_containers()
+        ok, detail = stop_conflicting_colmag_containers()
         if not ok:
             try:
                 self.after(0, self._finish_stop_all, ok, detail, reason)
@@ -1200,26 +1265,58 @@ class Launcher(tk.Tk):
             'docker ps --format "{{.Names}}" | grep -qx %s' % CONTAINER,
             timeout=5)
         if running:
-            _, active = in_container(build_pipeline_probe_command(), timeout=5)
-            if active.strip() == 'running':
-                ok, detail = in_container(build_stop_all_command(), timeout=20)
-                if ok:
-                    _, remaining = in_container(
-                        build_pipeline_probe_command(), timeout=5)
-                    if remaining.strip() == 'running':
-                        ok = False
-                        detail = 'pipeline processes survived graceful cleanup'
-            else:
-                ok, detail = True, ''
-            if not ok:
+            _, local_before = in_container(
+                build_pipeline_probe_command(), timeout=5)
+            _, live_before = in_container(
+                build_live_ros_nodes_command(PIPELINE_ROS_NODES), timeout=10)
+            cleanup_errors = []
+            if live_before.strip():
+                remote_ok, remote_detail = in_container(
+                    build_ros_pipeline_shutdown_command(), timeout=25)
+                if not remote_ok:
+                    cleanup_errors.append(
+                        remote_detail or 'remote ROS shutdown failed')
+            if local_before.strip() == 'running':
+                local_ok, local_detail = in_container(
+                    build_stop_all_command(), timeout=20)
+                if not local_ok:
+                    cleanup_errors.append(
+                        local_detail or 'local process cleanup failed')
+            ok = not cleanup_errors
+            detail = '; '.join(cleanup_errors)
+
+            _, local_after = in_container(
+                build_pipeline_probe_command(), timeout=5)
+            _, live_after = in_container(
+                build_live_ros_nodes_command(PIPELINE_ROS_NODES), timeout=10)
+            if local_after.strip() == 'running':
                 restarted, restart_detail = sh(
                     'docker restart %s' % CONTAINER, timeout=60)
-                if restarted:
-                    ok, detail = True, ''
-                else:
+                if not restarted:
+                    ok = False
                     detail = '{}; container restart failed: {}'.format(
                         detail or 'cleanup failed',
                         restart_detail or 'unknown Docker error')
+                _, local_after = in_container(
+                    build_pipeline_probe_command(), timeout=5)
+                _, live_after = in_container(
+                    build_live_ros_nodes_command(PIPELINE_ROS_NODES), timeout=10)
+
+            survivors = [
+                node for node in live_after.splitlines() if node.strip()]
+            if local_after.strip() == 'running' or survivors:
+                ok = False
+                parts = []
+                if local_after.strip() == 'running':
+                    parts.append('local COLMAG processes remain')
+                if survivors:
+                    parts.append(
+                        'live ROS nodes remain: {}'.format(', '.join(survivors)))
+                detail = '; '.join(parts)
+            elif not ok:
+                # A command may have returned non-zero while still achieving
+                # the requested invariant: no local or live pipeline remains.
+                ok, detail = True, ''
             if ok and reason == 'startup':
                 in_container(
                     build_clear_stale_launcher_state_command(), timeout=5)
@@ -1232,6 +1329,8 @@ class Launcher(tk.Tk):
 
     def _finish_stop_all(self, ok, detail, reason):
         self._stopping = False
+        self._cleanup_error = None if ok else (
+            detail or 'unknown pipeline cleanup failure')
         if self._close_after_stop:
             self.destroy()
             return
@@ -1253,11 +1352,19 @@ class Launcher(tk.Tk):
             self._pipeline_notice = None
 
     def restart_container(self):
-        if not self._pipeline_action_ready():
+        if self._stopping:
+            messagebox.showinfo(
+                'Pipeline cleanup',
+                'Please wait for the current pipeline cleanup to finish.')
             return
         if messagebox.askokcancel('Restart', 'Restart the container? '
                                   'All pipeline processes stop.'):
-            sh('docker restart %s' % CONTAINER, timeout=60)
+            ok, detail = sh('docker restart %s' % CONTAINER, timeout=60)
+            if ok:
+                self._begin_pipeline_cleanup('manual')
+            else:
+                messagebox.showerror(
+                    'Restart failed', detail or 'Docker restart failed.')
 
     # ── Status polling ───────────────────────────────────────────────────────
 
