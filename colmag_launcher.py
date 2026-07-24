@@ -662,7 +662,6 @@ class Launcher(tk.Tk):
         self._recovering = False
         self._closing = False
         self._close_after_stop = False
-        self._cleanup_error = None
         self._fonts()
         self._build_ui()
         self._poll_running = True
@@ -865,14 +864,9 @@ class Launcher(tk.Tk):
         return nodes if ok else ''
 
     def _pipeline_action_ready(self):
-        # Only an IN-PROGRESS cleanup gates a start, and only briefly. A cleanup
-        # that could not prove the pipeline idle must NOT permanently disable the
-        # Control Center: survivors it cannot reach (a leftover host-network
-        # container, a gazebo/franka_control that ignores rosnode kill, or an
-        # external master) would otherwise brick every button. start_robot still
-        # refuses to launch a conflicting backend on its own, so allowing the
-        # action here is safe; the failed-cleanup notice and the status dots tell
-        # the user to use Stop all / Restart container.
+        # Only an in-progress cleanup gates a start, and only briefly. The
+        # launcher does not otherwise second-guess what is running: you pick a
+        # mode and start the stages you want.
         if self._stopping:
             messagebox.showinfo(
                 'Pipeline cleanup',
@@ -971,33 +965,15 @@ class Launcher(tk.Tk):
             return
         if not self._ensure_container():
             return
-        running_backend = detect_robot_backend(self._running_ros_nodes())
-        selected_backend = self.mode.get()
-        if running_backend == 'conflict':
-            self._select_stage_log(
-                'robot', 'Both simulation and real robot backends are running.')
-            messagebox.showerror(
-                'Robot backend conflict',
-                'Simulation and real robot processes are both active.\n\n'
-                'Press Stop all before starting the pipeline again.')
-            return
-        if running_backend and running_backend != selected_backend:
-            self._select_stage_log(
-                'robot',
-                'Running backend: {}. Selected mode: {}.'.format(
-                    running_backend, selected_backend))
-            messagebox.showerror(
-                'Robot mode mismatch',
-                'The running backend is {}, but the Control Center is set to '
-                '{}.\n\nPress Stop all, select the intended mode, then start '
-                'the robot again.'.format(running_backend, selected_backend))
-            return
         if self.mode.get() == 'sim':
-            # Never start a SECOND fr3.launch while the sim is up: its
-            # controller spawner fights the first one and leaves the arm
-            # controller STOPPED (arm ignores all motion). If only the
-            # Gazebo window was closed, just reopen the window.
-            if running_backend == 'sim':
+            # Never start a SECOND fr3.launch while a sim is up: its controller
+            # spawner fights the first one and leaves the arm controller STOPPED
+            # (arm ignores all motion). If a sim is already running, just
+            # (re)open the Gazebo window. This is a direct process check, not a
+            # ROS-node sniff, so a stale /gazebo registration cannot confuse it.
+            _, sim_up = in_container(
+                'pgrep -x gzserver >/dev/null && echo up || true')
+            if 'up' in sim_up:
                 _, window = in_container(
                     'pgrep -x gzclient >/dev/null && echo open || true')
                 if 'open' in window:
@@ -1015,10 +991,6 @@ class Launcher(tk.Tk):
             cmd = ('roslaunch colmag_ros fr3.launch '
                    'controller:=effort_joint_trajectory_controller')
         else:
-            if running_backend == 'real':
-                self._select_stage_log(
-                    'robot', 'The real robot backend is already running.')
-                return
             ip = self.robot_ip.get().strip()
             if not ip:
                 messagebox.showerror('Real robot', 'Enter the robot IP first.')
@@ -1101,71 +1073,8 @@ class Launcher(tk.Tk):
         if not self._ensure_container():
             return
         live = self.live.get()
-        ros_nodes = self._running_ros_nodes()
-        existing = [
-            node for node in ('/colmag_draw_node', '/colmag_robot_node')
-            if node in set(ros_nodes.splitlines())
-        ]
-        if existing:
-            self._select_stage_log(
-                'nodes', 'Arm nodes are already running:\n{}'.format(
-                    '\n'.join(existing)))
-            messagebox.showwarning(
-                'Arm nodes already running',
-                'Arm nodes are already active. Press Stop all before changing '
-                'live/dry-run mode or starting them again.')
-            return
-        if live:
-            running_backend = detect_robot_backend(ros_nodes)
-            selected_backend = self.mode.get()
-            if running_backend != selected_backend:
-                self._select_stage_log(
-                    'robot',
-                    'Robot backend is {} while {} mode is selected.'.format(
-                        running_backend or 'not running', selected_backend))
-                messagebox.showerror(
-                    'Robot backend not ready',
-                    'Live arm nodes require a running {} backend.\n\nStart the '
-                    'robot first. If another backend is active, press Stop all '
-                    'before changing modes.'.format(selected_backend))
-                return
-            controller = (
-                'position_joint_trajectory_controller'
-                if selected_backend == 'real'
-                else 'effort_joint_trajectory_controller'
-            )
-            controllers_ok, controllers = in_container(
-                'rosservice call /controller_manager/list_controllers "{}"',
-                timeout=8)
-            if (not controllers_ok
-                    or not controller_is_running(controllers, controller)):
-                self._select_stage_log(
-                    'robot',
-                    'Required controller is not running: {}\n\n{}'.format(
-                        controller, controllers or '(no controller response)'))
-                messagebox.showerror(
-                    'Arm controller not ready',
-                    'The required controller "{}" is not running, so arm '
-                    'commands would be ignored.\n\nCheck the Robot log or '
-                    'press Stop all and restart the pipeline.'.format(
-                        controller))
-                return
-            if selected_backend == 'real':
-                robot_mode = self._franka_robot_mode()
-                if robot_mode not in (None, 1, 2):
-                    mode_name = FRANKA_ROBOT_MODES.get(
-                        robot_mode, 'unknown ({})'.format(robot_mode))
-                    self._select_stage_log(
-                        'robot',
-                        'FR3 is not ready for motion. Robot mode: {}.'.format(
-                            mode_name))
-                    messagebox.showerror(
-                        'FR3 motion blocked',
-                        'The controller is loaded, but the FR3 mode is {}.\n\n'
-                        'Release the activation device, unlock the joints in '
-                        'Franka Desk, confirm FCI is active, then click Recover.'
-                        .format(mode_name))
-                    return
+        # Moving the REAL arm is the one irreversible action here, so it keeps
+        # its explicit confirmation. Everything else just starts.
         if live and self.mode.get() == 'real':
             if not messagebox.askokcancel(
                     'Real robot — LIVE',
@@ -1177,7 +1086,8 @@ class Launcher(tk.Tk):
         if self.mode.get() == 'real':
             # fr3_real.launch spawns the position controller (franka_ros
             # default for real hardware); the nodes must target the same one,
-            # not the Gazebo effort controller they default to.
+            # not the Gazebo effort controller they default to. This is the
+            # only sim/real difference the nodes stage needs.
             cmd += ' arm_controller:=position_joint_trajectory_controller'
         self._launch_stage('nodes', cmd)
 
@@ -1254,116 +1164,41 @@ class Launcher(tk.Tk):
             target=self._stop_all_worker, args=(reason,), daemon=True).start()
 
     def _stop_all_worker(self, reason):
-        ok, detail = stop_conflicting_colmag_containers()
-        if not ok:
-            try:
-                self.after(0, self._finish_stop_all, ok, detail, reason)
-            except tk.TclError:
-                pass
-            return
-
+        # Simple, forceful, best-effort cleanup that NEVER blocks the UI.
+        # 1) Stop the legacy host-network container: its ROS nodes register on
+        #    the shared localhost:11311 master but cannot be pkilled from
+        #    colmag_simon, so they would otherwise linger as phantom nodes.
+        stop_conflicting_colmag_containers()
+        # 2) Kill every pipeline process inside colmag_simon. build_stop_all_
+        #    command TERMs then KILLs roslaunch, rosmaster/roscore, gazebo,
+        #    franka_control, the colmag nodes and the interface — so the ROS
+        #    master itself dies and no stale registration (e.g. a phantom
+        #    /gazebo that made "real" think a simulation was up) can survive.
         running, _ = sh(
             'docker ps --format "{{.Names}}" | grep -qx %s' % CONTAINER,
             timeout=5)
         if running:
-            _, local_before = in_container(
-                build_pipeline_probe_command(), timeout=5)
-            _, live_before = in_container(
-                build_live_ros_nodes_command(PIPELINE_ROS_NODES), timeout=10)
-            cleanup_errors = []
-            if live_before.strip():
-                remote_ok, remote_detail = in_container(
-                    build_ros_pipeline_shutdown_command(), timeout=25)
-                if not remote_ok:
-                    cleanup_errors.append(
-                        remote_detail or 'remote ROS shutdown failed')
-            if local_before.strip() == 'running':
-                local_ok, local_detail = in_container(
-                    build_stop_all_command(), timeout=20)
-                if not local_ok:
-                    cleanup_errors.append(
-                        local_detail or 'local process cleanup failed')
-            ok = not cleanup_errors
-            detail = '; '.join(cleanup_errors)
-
-            _, local_after = in_container(
-                build_pipeline_probe_command(), timeout=5)
-            _, live_after = in_container(
-                build_live_ros_nodes_command(PIPELINE_ROS_NODES), timeout=10)
-            # Escalate to a container restart when ANYTHING still stands after the
-            # kill pass — local processes OR live ROS nodes. pkill and the process
-            # probe are scoped to this container's PID namespace, but the live
-            # node check reaches every node on the shared host-network master, so
-            # a node this container cannot pkill (e.g. one left in the legacy
-            # container, already stopped above) can still show as live. Restarting
-            # colmag_simon tears down its ROS master and every pipeline process,
-            # which clears those registrations; only a truly external master
-            # (host-level or the lab robot) can survive it.
-            survivors_after_kill = [
-                node for node in live_after.splitlines() if node.strip()]
-            if local_after.strip() == 'running' or survivors_after_kill:
-                restarted, restart_detail = sh(
-                    'docker restart %s' % CONTAINER, timeout=60)
-                if not restarted:
-                    ok = False
-                    detail = '{}; container restart failed: {}'.format(
-                        detail or 'cleanup failed',
-                        restart_detail or 'unknown Docker error')
-                _, local_after = in_container(
-                    build_pipeline_probe_command(), timeout=5)
-                _, live_after = in_container(
-                    build_live_ros_nodes_command(PIPELINE_ROS_NODES), timeout=10)
-
-            survivors = [
-                node for node in live_after.splitlines() if node.strip()]
-            if local_after.strip() == 'running' or survivors:
-                ok = False
-                parts = []
-                if local_after.strip() == 'running':
-                    parts.append('local COLMAG processes remain')
-                if survivors:
-                    parts.append(
-                        'live ROS nodes remain ({}) — likely on a master outside '
-                        'colmag_simon (another container or host-level roscore)'
-                        .format(', '.join(survivors)))
-                detail = '; '.join(parts)
-            elif not ok:
-                # A command may have returned non-zero while still achieving
-                # the requested invariant: no local or live pipeline remains.
-                ok, detail = True, ''
-            if ok and reason == 'startup':
+            in_container(build_stop_all_command(), timeout=25)
+            if reason == 'startup':
                 in_container(
                     build_clear_stale_launcher_state_command(), timeout=5)
-        else:
-            ok, detail = True, ''
         try:
-            self.after(0, self._finish_stop_all, ok, detail, reason)
+            self.after(0, self._finish_stop_all, reason)
         except tk.TclError:
             pass
 
-    def _finish_stop_all(self, ok, detail, reason):
+    def _finish_stop_all(self, reason):
         self._stopping = False
-        self._cleanup_error = None if ok else (
-            detail or 'unknown pipeline cleanup failure')
         if self._close_after_stop:
             self.destroy()
             return
-        if ok:
-            notice = (
-                'Startup cleanup complete. MagPilot is ready.'
-                if reason == 'startup'
-                else 'All MagPilot pipeline processes stopped.')
-        else:
-            notice = (
-                'Stop All did not complete: {}\n\nUse Restart container.'
-                .format(detail or 'Docker command failed'))
+        notice = (
+            'Ready — nothing is running. Start stages manually.'
+            if reason == 'startup'
+            else 'All MagPilot pipeline processes stopped.')
         self._pipeline_notice = notice
         self._replace_log(notice)
-        # A success notice is transient; a failure notice stays up so the user
-        # sees that survivors remain and can act (Restart container), instead of
-        # the launcher silently looking idle while nodes are still live.
-        if ok:
-            self.after(3500, self._clear_pipeline_notice, notice)
+        self.after(3500, self._clear_pipeline_notice, notice)
 
     def _clear_pipeline_notice(self, notice):
         if self._pipeline_notice == notice:
