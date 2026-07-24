@@ -55,7 +55,8 @@
   <arg name="height_sensor_min" default="0.007" doc="Minimum magnet height over sensors (m), including board offset"/>
   <arg name="height_sensor_max" default="0.150" doc="Magnet height mapped to the workspace top (m)"/>
   <arg name="height_gain"       default="2.0"   doc="Saturating gain that reduces sensitivity at uncertain high distances"/>
-  <arg name="height_smoothing_tau" default="0.35" doc="Robot-only magnet height low-pass time constant (s)"/>
+  <arg name="height_smoothing_tau" default="0.35" doc="Robot-only magnet height low-pass time constant near the board (s)"/>
+  <arg name="height_smoothing_tau_far" default="0.90" doc="Robot-only magnet height low-pass time constant at the top of the range (s); heavier where the sensor is least certain"/>
   <arg name="height_noise_deadband" default="0.001" doc="Robot-only ignored height noise band (m)"/>
   <arg name="height_ee_min"     default="0.121" doc="Minimum flange target z (m), approximately 1 mm fingertip clearance"/>
   <arg name="height_ee_max"     default="0.680" doc="Maximum flange target z (m)"/>
@@ -99,6 +100,7 @@
     <param name="height_sensor_max" value="$(arg height_sensor_max)"/>
     <param name="height_gain"       value="$(arg height_gain)"/>
     <param name="height_smoothing_tau" value="$(arg height_smoothing_tau)"/>
+    <param name="height_smoothing_tau_far" value="$(arg height_smoothing_tau_far)"/>
     <param name="height_noise_deadband" value="$(arg height_noise_deadband)"/>
     <param name="height_ee_min"     value="$(arg height_ee_min)"/>
     <param name="height_ee_max"     value="$(arg height_ee_max)"/>

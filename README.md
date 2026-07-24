@@ -110,17 +110,25 @@ bails out instantly and the arm returns to neutral.
 - **Recognition** — strokes are anti-aliased into a 64 px canvas with a
   velocity-hysteresis ink gate (slow corners stay connected) and classified
   by an OCR backend.
-- **Motion** — damped least-squares IK streamed at 30 Hz with
-  velocity-continuous trajectory points: the controller splines *through*
-  the waypoints instead of braking at each one. Cartesian targets pass through
-  a jerk-limited S-curve tracker (0.10 m/s, 0.20 m/s² and 0.80 m/s³ defaults)
-  before IK, preventing abrupt vertical acceleration changes. Robot
+- **Motion** — damped least-squares IK (analytic Jacobian, iteration-capped
+  to stay inside the 33 ms tick) streamed at 30 Hz with velocity-continuous
+  trajectory points: the controller splines *through* the waypoints instead
+  of braking at each one. Cartesian targets pass through a jerk-limited
+  S-curve tracker (0.10 m/s, 0.20 m/s² and 0.80 m/s³ defaults) before IK.
+  Segments are stamped on a uniform time grid so Python send-time jitter
+  cannot modulate segment durations (measured as 10–20 % velocity ripple at
+  30 Hz — the "vibration while moving"), and each command carries a second
+  look-ahead point so an occasional late tick continues the motion smoothly
+  instead of braking to a hold. Robot
   wrist control is temporarily disabled by default while diagnosing physical
   oscillation; `--enable-magnet-twist` restores its folded, filtered and
   rate-limited absolute targets. The tilt/twist visualizer always shows the raw
   full-angle measurement. Robot height
-  control separately uses a 1 mm noise gate and 350 ms low-pass before the
-  nonlinear workspace mapping, without delaying the UI gauge.
+  control separately uses a 1 mm noise gate and a distance-adaptive low-pass
+  (350 ms near the board, 900 ms at the top of the range) before the nonlinear
+  workspace mapping, without delaying the UI gauge: because the magnet's field
+  falls off as ~1/r³, high readings are the noisiest and get the heaviest
+  smoothing while fine work near the board stays responsive.
   Real-magnet MagPilot stays in the XYZ layer so an accidental taskbar dwell
   cannot disconnect magnet height from end-effector height.
 - **Arbitration** — a latched ownership topic coordinates the gesture node

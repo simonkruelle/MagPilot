@@ -17,9 +17,12 @@ How it works
   - A damped-least-squares IK solves for joint angles that put the flange at that
     point while holding a fixed "pen" orientation (the natural orientation at the
     plane centre), seeded from the last commanded pose for continuity.
-  - The solution is streamed as short FollowJointTrajectory goals to the same
-    JointTrajectoryController used elsewhere (default position_joint_trajectory_
-    controller), so no new controller or MoveIt is required.
+  - The solution is streamed to the same JointTrajectoryController used
+    elsewhere (default position_joint_trajectory_controller), so no new
+    controller or MoveIt is required. Segments are stamped on a uniform time
+    grid (send-time jitter must not modulate segment durations), carry the
+    exact slope of the commanded sequence as velocity, and include a second
+    look-ahead point so a late tick continues the motion instead of braking.
 
 Mode switching (via /colmag/command, i.e. the touchpad UI buttons)
   - 'robot:teleop'  (Teleop button, top of the left pad)  -> following ENABLED
@@ -131,16 +134,26 @@ def _fk(q):
     return T
 
 
-def _jacobian(q, eps=1e-6):
-    T0 = _fk(q)
-    p0, R0 = T0[:3, 3], T0[:3, :3]
+def _jacobian(q):
+    """Geometric Jacobian (world frame) from one pass over the DH chain.
+
+    Joint i rotates about the z-axis of its own frame and the frame origin
+    lies on that axis, so J_lin[:, i] = z_i x (p_e - p_i), J_ang[:, i] = z_i.
+    IK runs twice inside the 33 ms streaming tick, so the Jacobian cannot
+    afford the seven extra FK evaluations of a finite-difference version.
+    """
+    T = np.eye(4)
+    axes = np.zeros((7, 3))
+    origins = np.zeros((7, 3))
+    for i, (a, d, alpha) in enumerate(_DH):
+        T = T @ _dh_T(a, d, alpha, q[i] if i < 7 else 0.0)
+        if i < 7:
+            axes[i] = T[:3, 2]
+            origins[i] = T[:3, 3]
+    p_e = T[:3, 3]
     J = np.zeros((6, 7))
-    for i in range(7):
-        dq = q.copy(); dq[i] += eps
-        Ti = _fk(dq)
-        J[:3, i] = (Ti[:3, 3] - p0) / eps
-        dR = (Ti[:3, :3] - R0) @ R0.T
-        J[3:, i] = np.array([dR[2, 1], dR[0, 2], dR[1, 0]]) / eps
+    J[:3] = np.cross(axes, p_e - origins).T
+    J[3:] = axes.T
     return J
 
 
@@ -247,7 +260,7 @@ def _solve_ik(target_p, R_des, q_seed, iters=60, lam=0.03, k_null=0.05):
         JJt = J @ J.T + (lam ** 2) * np.eye(6)
         Jpinv = J.T @ np.linalg.inv(JJt)
         null = (np.eye(7) - Jpinv @ J) @ (k_null * (_HOME - q))
-        q = np.clip(q + J.T @ np.linalg.solve(JJt, e) + null, _Q_MIN, _Q_MAX)
+        q = np.clip(q + Jpinv @ e + null, _Q_MIN, _Q_MAX)
     T = _fk(q)
     return q, float(np.linalg.norm(target_p - T[:3, 3]))
 
@@ -301,8 +314,20 @@ class ColmagDrawNode:
             '~height_sensor_max', MAGNET_HEIGHT_MAX_M))
         self.height_gain = float(rospy.get_param(
             '~height_gain', MAGNET_HEIGHT_GAIN))
+        # Low-pass time constant on the measured height. The dipole field a
+        # magnet emits falls off as ~1/r^3, so a fixed measurement noise turns
+        # into a height error that grows steeply with distance: readings near
+        # the board are crisp, readings far from it are noisy. The filter is
+        # therefore distance-adaptive — it interpolates from the responsive
+        # near value at the board to the heavier far value at the top of the
+        # range, so lifting the magnet high is smoothed hard (where the sensor
+        # is least certain) while fine work near the board stays quick. Set
+        # ~height_smoothing_tau_far == ~height_smoothing_tau for the old fixed
+        # behaviour.
         self.height_smoothing_tau = max(0.0, float(rospy.get_param(
             '~height_smoothing_tau', 0.35)))
+        self.height_smoothing_tau_far = max(0.0, float(rospy.get_param(
+            '~height_smoothing_tau_far', 0.90)))
         self.height_noise_deadband = abs(float(rospy.get_param(
             '~height_noise_deadband', 0.001)))
         self.height_ee_min = float(rospy.get_param(
@@ -403,15 +428,17 @@ class ColmagDrawNode:
         self.traj_pub = None
         self._q_sent = None
         # Velocity continuity for streamed segments: each trajectory point
-        # carries the (filtered) joint velocity instead of 0, so the controller
-        # splines THROUGH the waypoints rather than braking to a stop at each
-        # one — that stop-start cycle is what made streaming sound and feel
-        # rougher than the long gesture trajectories.
+        # carries the exact slope of the commanded joint sequence instead of
+        # 0, so the controller splines THROUGH the waypoints rather than
+        # braking to a stop at each one — that stop-start cycle is what made
+        # streaming sound and feel rougher than the long gesture trajectories.
         self._desired_filt = None
         self._height_filtered_m = None
         self._cart_velocity = np.zeros(3)
         self._cart_acceleration = np.zeros(3)
-        self._qd_filt = np.zeros(7)
+        self._qd_cmd = np.zeros(7)
+        # Uniform time base for streamed segments (see _next_stream_stamp).
+        self._stream_stamp = None
         # While a take-over approach trajectory plays (see
         # _takeover_approach), streaming ticks stay suspended until this time.
         self._stream_hold_until = 0.0
@@ -483,6 +510,32 @@ class ColmagDrawNode:
             rospy.logwarn('Trajectory server %s not available. Is the arm launched '
                           'with controller:=%s ?', ns, self.controller)
 
+    def _next_stream_stamp(self, now):
+        """Stamp streamed segments on a uniform grid, not with send time.
+
+        The waypoint positions advance by exactly one spline step per tick,
+        so their deadlines must advance by exactly one period too. Stamping
+        with wall-clock send times lets Python timer/IK jitter (several ms
+        per tick) modulate the segment durations, and the controller executes
+        that as velocity ripple at the streaming rate — felt as vibration
+        during motion even though the position sequence itself is smooth.
+
+        Re-anchoring is forward-only: when a tick was skipped (hold,
+        unreachable target, idle) the wall clock runs more than a period past
+        the grid, so the grid jumps forward to it. A small *lead* (the grid
+        ahead of the wall clock, from an early-firing timer) is kept as-is —
+        snapping the stamp backward there would place a segment before its
+        predecessor and make the controller drop or re-splice it, the very
+        jolt this grid removes. rospy.Timer targets absolute tick times, so
+        the lead stays bounded within one period instead of accumulating.
+        """
+        period = 1.0 / self.update_rate
+        if self._stream_stamp is None or (now - self._stream_stamp).to_sec() > period:
+            self._stream_stamp = now
+        stamp = self._stream_stamp
+        self._stream_stamp = stamp + rospy.Duration(period)
+        return stamp
+
     def _halt_streaming(self):
         """Stop any in-flight streamed motion: an empty trajectory makes the
         controller drop queued segments and hold the current position."""
@@ -521,7 +574,7 @@ class ColmagDrawNode:
         self._height_filtered_m = None
         self._cart_velocity = np.zeros(3)
         self._cart_acceleration = np.zeros(3)
-        self._qd_filt = np.zeros(7)
+        self._qd_cmd = np.zeros(7)
         self.pen_yaw = 0.0
         self.R_pen = self.R_pen0.copy()
         self._magnet_twist_base_yaw = self.pen_yaw
@@ -564,7 +617,7 @@ class ColmagDrawNode:
         self._height_filtered_m = None
         self._cart_velocity = np.zeros(3)
         self._cart_acceleration = np.zeros(3)
-        self._qd_filt = np.zeros(7)
+        self._qd_cmd = np.zeros(7)
         self._stream_hold_until = rospy.get_time() + duration + 0.5
         rospy.logwarn('Teleop take-over from a gesture pose — moving to the '
                       'ready pose (%.1fs) before following starts.', duration)
@@ -588,7 +641,7 @@ class ColmagDrawNode:
                 self._height_filtered_m = None
                 self._cart_velocity = np.zeros(3)
                 self._cart_acceleration = np.zeros(3)
-                self._qd_filt = np.zeros(7)
+                self._qd_cmd = np.zeros(7)
                 self._stream_hold_until = 0.0
             elif not self.dry_run:
                 rospy.logwarn('Cannot enable teleop (%s): no joint state received '
@@ -801,13 +854,30 @@ class ColmagDrawNode:
         # Remove the noise band from real motion so crossing it does not create
         # a discontinuous target step.
         error -= np.copysign(self.height_noise_deadband, error)
-        if self.height_smoothing_tau <= 1e-9:
+        tau = self._height_tau(self._height_filtered_m)
+        if tau <= 1e-9:
             alpha = 1.0
         else:
             dt = 1.0 / self.update_rate
-            alpha = dt / (self.height_smoothing_tau + dt)
+            alpha = dt / (tau + dt)
         self._height_filtered_m += alpha * error
         return self._height_filtered_m
+
+    def _height_tau(self, height_m):
+        """Distance-adaptive low-pass time constant for the measured height.
+
+        Interpolates linearly between the near and far time constants over the
+        sensor range: the farther the magnet is from the board (where the
+        1/r^3 field makes the estimate noisiest), the heavier the smoothing.
+        """
+        span = self.height_sensor_max - self.height_sensor_min
+        if span <= 1e-9:
+            return self.height_smoothing_tau
+        fraction = (height_m - self.height_sensor_min) / span
+        fraction = min(1.0, max(0.0, fraction))
+        return (self.height_smoothing_tau
+                + fraction * (self.height_smoothing_tau_far
+                              - self.height_smoothing_tau))
 
     def _lift_gate_paused(self, pos):
         """Pause following while the magnet/cursor is lifted away from the board."""
@@ -828,7 +898,7 @@ class ColmagDrawNode:
                 self._desired_filt = None
                 self._cart_velocity = np.zeros(3)
                 self._cart_acceleration = np.zeros(3)
-                self._qd_filt = np.zeros(7)
+                self._qd_cmd = np.zeros(7)
                 if self.latest_joints is not None:
                     self.q_cmd = self.latest_joints.copy()
                     self.p_target = _fk(self.q_cmd)[:3, 3].copy()
@@ -842,7 +912,7 @@ class ColmagDrawNode:
             self._lift_paused = True
             self._cart_velocity = np.zeros(3)
             self._cart_acceleration = np.zeros(3)
-            self._qd_filt = np.zeros(7)
+            self._qd_cmd = np.zeros(7)
             self._halt_streaming()
             rospy.loginfo('Lift gate paused: |pose.z| %.1f cm > %.1f cm; arm holds.',
                           100.0 * z, 100.0 * self.lift_gate_z)
@@ -938,7 +1008,11 @@ class ColmagDrawNode:
             self.max_lin_jerk)
         target = np.clip(target, self.box_lo, self.box_hi)
 
-        q_new, err = _solve_ik(target, self.R_pen, self.q_cmd)
+        # Warm-seeded tracking solves converge in a few iterations; a tight
+        # cap keeps the worst-case tick inside the 33 ms budget (measured:
+        # residuals are identical at caps 10/15/60, but uncapped stall-solves
+        # took 20-40 ms and made the streaming loop itself miss ticks).
+        q_new, err = _solve_ik(target, self.R_pen, self.q_cmd, iters=15)
 
         if err > self.max_reach_error:
             # Do not commit p_target: hold at the last reachable point so the
@@ -956,10 +1030,14 @@ class ColmagDrawNode:
         step = np.clip(q_new - self.q_cmd, -self.max_joint_step, self.max_joint_step)
         self.q_cmd = self.q_cmd + step
 
-        # Filtered joint velocity for the trajectory point. The low-pass keeps
-        # it continuous across ticks and lets it decay to ~0 as the target
-        # filter/glide converge, so the final segment still ends at rest.
-        self._qd_filt += 0.5 * (step * self.update_rate - self._qd_filt)
+        # Velocity tag for the trajectory point: the exact slope of the
+        # commanded sequence. The controller fits a cubic between its current
+        # desired state and (position, velocity) at the deadline, so any
+        # mismatch between the two makes every 100 ms segment bulge around
+        # the true path. The sequence is already smooth — the S-curve bounds
+        # acceleration and jerk upstream — so its raw slope is smooth too;
+        # low-pass filtering it here would only add lag, i.e. mismatch.
+        self._qd_cmd = step * self.update_rate
 
         if self.dry_run:
             rospy.loginfo_throttle(0.5, '[dry] target %s | IK err %.2f mm',
@@ -980,10 +1058,32 @@ class ColmagDrawNode:
         traj.joint_names = list(self.joint_names)
         pt = JointTrajectoryPoint()
         pt.positions = self.q_cmd.tolist()
-        pt.velocities = self._qd_filt.tolist()
+        pt.velocities = self._qd_cmd.tolist()
         pt.time_from_start = rospy.Duration(self.command_time)
         traj.points = [pt]
-        traj.header.stamp = rospy.Time.now()
+
+        # Look-ahead point one command_time further along the spline. If the
+        # next tick is late (Python GC, a slow IK solve), the controller keeps
+        # moving along the prediction instead of finishing the segment and
+        # snapping its desired velocity to zero — a jolt per late tick.
+        p2, _, _ = _s_curve_step(
+            self.p_target, self._cart_velocity, self._cart_acceleration,
+            desired, self.command_time, self.s_curve_min_duration,
+            self.max_lin_speed, self.max_lin_acceleration, self.max_lin_jerk)
+        p2 = np.clip(p2, self.box_lo, self.box_hi)
+        q2, err2 = _solve_ik(p2, self.R_pen, self.q_cmd, iters=15)
+        if err2 <= self.max_reach_error:
+            lookahead_ticks = self.command_time * self.update_rate
+            step2 = np.clip(q2 - self.q_cmd,
+                            -self.max_joint_step * lookahead_ticks,
+                            self.max_joint_step * lookahead_ticks)
+            pt2 = JointTrajectoryPoint()
+            pt2.positions = (self.q_cmd + step2).tolist()
+            pt2.velocities = (step2 / self.command_time).tolist()
+            pt2.time_from_start = rospy.Duration(2.0 * self.command_time)
+            traj.points.append(pt2)
+
+        traj.header.stamp = self._next_stream_stamp(rospy.Time.now())
         self.traj_pub.publish(traj)
         self._q_sent = self.q_cmd.copy()
 
