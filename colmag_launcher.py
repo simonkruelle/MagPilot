@@ -865,17 +865,18 @@ class Launcher(tk.Tk):
         return nodes if ok else ''
 
     def _pipeline_action_ready(self):
+        # Only an IN-PROGRESS cleanup gates a start, and only briefly. A cleanup
+        # that could not prove the pipeline idle must NOT permanently disable the
+        # Control Center: survivors it cannot reach (a leftover host-network
+        # container, a gazebo/franka_control that ignores rosnode kill, or an
+        # external master) would otherwise brick every button. start_robot still
+        # refuses to launch a conflicting backend on its own, so allowing the
+        # action here is safe; the failed-cleanup notice and the status dots tell
+        # the user to use Stop all / Restart container.
         if self._stopping:
             messagebox.showinfo(
                 'Pipeline cleanup',
                 'Please wait for the current pipeline cleanup to finish.')
-            return False
-        if self._cleanup_error:
-            messagebox.showerror(
-                'Pipeline conflict',
-                'The Control Center is blocked because cleanup could not '
-                'guarantee an idle ROS pipeline.\n\n{}'.format(
-                    self._cleanup_error))
             return False
         return True
 
@@ -1289,7 +1290,18 @@ class Launcher(tk.Tk):
                 build_pipeline_probe_command(), timeout=5)
             _, live_after = in_container(
                 build_live_ros_nodes_command(PIPELINE_ROS_NODES), timeout=10)
-            if local_after.strip() == 'running':
+            # Escalate to a container restart when ANYTHING still stands after the
+            # kill pass — local processes OR live ROS nodes. pkill and the process
+            # probe are scoped to this container's PID namespace, but the live
+            # node check reaches every node on the shared host-network master, so
+            # a node this container cannot pkill (e.g. one left in the legacy
+            # container, already stopped above) can still show as live. Restarting
+            # colmag_simon tears down its ROS master and every pipeline process,
+            # which clears those registrations; only a truly external master
+            # (host-level or the lab robot) can survive it.
+            survivors_after_kill = [
+                node for node in live_after.splitlines() if node.strip()]
+            if local_after.strip() == 'running' or survivors_after_kill:
                 restarted, restart_detail = sh(
                     'docker restart %s' % CONTAINER, timeout=60)
                 if not restarted:
@@ -1311,7 +1323,9 @@ class Launcher(tk.Tk):
                     parts.append('local COLMAG processes remain')
                 if survivors:
                     parts.append(
-                        'live ROS nodes remain: {}'.format(', '.join(survivors)))
+                        'live ROS nodes remain ({}) — likely on a master outside '
+                        'colmag_simon (another container or host-level roscore)'
+                        .format(', '.join(survivors)))
                 detail = '; '.join(parts)
             elif not ok:
                 # A command may have returned non-zero while still achieving
@@ -1345,7 +1359,11 @@ class Launcher(tk.Tk):
                 .format(detail or 'Docker command failed'))
         self._pipeline_notice = notice
         self._replace_log(notice)
-        self.after(3500, self._clear_pipeline_notice, notice)
+        # A success notice is transient; a failure notice stays up so the user
+        # sees that survivors remain and can act (Restart container), instead of
+        # the launcher silently looking idle while nodes are still live.
+        if ok:
+            self.after(3500, self._clear_pipeline_notice, notice)
 
     def _clear_pipeline_notice(self, notice):
         if self._pipeline_notice == notice:

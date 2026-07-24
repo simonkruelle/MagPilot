@@ -215,6 +215,18 @@ class LauncherCleanupHookTests(unittest.TestCase):
 
         launcher._begin_pipeline_cleanup.assert_called_once_with('startup')
 
+    def test_failed_cleanup_does_not_block_pipeline_actions(self):
+        # A cleanup that could not prove the pipeline idle must never brick the
+        # Control Center: survivors it cannot reach (a leftover host-network
+        # container, or a gazebo/franka_control ignoring rosnode kill) would
+        # otherwise disable every Start button permanently. Only an in-progress
+        # cleanup may gate a start.
+        launcher = Launcher.__new__(Launcher)
+        launcher._stopping = False
+        launcher._cleanup_error = 'live ROS nodes remain: /gazebo'
+
+        self.assertTrue(launcher._pipeline_action_ready())
+
     def test_window_close_stops_pipeline_before_destroy(self):
         launcher = Launcher.__new__(Launcher)
         launcher._closing = False
