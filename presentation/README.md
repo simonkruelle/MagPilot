@@ -32,14 +32,20 @@ To regenerate either repository copy:
 ```bash
 ffmpeg -i INPUT.MP4 -i presentation/assets/demo_mask_overlay.png \
   -filter_complex \
-  "[0:v]scale=1920:1080:flags=lanczos,setsar=1[s];\
-   [s][1:v]overlay=0:0:format=auto,format=yuv420p[out]" \
+  "[0:v]scale=1920:1080:flags=lanczos:out_color_matrix=bt709,\
+   format=yuv420p[s];\
+   [1:v]format=yuva420p[mask];\
+   [s][mask]overlay=0:0:format=yuv420,format=yuv420p,\
+   setparams=range=limited:color_primaries=bt709:\
+   color_trc=bt709:colorspace=bt709[out]" \
   -map "[out]" -map 0:a? -c:v libx264 -preset slow -crf 21 \
+  -x264-params "colorprim=bt709:transfer=bt709:colormatrix=bt709" \
   -c:a copy -movflags +faststart OUTPUT.mp4
 ```
 
-The README uses ten-second animated GIF previews because GitHub does not render
-HTML video controls consistently. Clicking a GIF opens its full MP4 with audio.
+The README uses eight-second animated GIF previews at the source-native 25 fps
+because GitHub does not render HTML video controls consistently. Clicking a GIF
+opens its full MP4 with audio.
 
 ## Running order (≈9 min)
 

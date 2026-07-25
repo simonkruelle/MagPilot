@@ -119,7 +119,7 @@ each is read and executed on the real arm.
 
 <p align="center">
   <a href="https://github.com/emaema99/COLMAG-seminar-SS26/raw/Simon/docs/demo_classify.mp4">
-    <img src="docs/demo_classify.gif" alt="Air-writing classification demo" width="640">
+    <img src="docs/demo_classify.gif" alt="Air-writing classification demo" width="720">
   </a>
 </p>
 
@@ -128,7 +128,7 @@ and lift the package.
 
 <p align="center">
   <a href="https://github.com/emaema99/COLMAG-seminar-SS26/raw/Simon/docs/demo_teleop.mp4">
-    <img src="docs/demo_teleop.gif" alt="MagPilot package teleoperation demo" width="640">
+    <img src="docs/demo_teleop.gif" alt="MagPilot package teleoperation demo" width="720">
   </a>
 </p>
 
