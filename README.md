@@ -76,10 +76,20 @@ container from the existing image with hot-plug serial access enabled.
 
 ## Two modes, one surface
 
-| ✍️ Writing studio | ✈️ MagPilot flight deck |
-|:---:|:---:|
-| <img src="docs/interface.png" width="420"> | <img src="docs/magpilot.png" width="420"> |
-| Draw a character — it is inked live, classified when you pause, and the arm executes on confirm. | Dwell on **MagPilot**: your magnet becomes the little blue plane and the arm follows it. |
+<table>
+  <tr>
+    <th width="50%">✍️ Writing studio</th>
+    <th width="50%">✈️ MagPilot flight deck</th>
+  </tr>
+  <tr>
+    <td width="50%" align="center"><img src="docs/interface.png" width="100%" alt="Writing studio interface"></td>
+    <td width="50%" align="center"><img src="docs/magpilot.png" width="100%" alt="MagPilot flight deck interface"></td>
+  </tr>
+  <tr>
+    <td>Draw a character — it is inked live, classified when you pause, and the arm executes on confirm.</td>
+    <td>Dwell on <strong>MagPilot</strong>: your magnet becomes the little blue plane and the arm follows it.</td>
+  </tr>
+</table>
 
 **Writing mode** — the legend beside the canvas shows the full mapping:
 
