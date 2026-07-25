@@ -119,7 +119,7 @@ each is read and executed on the real arm.
 
 <p align="center">
   <a href="https://github.com/emaema99/COLMAG-seminar-SS26/raw/Simon/docs/demo_classify.mp4">
-    <img src="docs/demo_classify.gif" alt="Air-writing classification demo" width="720">
+    <img src="docs/demo_classify.gif" alt="Air-writing classification demo" width="640">
   </a>
 </p>
 
@@ -128,12 +128,12 @@ and lift the package.
 
 <p align="center">
   <a href="https://github.com/emaema99/COLMAG-seminar-SS26/raw/Simon/docs/demo_teleop.mp4">
-    <img src="docs/demo_teleop.gif" alt="MagPilot package teleoperation demo" width="720">
+    <img src="docs/demo_teleop.gif" alt="MagPilot package teleoperation demo" width="640">
   </a>
 </p>
 
-<sub>The animated previews play directly on GitHub. Click either one for the
-full 1080p video with audio, or open
+<sub>The full-length animated previews play directly on GitHub. Click either
+one for the 1080p video with audio, or open
 [air-writing](docs/demo_classify.mp4) · [teleoperation](docs/demo_teleop.mp4).</sub>
 
 ### The hardware
@@ -183,12 +183,12 @@ flowchart LR
 - **Motion** — damped-least-squares IK (analytic Jacobian, iteration-capped to
   stay inside the 33 ms tick) streamed at 30 Hz with velocity-continuous
   points, so the controller splines *through* the waypoints instead of braking
-  at each one. Targets first pass a jerk-limited S-curve (0.10 m/s, 0.20 m/s²,
-  0.80 m/s³). Segments are stamped on a uniform time grid so send-time jitter
+  at each one. Targets first pass a jerk-limited S-curve (0.12 m/s, 0.30 m/s²,
+  1.50 m/s³). Segments are stamped on a uniform time grid so send-time jitter
   can't modulate their duration (the old "vibration while moving"), and each
   carries a look-ahead point so a late tick keeps gliding instead of stalling.
 - **Height & twist filtering** — height uses a 1 mm noise gate and a
-  distance-adaptive low-pass (350 ms near the board → 900 ms far), because the
+  distance-adaptive low-pass (250 ms near the board → 650 ms far), because the
   field falls off as ~1/r³ so distant readings are the noisiest. Wrist twist is
   off by default (`--enable-magnet-twist` re-enables its folded, rate-limited
   target) while physical oscillation is tuned; the visualiser always shows raw
@@ -259,23 +259,17 @@ mode (runs `fr3_real.launch robot_ip:=…`) and keep the E-stop reachable.
 
 ## Repository map
 
-```
-colmag_launcher.py             MagPilot Control Center — the one-window app (host)
-magnetometer_reader.py         writing studio + MagPilot flight deck (interface)
-colmag/                        interface building blocks: buttons, modes, mappings
-ros/colmag_ros/
-  launch/
-    fr3.launch                 FR3 in Gazebo
-    fr3_real.launch            real FR3 connection
-    colmag_arm_nodes.launch    teleop + gesture nodes, one launch
-  scripts/
-    colmag_draw_node.py        MagPilot: cursor → arm, height, twist, gripper
-    colmag_robot_node.py       gestures: letter tricks, digit cube, homing
-presentation/                  keynote pitch deck (.pptx) + generator + assets
-tests/                         unit + smoke tests
-tools/                         calibration, CSV visualizer, screenshot makers
-docs/                          images + guides
-```
+| Path | What lives there |
+|---|---|
+| [`colmag_launcher.py`](colmag_launcher.py) | Host-side MagPilot Control Center for starting, stopping, and monitoring the complete pipeline. |
+| [`magnetometer_reader.py`](magnetometer_reader.py) | Writing studio, MagPilot flight deck, sensor reader, and ROS interface. |
+| [`colmag/`](colmag/) | Shared interaction widgets, control mappings, magnetic simulation, and robot targets. |
+| [`ros/colmag_ros/launch/`](ros/colmag_ros/launch/) | Gazebo and real-FR3 launch files plus the combined arm-node launch. |
+| [`ros/colmag_ros/scripts/`](ros/colmag_ros/scripts/) | Cartesian MagPilot controller, gesture controller, sensor node, and robot utilities. |
+| [`presentation/`](presentation/) | Generated keynote deck, source generator, poster frames, and presentation notes. |
+| [`tests/`](tests/) | Unit, regression, trajectory, classifier, and launcher lifecycle tests. |
+| [`tools/`](tools/) | Calibration, CSV visualization, screenshot, installation, and stream-check utilities. |
+| [`docs/`](docs/) | README media, full demo videos, animated previews, and project guides. |
 
 ---
 
