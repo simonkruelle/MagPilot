@@ -117,18 +117,23 @@ magnet.
 **✍️ Air-writing → the arm performs.** Write **A**, **B**, **D** on the board;
 each is read and executed on the real arm.
 
-<div align="center">
-<video src="https://github.com/emaema99/COLMAG-seminar-SS26/raw/Simon/docs/demo_classify.mp4" poster="https://github.com/emaema99/COLMAG-seminar-SS26/raw/Simon/docs/demo_classify.jpg" controls muted width="720"></video>
-</div>
+<p align="center">
+  <a href="https://github.com/emaema99/COLMAG-seminar-SS26/raw/Simon/docs/demo_classify.mp4">
+    <img src="docs/demo_classify.gif" alt="Air-writing classification demo" width="640">
+  </a>
+</p>
 
 **✈️ Teleoperation → pick up a package.** Fly the arm by hand, then lower, grip
 and lift the package.
 
-<div align="center">
-<video src="https://github.com/emaema99/COLMAG-seminar-SS26/raw/Simon/docs/demo_teleop.mp4" poster="https://github.com/emaema99/COLMAG-seminar-SS26/raw/Simon/docs/demo_teleop.jpg" controls muted width="720"></video>
-</div>
+<p align="center">
+  <a href="https://github.com/emaema99/COLMAG-seminar-SS26/raw/Simon/docs/demo_teleop.mp4">
+    <img src="docs/demo_teleop.gif" alt="MagPilot package teleoperation demo" width="640">
+  </a>
+</p>
 
-<sub>Videos not playing above? Click to watch:
+<sub>The animated previews play directly on GitHub. Click either one for the
+full 1080p video with audio, or open
 [air-writing](docs/demo_classify.mp4) · [teleoperation](docs/demo_teleop.mp4).</sub>
 
 ### The hardware

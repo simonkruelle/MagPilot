@@ -11,37 +11,35 @@ magnet.* Built to be presented in ~8–10 minutes with two live demo videos.
 | `build_keynote.py` | Regenerates the `.pptx` from scratch (`python3 presentation/build_keynote.py`). Edit copy/design here, not by hand, so it stays reproducible. |
 | `assets/` | All images the deck embeds: the sensor-board close-up, wide setup shots, video poster frames, and UI screenshots. |
 
-## The two demo videos (not in git — they're gigabytes)
+## The two demo videos
 
 The deck has a **poster frame** on each demo slide with a `▶ PLAY:` cue. Drop the
 matching video onto that slide in your presentation app and set it to play:
 
-| Slide | Insert this video | Shows |
-|---|---|---|
-| 6 · *Air-writing* | `ABD.MP4` | Writing A/B/D on the board; the arm reads and performs each. |
-| 7 · *Teleoperation* | `Package_Lift_&_B.MP4` | Flying the arm, picking up a package, then a handwritten B. |
+| Slide | Full 4K source | Repository-ready copy | Shows |
+|---|---|---|---|
+| 6 · *Air-writing* | `ABD.MP4` | `docs/demo_classify.mp4` | Writing A/B/D on the board; the arm reads and performs each. |
+| 7 · *Teleoperation* | `Package_Lift_&_B.MP4` | `docs/demo_teleop.mp4` | Flying the arm, picking up a package, then a handwritten B. |
 
-**Cleaned versions.** `build`-adjacent ffmpeg produced `*_clean.mp4` copies next to
-the originals (in `~/Downloads/COLMAG VIDEOS/`): downscaled to 1080p with a
-"spotlight" treatment — sharp centre, softly blurred + darkened edges — so the
-people walking in the background recede. Prefer these for the talk.
+The original 4K recordings remain outside git in
+`~/Downloads/COLMAG VIDEOS/`. The repository copies are H.264 1080p with the
+busy upper-left background replaced by a solid backdrop-colored mask. Nothing
+is blurred, so the robot stays sharp through its complete range of motion.
+`assets/demo_mask_overlay.png` stores the exact opaque polygon mask.
 
-To clean any other clip the same way:
+To regenerate either repository copy:
 
 ```bash
-# one-time: make the feathered radial mask
-convert -size 1920x1080 radial-gradient:white-black -level 12%,72% spotlight_mask.png
-
-# then per video (sharp centre, blurred/darkened surround, 1080p)
-ffmpeg -i INPUT.MP4 -i spotlight_mask.png -filter_complex \
- "[0:v]scale=1920:1080,setsar=1[s];[s]split[a][b];\
-  [b]boxblur=26:2,eq=brightness=-0.06[bl];\
-  [1:v]format=gray,scale=1920:1080[m];\
-  [bl][a][m]maskedmerge[out]" \
- -map "[out]" -map 0:a? -c:v libx264 -preset veryfast -crf 23 -c:a aac OUTPUT_clean.mp4
+ffmpeg -i INPUT.MP4 -i presentation/assets/demo_mask_overlay.png \
+  -filter_complex \
+  "[0:v]scale=1920:1080:flags=lanczos,setsar=1[s];\
+   [s][1:v]overlay=0:0:format=auto,format=yuv420p[out]" \
+  -map "[out]" -map 0:a? -c:v libx264 -preset slow -crf 21 \
+  -c:a copy -movflags +faststart OUTPUT.mp4
 ```
 
-Tighter core = less blur: raise the `-level` low value (e.g. `18%,78%`).
+The README uses ten-second animated GIF previews because GitHub does not render
+HTML video controls consistently. Clicking a GIF opens its full MP4 with audio.
 
 ## Running order (≈9 min)
 
