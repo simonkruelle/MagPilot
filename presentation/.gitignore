@@ -1,0 +1,8 @@
+# Raw demo videos live in ~/Downloads/COLMAG VIDEOS/ — gigabytes, never commit.
+*.mp4
+*.MP4
+*.mov
+*.MOV
+# Local build/QA scratch
+*.pdf
+assets/_full/

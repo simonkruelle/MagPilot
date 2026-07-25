@@ -109,6 +109,26 @@ Switch modes any time — **even mid-motion**: entering MagPilot cancels the
 running gesture, glides to a ready pose, then hands you the arm. `Shift+E`
 bails out instantly and the arm returns to neutral.
 
+## On the real robot
+
+Running live on a Franka Research 3: air-write a letter and the arm performs it,
+or fly the arm by hand and pick up a package — the only device the operator
+touches is a magnet.
+
+<div align="center">
+
+| The sensor board | The workcell |
+|:---:|:---:|
+| <img src="docs/hardware.jpg" width="420"> | <img src="docs/setup.jpg" width="420"> |
+| A 4×4 grid of 16 off-the-shelf magnetometers on one breakout board — the whole "controller." | Robot, a flat sensor board, a magnet, and a screen. Nothing worn, nothing wired to the operator. |
+
+</div>
+
+> **Pitch deck.** A keynote-style presentation of the project lives in
+> [`presentation/`](presentation/) (`MagPilot_Keynote.pptx`, 16 slides with
+> speaker notes) — see [presentation/README.md](presentation/README.md) for the
+> run-of-show and where the demo videos slot in.
+
 ## Under the hood
 
 - **Sensing** — 48-channel magnetometer grid (218-byte packets @ 921600 baud);
@@ -216,6 +236,7 @@ ros/colmag_ros/
   scripts/colmag_robot_node.py   gestures: letter tricks, digit cube, homing
 tests/                      unit + smoke tests (run with python3 tests/…)
 tools/                      calibration, CSV visualizer, logo/screenshot makers
+presentation/               keynote pitch deck (.pptx) + generator + assets
 docs/                       images + guides
 ```
 
