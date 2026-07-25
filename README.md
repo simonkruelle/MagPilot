@@ -82,8 +82,8 @@ container from the existing image with hot-plug serial access enabled.
     <th width="50%">✈️ MagPilot flight deck</th>
   </tr>
   <tr>
-    <td width="50%" align="center"><img src="docs/interface.png" width="100%" alt="Writing studio interface"></td>
-    <td width="50%" align="center"><img src="docs/magpilot.png" width="100%" alt="MagPilot flight deck interface"></td>
+    <td width="50%" align="center"><img src="docs/interface.png" width="420" height="240" alt="Writing studio interface"></td>
+    <td width="50%" align="center"><img src="docs/magpilot.png" width="420" height="240" alt="MagPilot flight deck interface"></td>
   </tr>
   <tr>
     <td>Draw a character — it is inked live, classified when you pause, and the arm executes on confirm.</td>
@@ -106,14 +106,43 @@ the gripper thresholds, with a height gauge beside it. The top taskbar
 (**Draw** = exit · **Gripper** · **Layer**) is button-only; everywhere else on
 the deck is play area.
 
-| Magnet input | Controls | Simulate on the trackpad |
-|---|---|---|
-| move over the board | end-effector X/Y | move the cursor |
-| height over sensors (0.7–15 cm) | nonlinear end-effector height | mouse **scroll wheel** |
-| lift above 15 cm | pause — arm holds | scroll to the top |
-| tilt ≥ 55° / ≤ 25° | gripper open / close | numpad **2** / **8** |
-| twist while tilt ≥ 10° (15° steps) | rotate the end-effector | numpad **4** / **6** |
-| — | reset magnet upright | numpad **5** |
+<table>
+  <tr>
+    <th>🧲 Magnet input</th>
+    <th>🤖 Robot response</th>
+    <th>⌨️ Trackpad simulation</th>
+  </tr>
+  <tr>
+    <td><strong>↔ Move</strong><br><sub>over the sensor board</sub></td>
+    <td>End-effector X/Y</td>
+    <td>Move the cursor</td>
+  </tr>
+  <tr>
+    <td><strong>↕ Height</strong><br><sub>0.7–15 cm above sensors</sub></td>
+    <td>Nonlinear end-effector height</td>
+    <td>Mouse <strong>scroll wheel</strong></td>
+  </tr>
+  <tr>
+    <td><strong>⏸ Lift</strong><br><sub>above 15 cm</sub></td>
+    <td>Pause and hold pose</td>
+    <td>Scroll to the top</td>
+  </tr>
+  <tr>
+    <td><strong>◒ Tilt</strong><br><sub>open ≥ 55° · close ≤ 25°</sub></td>
+    <td>Open / close gripper</td>
+    <td>Numpad <kbd>2</kbd> / <kbd>8</kbd></td>
+  </tr>
+  <tr>
+    <td><strong>↻ Twist</strong><br><sub>tilt ≥ 10° · 15° steps</sub></td>
+    <td>Rotate end-effector</td>
+    <td>Numpad <kbd>4</kbd> / <kbd>6</kbd></td>
+  </tr>
+  <tr>
+    <td><strong>◎ Upright</strong></td>
+    <td>Reset magnet reference</td>
+    <td>Numpad <kbd>5</kbd></td>
+  </tr>
+</table>
 
 Switch modes any time — **even mid-motion**: entering MagPilot cancels the
 running gesture, glides to a ready pose, then hands you the arm. `Shift+E`

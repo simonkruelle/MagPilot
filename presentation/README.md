@@ -9,6 +9,7 @@ magnet.* Built to be presented in ~8–10 minutes with two live demo videos.
 |---|---|
 | `MagPilot_Keynote.pptx` | The deck — 16 slides, 16:9, **speaker notes on every slide**. Open in PowerPoint, Keynote, or LibreOffice Impress. |
 | `build_keynote.py` | Regenerates the `.pptx` from scratch (`python3 presentation/build_keynote.py`). Edit copy/design here, not by hand, so it stays reproducible. |
+| `workcell_mask_editor.html` | Standalone workcell-image mask tuner with polygon regions, color sampling, lightness, opacity, edge softness, and PNG export. |
 | `assets/` | All images the deck embeds: the sensor-board close-up, wide setup shots, video poster frames, and UI screenshots. |
 
 ## The two demo videos
