@@ -189,7 +189,7 @@ scrubbing, and audio.</sub>
 
 | The sensor board | The workcell |
 |:---:|:---:|
-| <img src="docs/hardware.jpg" width="300"> | <img src="docs/setup.jpg" width="470"> |
+| <img src="docs/hardware.jpg" width="300"> | <img src="docs/setup.png" width="470"> |
 | A 4×4 grid of 16 off-the-shelf magnetometers on one breakout board — the whole "controller." | Robot, a flat sensor board, a magnet, and a screen. Nothing worn, nothing wired to the operator. |
 
 </div>
