@@ -109,17 +109,27 @@ Switch modes any time — **even mid-motion**: entering MagPilot cancels the
 running gesture, glides to a ready pose, then hands you the arm. `Shift+E`
 bails out instantly and the arm returns to neutral.
 
-## On the real robot
+## See it in action
 
-Running live on a Franka Research 3: air-write a letter and the arm performs it,
-or fly the arm by hand and pick up a package — the only device the operator
-touches is a magnet.
+Running live on a Franka Research 3 — the only device the operator touches is a
+magnet. *Click a clip to play.*
+
+<div align="center">
+
+| ✍️ Air-writing → the arm performs | ✈️ Teleoperation → pick up a package |
+|:---:|:---:|
+| [<img src="docs/demo_classify.jpg" width="410" alt="Air-writing demo">](docs/demo_classify.mp4) | [<img src="docs/demo_teleop.jpg" width="410" alt="Teleoperation demo">](docs/demo_teleop.mp4) |
+| Write **A**, **B**, **D** on the board — read and executed on the real arm. | Fly the arm by hand, lower, grip, and lift a package. |
+
+</div>
+
+### The hardware
 
 <div align="center">
 
 | The sensor board | The workcell |
 |:---:|:---:|
-| <img src="docs/hardware.jpg" width="420"> | <img src="docs/setup.jpg" width="420"> |
+| <img src="docs/hardware.jpg" width="300"> | <img src="docs/setup.jpg" width="470"> |
 | A 4×4 grid of 16 off-the-shelf magnetometers on one breakout board — the whole "controller." | Robot, a flat sensor board, a magnet, and a screen. Nothing worn, nothing wired to the operator. |
 
 </div>
@@ -129,41 +139,52 @@ touches is a magnet.
 > speaker notes) — see [presentation/README.md](presentation/README.md) for the
 > run-of-show and where the demo videos slot in.
 
-## Under the hood
+## How it works
 
-- **Sensing** — 48-channel magnetometer grid (218-byte packets @ 921600 baud);
-  the dipole model recovers position + orientation (θ = tilt, φ = twist). A
-  configurable 10 mm sensor bias maps the observed 17 mm board-contact reading
-  to the physical 7 mm board height for display and robot control; CSV data
-  remains raw.
+```mermaid
+flowchart LR
+    M["🧲 Magnet"] --> B["16-sensor<br/>board"]
+    B --> D["Dipole model<br/>position · height<br/>tilt · twist"]
+    D --> O["EasyOCR<br/>letters & digits"]
+    D --> C["Filter +<br/>jerk-limited S-curve"]
+    O --> A["🤖 Franka FR3"]
+    C --> A
+```
+
+- **Sense** — a 4×4 grid of 16 magnetometers samples the field 30× a second; a
+  dipole model recovers the magnet's position, height, tilt and twist.
+- **Recognise** — air-written strokes are inked onto a canvas and classified
+  into letters and digits by **EasyOCR**, each mapped to a robot action.
+- **Move** — the noisy magnet signal is smoothed and jerk-limited before
+  inverse kinematics streams it to the arm, so the real robot tracks your hand
+  without vibration.
+
+<details>
+<summary><b>Engineering details</b></summary>
+
+- **Sensing** — 48-channel magnetometer grid (218-byte packets @ 921600 baud).
+  A configurable 10 mm sensor bias maps the observed 17 mm board-contact
+  reading to the physical 7 mm board height; recorded CSV data stays raw.
 - **Recognition** — strokes are anti-aliased into a 64 px canvas with a
-  velocity-hysteresis ink gate (slow corners stay connected) and classified
-  by an OCR backend.
-- **Motion** — damped least-squares IK (analytic Jacobian, iteration-capped
-  to stay inside the 33 ms tick) streamed at 30 Hz with velocity-continuous
-  trajectory points: the controller splines *through* the waypoints instead
-  of braking at each one. Cartesian targets pass through a jerk-limited
-  S-curve tracker (0.10 m/s, 0.20 m/s² and 0.80 m/s³ defaults) before IK.
-  Segments are stamped on a uniform time grid so Python send-time jitter
-  cannot modulate segment durations (measured as 10–20 % velocity ripple at
-  30 Hz — the "vibration while moving"), and each command carries a second
-  look-ahead point so an occasional late tick continues the motion smoothly
-  instead of braking to a hold. Robot
-  wrist control is temporarily disabled by default while diagnosing physical
-  oscillation; `--enable-magnet-twist` restores its folded, filtered and
-  rate-limited absolute targets. The tilt/twist visualizer always shows the raw
-  full-angle measurement. Robot height
-  control separately uses a 1 mm noise gate and a distance-adaptive low-pass
-  (350 ms near the board, 900 ms at the top of the range) before the nonlinear
-  workspace mapping, without delaying the UI gauge: because the magnet's field
-  falls off as ~1/r³, high readings are the noisiest and get the heaviest
-  smoothing while fine work near the board stays responsive.
-  Real-magnet MagPilot stays in the XYZ layer so an accidental taskbar dwell
-  cannot disconnect magnet height from end-effector height.
-- **Arbitration** — a latched ownership topic coordinates the gesture node
-  and the teleop node; startup homing, mid-motion take-over and exit homing
-  are all handled gracefully. The interface also latches MagPilot enable state,
-  so restarting the arm nodes while MagPilot is open does not disable following.
+  velocity-hysteresis ink gate (slow corners stay connected) before EasyOCR.
+- **Motion** — damped-least-squares IK (analytic Jacobian, iteration-capped to
+  stay inside the 33 ms tick) streamed at 30 Hz with velocity-continuous
+  points, so the controller splines *through* the waypoints instead of braking
+  at each one. Targets first pass a jerk-limited S-curve (0.10 m/s, 0.20 m/s²,
+  0.80 m/s³). Segments are stamped on a uniform time grid so send-time jitter
+  can't modulate their duration (the old "vibration while moving"), and each
+  carries a look-ahead point so a late tick keeps gliding instead of stalling.
+- **Height & twist filtering** — height uses a 1 mm noise gate and a
+  distance-adaptive low-pass (350 ms near the board → 900 ms far), because the
+  field falls off as ~1/r³ so distant readings are the noisiest. Wrist twist is
+  off by default (`--enable-magnet-twist` re-enables its folded, rate-limited
+  target) while physical oscillation is tuned; the visualiser always shows raw
+  tilt/twist.
+- **Arbitration** — a latched ownership topic coordinates the gesture and
+  teleop nodes (startup homing, mid-motion take-over, exit homing), and latches
+  MagPilot's enable state so restarting the arm nodes never drops following.
+
+</details>
 
 ## Quick start
 
@@ -191,10 +212,12 @@ python3 magnetometer_reader.py --input-source trackpad --ros --classifier-labels
 ```
 </details>
 
-## Real robot — staged safety pipeline
+<details>
+<summary><b>Real robot — staged safety pipeline</b></summary>
 
 Never skip stages. Move on only when the current stage behaves exactly as
-expected; stop immediately on anything unexpected.
+expected; stop immediately on anything unexpected. Use the app's **Real robot**
+mode (runs `fr3_real.launch robot_ip:=…`) and keep the E-stop reachable.
 
 | Stage | What | Moves the real arm? |
 |:---:|---|:---:|
@@ -203,8 +226,7 @@ expected; stop immediately on anything unexpected.
 | 3 | One tiny supervised nudge: `rosrun colmag_ros fr3_simple_move.py _dry_run:=false` | ✳ tiny, supervised |
 | 4 | One approved gesture, then the full stack, then MagPilot | ✳ supervised |
 
-Use the app's **Real robot** mode (runs `fr3_real.launch robot_ip:=…`). Keep
-the E-stop reachable at all times.
+</details>
 
 <details>
 <summary><b>Troubleshooting</b></summary>
@@ -224,21 +246,15 @@ the E-stop reachable at all times.
 
 ## Repository map
 
-```
-colmag_launcher.py          MagPilot Control Center (run on the host)
-magnetometer_reader.py      writing studio + MagPilot flight deck
-colmag/                     interface building blocks (buttons, modes)
-ros/colmag_ros/
-  launch/fr3.launch              FR3 in Gazebo (+ practice objects)
-  launch/fr3_real.launch         real FR3 connection
-  launch/colmag_arm_nodes.launch teleop + gesture nodes together
-  scripts/colmag_draw_node.py    MagPilot: cursor→EE, height, twist, gripper
-  scripts/colmag_robot_node.py   gestures: letter tricks, digit cube, homing
-tests/                      unit + smoke tests (run with python3 tests/…)
-tools/                      calibration, CSV visualizer, logo/screenshot makers
-presentation/               keynote pitch deck (.pptx) + generator + assets
-docs/                       images + guides
-```
+| Path | What it is |
+|---|---|
+| `colmag_launcher.py` | MagPilot Control Center — the one-window app (run on the host) |
+| `magnetometer_reader.py` | Writing studio + MagPilot flight deck (the interface) |
+| `colmag/` | Interface building blocks — buttons, modes, control mappings |
+| `ros/colmag_ros/launch/` | `fr3.launch` (Gazebo) · `fr3_real.launch` (real FR3) · `colmag_arm_nodes.launch` (teleop + gestures) |
+| `ros/colmag_ros/scripts/` | `colmag_draw_node.py` (MagPilot: cursor → arm, height, twist, gripper) · `colmag_robot_node.py` (letter/digit gestures) |
+| `presentation/` | Keynote pitch deck (`.pptx`) + generator + assets |
+| `tests/` · `tools/` · `docs/` | Unit + smoke tests · calibration & visualizers · images & guides |
 
 ---
 

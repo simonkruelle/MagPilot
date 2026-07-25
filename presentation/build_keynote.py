@@ -408,16 +408,16 @@ Everything runs on ROS in one Docker container.
 # 9 — THE HARDWARE (sensor board hero)
 # ═══════════════════════════════════════════════════════════════════════════
 s = slide(NAVY)
-cover(s, A('hw_sensor_board.jpg'), 0, 0, Inches(8.4), SH)
-rect(s, Inches(8.4), 0, Inches(4.933), SH, NAVY)
-kicker(s, Inches(8.8), Inches(1.2), 'The hardware', color=BLUE)
-text(s, Inches(8.8), Inches(1.75), Inches(4.2), Inches(3.4),
-     [[('A 4×4 grid of', 30, True, WHITE)],
-      [('off-the-shelf', 30, True, WHITE)],
-      [('magnetometers.', 30, True, WHITE)],
+picture(s, A('hw_sensor_board.jpg'), Inches(0.5), Inches(0.5), Inches(5.7),
+        Inches(6.5), align='center', valign='middle')
+kicker(s, Inches(6.9), Inches(1.6), 'The hardware', color=BLUE)
+text(s, Inches(6.9), Inches(2.15), Inches(5.7), Inches(3.6),
+     [[('A 4×4 grid of', 32, True, WHITE)],
+      [('off-the-shelf', 32, True, WHITE)],
+      [('magnetometers.', 32, True, WHITE)],
       [('', 12, False, WHITE)],
       [('16 sensors, one breakout board, a flat pad on the desk. The only '
-        'thing in the user\'s hand is a magnet.', 17, False, MIST)]],
+        'thing in the user\'s hand is a magnet.', 18, False, MIST)]],
      space_after=4, line_spacing=1.05)
 notes(s, """
 This is the entire sensing rig: sixteen magnetometer modules on a flat board,
