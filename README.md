@@ -187,10 +187,20 @@ scrubbing, and audio.</sub>
 
 <div align="center">
 
-| The sensor board | The workcell |
-|:---:|:---:|
-| <img src="docs/hardware.jpg" width="300"> | <img src="docs/setup.png" width="470"> |
-| A 4×4 grid of 16 off-the-shelf magnetometers on one breakout board — the whole "controller." | Robot, a flat sensor board, a magnet, and a screen. Nothing worn, nothing wired to the operator. |
+<table>
+  <tr>
+    <th width="50%">The sensor board</th>
+    <th width="50%">The workcell</th>
+  </tr>
+  <tr>
+    <td width="50%" align="center"><img src="docs/hardware.jpg" width="100%" alt="Four-by-four magnetometer sensor board"></td>
+    <td width="50%" align="center"><img src="docs/setup.png" width="100%" alt="MagPilot robot workcell"></td>
+  </tr>
+  <tr>
+    <td>A 4×4 grid of 16 off-the-shelf magnetometers on one breakout board — the whole "controller."</td>
+    <td>Robot, a flat sensor board, a magnet, and a screen. Nothing worn, nothing wired to the operator.</td>
+  </tr>
+</table>
 
 </div>
 
