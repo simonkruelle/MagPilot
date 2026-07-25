@@ -43,10 +43,11 @@ ffmpeg -i INPUT.MP4 -i presentation/assets/demo_mask_overlay.png \
   -c:a copy -movflags +faststart OUTPUT.mp4
 ```
 
-The README uses full-length animated GIF previews at 640x360 and 20 fps because
-GitHub does not render HTML video controls consistently. This profile keeps both
-recordings below GitHub's 100 MB per-file limit; clicking a GIF opens its 1080p
-MP4 with audio.
+The README uses full-length monochrome GIF previews at 800x450 and 18 fps.
+Monochrome keeps the image crisp and on-brand while keeping both complete
+recordings below GitHub's 100 MB per-file limit. GitHub strips custom HTML video
+controls from README files, so each preview links to its 1080p MP4 player for
+pause, timeline scrubbing, and audio.
 
 ## Running order (≈9 min)
 

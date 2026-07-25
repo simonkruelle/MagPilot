@@ -118,23 +118,31 @@ magnet.
 each is read and executed on the real arm.
 
 <p align="center">
-  <a href="https://github.com/emaema99/COLMAG-seminar-SS26/raw/Simon/docs/demo_classify.mp4">
-    <img src="docs/demo_classify.gif" alt="Air-writing classification demo" width="640">
+  <a href="docs/demo_classify.mp4">
+    <img src="docs/demo_classify.gif" alt="Air-writing classification demo" width="800">
   </a>
+  <br>
+  <strong><a href="docs/demo_classify.mp4">▶ Open 1080p player</a></strong>
+  <br>
+  <sub>Pause · scrub the timeline · audio</sub>
 </p>
 
 **✈️ Teleoperation → pick up a package.** Fly the arm by hand, then lower, grip
 and lift the package.
 
 <p align="center">
-  <a href="https://github.com/emaema99/COLMAG-seminar-SS26/raw/Simon/docs/demo_teleop.mp4">
-    <img src="docs/demo_teleop.gif" alt="MagPilot package teleoperation demo" width="640">
+  <a href="docs/demo_teleop.mp4">
+    <img src="docs/demo_teleop.gif" alt="MagPilot package teleoperation demo" width="800">
   </a>
+  <br>
+  <strong><a href="docs/demo_teleop.mp4">▶ Open 1080p player</a></strong>
+  <br>
+  <sub>Pause · scrub the timeline · audio</sub>
 </p>
 
-<sub>The full-length animated previews play directly on GitHub. Click either
-one for the 1080p video with audio, or open
-[air-writing](docs/demo_classify.mp4) · [teleoperation](docs/demo_teleop.mp4).</sub>
+<sub>The full-length monochrome previews play directly on GitHub. GIFs cannot
+provide playback controls; open either 1080p player for pause, timeline
+scrubbing, and audio.</sub>
 
 ### The hardware
 
@@ -259,17 +267,28 @@ mode (runs `fr3_real.launch robot_ip:=…`) and keep the E-stop reachable.
 
 ## Repository map
 
-| Path | What lives there |
-|---|---|
-| [`colmag_launcher.py`](colmag_launcher.py) | Host-side MagPilot Control Center for starting, stopping, and monitoring the complete pipeline. |
-| [`magnetometer_reader.py`](magnetometer_reader.py) | Writing studio, MagPilot flight deck, sensor reader, and ROS interface. |
-| [`colmag/`](colmag/) | Shared interaction widgets, control mappings, magnetic simulation, and robot targets. |
-| [`ros/colmag_ros/launch/`](ros/colmag_ros/launch/) | Gazebo and real-FR3 launch files plus the combined arm-node launch. |
-| [`ros/colmag_ros/scripts/`](ros/colmag_ros/scripts/) | Cartesian MagPilot controller, gesture controller, sensor node, and robot utilities. |
-| [`presentation/`](presentation/) | Generated keynote deck, source generator, poster frames, and presentation notes. |
-| [`tests/`](tests/) | Unit, regression, trajectory, classifier, and launcher lifecycle tests. |
-| [`tools/`](tools/) | Calibration, CSV visualization, screenshot, installation, and stream-check utilities. |
-| [`docs/`](docs/) | README media, full demo videos, animated previews, and project guides. |
+<pre>
+                         ☁   MAGPILOT FLIGHT MAP   ☁
+                                      │
+COLMAG-seminar-SS26/
+├── <a href="colmag_launcher.py">colmag_launcher.py</a>              host control center and process lifecycle
+├── <a href="magnetometer_reader.py">magnetometer_reader.py</a>          writing studio, flight deck, sensor and ROS bridge
+├── <a href="colmag/">colmag/</a>                          interaction widgets, mappings and robot targets
+├── <a href="digit_classifier/">digit_classifier/</a>                handwriting inference
+├── <a href="ros/colmag_ros/">ros/colmag_ros/</a>
+│   ├── <a href="ros/colmag_ros/launch/">launch/</a>
+│   │   ├── <a href="ros/colmag_ros/launch/fr3.launch">fr3.launch</a>                 Gazebo FR3
+│   │   ├── <a href="ros/colmag_ros/launch/fr3_real.launch">fr3_real.launch</a>            real FR3 connection
+│   │   └── <a href="ros/colmag_ros/launch/colmag_arm_nodes.launch">colmag_arm_nodes.launch</a>   MagPilot and gesture nodes
+│   └── <a href="ros/colmag_ros/scripts/">scripts/</a>
+│       ├── <a href="ros/colmag_ros/scripts/colmag_draw_node.py">colmag_draw_node.py</a>        Cartesian MagPilot controller
+│       ├── <a href="ros/colmag_ros/scripts/colmag_robot_node.py">colmag_robot_node.py</a>       gestures, digit cube and homing
+│       └── <a href="ros/colmag_ros/scripts/colmag_sensor_node.py">colmag_sensor_node.py</a>      magnetometer serial bridge
+├── <a href="presentation/">presentation/</a>                    keynote deck, generator and presentation media
+├── <a href="tests/">tests/</a>                           unit, regression and lifecycle coverage
+├── <a href="tools/">tools/</a>                           calibration, diagnostics and setup helpers
+└── <a href="docs/">docs/</a>                            guides, screenshots and demo media
+</pre>
 
 ---
 
