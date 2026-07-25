@@ -9,6 +9,16 @@
 ![Robot](https://img.shields.io/badge/Franka-FR3%20%2F%20Panda-0A84FF)
 ![Docker](https://img.shields.io/badge/Docker-one%20command%20setup-2496ED?logo=docker&logoColor=white)
 
+<br>
+
+<p>
+<a href="https://www.tum.de/en/"><img src="docs/affiliations/tum-logo.svg" height="34" alt="Technical University of Munich"></a>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+<a href="https://www.mirmi.tum.de/en/mirmi/home/"><img src="docs/affiliations/mirmi-logo.png" height="34" alt="Munich Institute of Robotics and Machine Intelligence"></a>
+<br>
+<sub><strong>ARIES Lab</strong> · Professorship of Intelligent Bio-Robotic Systems · TUM MIRMI</sub>
+</p>
+
 **No joystick. No teach pendant. No code.**
 A single magnet over a sensor board is the entire controller for a Franka FR3 —
 air-write a character and the robot performs; pick the magnet up like a stick
@@ -314,6 +324,18 @@ mode (runs `fr3_real.launch robot_ip:=…`) and keep the E-stop reachable.
 | GUI window doesn't open | `xhost +local:root` on the host once. |
 </details>
 
+## Acknowledgements
+
+MagPilot was developed in the TUM **Master Seminar in Collaborative Robotics
+and Assistive Technology for Advanced Human-Robot Interaction** at
+[ARIES Lab](https://www.ce.cit.tum.de/en/ibrs/home/), the Professorship of
+Intelligent Bio-Robotic Systems, within the
+[Munich Institute of Robotics and Machine Intelligence (MIRMI)](https://www.mirmi.tum.de/en/mirmi/home/).
+
+Warm thanks to **Federico Masiero**, **Emanuele Aimi**, and **Luca Borriello**
+for their supervision and technical guidance, and to
+**Prof. Dr. Lorenzo Masia** for leading the seminar and research group.
+
 ## Repository map
 
 <pre>
@@ -345,7 +367,7 @@ COLMAG-seminar-SS26/
 
 <img src="docs/logo.png" width="72" alt="MagPilot icon">
 
-<sub>TUM Seminar · Collaborative Robotics and Assistive Technology for
-Advanced Human-Robot Interaction</sub>
+<sub>ARIES Lab · TUM MIRMI · Collaborative Robotics and Assistive Technology
+for Advanced Human-Robot Interaction</sub>
 
 </div>
