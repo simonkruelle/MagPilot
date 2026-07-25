@@ -112,16 +112,24 @@ bails out instantly and the arm returns to neutral.
 ## See it in action
 
 Running live on a Franka Research 3 — the only device the operator touches is a
-magnet. *Click a clip to play.*
+magnet.
+
+**✍️ Air-writing → the arm performs.** Write **A**, **B**, **D** on the board;
+each is read and executed on the real arm.
 
 <div align="center">
-
-| ✍️ Air-writing → the arm performs | ✈️ Teleoperation → pick up a package |
-|:---:|:---:|
-| [<img src="docs/demo_classify.jpg" width="410" alt="Air-writing demo">](docs/demo_classify.mp4) | [<img src="docs/demo_teleop.jpg" width="410" alt="Teleoperation demo">](docs/demo_teleop.mp4) |
-| Write **A**, **B**, **D** on the board — read and executed on the real arm. | Fly the arm by hand, lower, grip, and lift a package. |
-
+<video src="https://github.com/emaema99/COLMAG-seminar-SS26/raw/Simon/docs/demo_classify.mp4" poster="https://github.com/emaema99/COLMAG-seminar-SS26/raw/Simon/docs/demo_classify.jpg" controls muted width="720"></video>
 </div>
+
+**✈️ Teleoperation → pick up a package.** Fly the arm by hand, then lower, grip
+and lift the package.
+
+<div align="center">
+<video src="https://github.com/emaema99/COLMAG-seminar-SS26/raw/Simon/docs/demo_teleop.mp4" poster="https://github.com/emaema99/COLMAG-seminar-SS26/raw/Simon/docs/demo_teleop.jpg" controls muted width="720"></video>
+</div>
+
+<sub>Videos not playing above? Click to watch:
+[air-writing](docs/demo_classify.mp4) · [teleoperation](docs/demo_teleop.mp4).</sub>
 
 ### The hardware
 
@@ -246,15 +254,23 @@ mode (runs `fr3_real.launch robot_ip:=…`) and keep the E-stop reachable.
 
 ## Repository map
 
-| Path | What it is |
-|---|---|
-| `colmag_launcher.py` | MagPilot Control Center — the one-window app (run on the host) |
-| `magnetometer_reader.py` | Writing studio + MagPilot flight deck (the interface) |
-| `colmag/` | Interface building blocks — buttons, modes, control mappings |
-| `ros/colmag_ros/launch/` | `fr3.launch` (Gazebo) · `fr3_real.launch` (real FR3) · `colmag_arm_nodes.launch` (teleop + gestures) |
-| `ros/colmag_ros/scripts/` | `colmag_draw_node.py` (MagPilot: cursor → arm, height, twist, gripper) · `colmag_robot_node.py` (letter/digit gestures) |
-| `presentation/` | Keynote pitch deck (`.pptx`) + generator + assets |
-| `tests/` · `tools/` · `docs/` | Unit + smoke tests · calibration & visualizers · images & guides |
+```
+colmag_launcher.py             MagPilot Control Center — the one-window app (host)
+magnetometer_reader.py         writing studio + MagPilot flight deck (interface)
+colmag/                        interface building blocks: buttons, modes, mappings
+ros/colmag_ros/
+  launch/
+    fr3.launch                 FR3 in Gazebo
+    fr3_real.launch            real FR3 connection
+    colmag_arm_nodes.launch    teleop + gesture nodes, one launch
+  scripts/
+    colmag_draw_node.py        MagPilot: cursor → arm, height, twist, gripper
+    colmag_robot_node.py       gestures: letter tricks, digit cube, homing
+presentation/                  keynote pitch deck (.pptx) + generator + assets
+tests/                         unit + smoke tests
+tools/                         calibration, CSV visualizer, screenshot makers
+docs/                          images + guides
+```
 
 ---
 

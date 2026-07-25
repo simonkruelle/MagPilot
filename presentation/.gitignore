@@ -6,3 +6,4 @@
 # Local build/QA scratch
 *.pdf
 assets/_full/
+mask_editor.html
