@@ -196,7 +196,7 @@ scrubbing, and audio.</sub>
     <td width="50%" align="center"><img src="docs/setup.png" width="100%" alt="MagPilot robot workcell"></td>
   </tr>
   <tr>
-    <td>A 4×4 grid of 16 off-the-shelf magnetometers on one breakout board - the whole "controller."</td>
+    <td>A 4×4 array of 16 <a href="https://www.melexis.com/en/product/mlx90393/triaxis-micropower-magnetometer">Melexis MLX90393</a> three-axis magnetometers captures 48 field values per sample. It tracks an NdFeB permanent magnet and streams the field, position, and magnetic moment over USB serial at 921600 baud.</td>
     <td>Robot, a flat sensor board, a magnet, and a screen. Nothing worn, nothing wired to the operator.</td>
   </tr>
 </table>
