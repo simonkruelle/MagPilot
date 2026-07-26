@@ -55,46 +55,6 @@ MagPilot maps the board into a **30 × 60 × 56 cm** control volume in front of
 the robot. The separate **24 cm cube** defines only the nine digit targets:
 eight corners for `1-8`, then the center for `9`.
 
-## One window. Zero terminals.
-
-<div align="center">
-<img alt="MagPilot Control Center" src="docs/launcher.png" width="100%">
-</div>
-
-```bash
-python3 colmag_launcher.py
-```
-
-The **Control Center** starts and monitors the robot, arm controller, and
-interface from one window. Green means running; amber means simulation is
-active with Gazebo closed. Select any stage to view and copy its live log. The
-**Action mapping** button opens the task vocabulary used by classified
-characters.
-
-For hardware, choose **magnetometer**, select the numbered serial port shown in
-the log, and enter the robot IP when needed. Startup clears stale ROS processes,
-and closing the app shuts the pipeline down in order.
-
-## A control language for each task
-
-<div align="center">
-<img alt="Robot action mapping editor" src="docs/action_mapping.png" width="720">
-</div>
-
-Every recognized `A-Z` and `0-9` can be assigned to an action from the tested
-motion library. Saving is atomic and applies to the next confirmed character in
-both simulation and real-robot mode. It does not restart a ROS node or interrupt
-a running trajectory. If the file is invalid, the robot keeps its last valid
-mapping. **Restore defaults** returns every character to the original demo
-behavior.
-
-This makes MagPilot a practical base for company, lab, and private-user
-workflows. Existing motions can be rearranged without code. A new
-customer-specific task is first implemented and validated as a robot action,
-then added to the library so users can assign it from the same editor. The
-control language can change while the low-level controller, filtering, and
-safety behavior remain stable.
-
 ## Two modes, one surface
 
 <table>
@@ -210,32 +170,6 @@ and lift the package.
 provide playback controls; open either 1080p player for pause, timeline
 scrubbing, and audio.</sub>
 
-### The hardware
-
-<div align="center">
-
-<table>
-  <tr>
-    <th width="50%">The sensor board</th>
-    <th width="50%">The workcell</th>
-  </tr>
-  <tr>
-    <td width="50%" align="center"><img src="docs/hardware.jpg" width="100%" alt="Four-by-four magnetometer sensor board"></td>
-    <td width="50%" align="center"><img src="docs/setup.png" width="100%" alt="MagPilot robot workcell"></td>
-  </tr>
-  <tr>
-    <td>A 4×4 array of 16 <a href="https://www.melexis.com/en/product/mlx90393/triaxis-micropower-magnetometer">Melexis MLX90393</a> three-axis magnetometers captures 48 field values per sample. It tracks an NdFeB permanent magnet and streams the field, position, and magnetic moment over USB serial at 921600 baud.</td>
-    <td>Robot, a flat sensor board, a magnet, and a screen. Nothing worn, nothing wired to the operator.</td>
-  </tr>
-</table>
-
-</div>
-
-> **Pitch deck.** A keynote-style presentation of the project lives in
-> [`presentation/`](presentation/) (`MagPilot_Keynote.pptx`, 8 slides with
-> speaker notes) - see [presentation/README.md](presentation/README.md) for the
-> run-of-show and where the demo videos slot in.
-
 ## How it works
 
 ```mermaid
@@ -287,6 +221,64 @@ flowchart LR
   in-memory map. The interface reads the same file for its live legend.
 
 </details>
+
+## The hardware
+
+<div align="center">
+
+<table>
+  <tr>
+    <th width="50%">The sensor board</th>
+    <th width="50%">The workcell</th>
+  </tr>
+  <tr>
+    <td width="50%" align="center"><img src="docs/hardware.jpg" width="100%" alt="Four-by-four magnetometer sensor board"></td>
+    <td width="50%" align="center"><img src="docs/setup.png" width="100%" alt="MagPilot robot workcell"></td>
+  </tr>
+  <tr>
+    <td>A 4×4 array of 16 <a href="https://www.melexis.com/en/product/mlx90393/triaxis-micropower-magnetometer">Melexis MLX90393</a> three-axis magnetometers captures 48 field values per sample. It tracks an NdFeB permanent magnet and streams the field, position, and magnetic moment over USB serial at 921600 baud.</td>
+    <td>Robot, a flat sensor board, a magnet, and a screen. Nothing worn, nothing wired to the operator.</td>
+  </tr>
+</table>
+
+</div>
+
+## A control language for each task
+
+<div align="center">
+<img alt="Robot action mapping editor" src="docs/action_mapping.png" width="720">
+</div>
+
+Map any `A-Z` or `0-9` symbol to a tested robot action from the Control Center.
+Existing actions can be rearranged without code.
+
+For a new workflow, implement and validate the task once, then add it to the
+same menu. The controller and safety pipeline stay unchanged.
+
+## One window. Zero terminals.
+
+<div align="center">
+<img alt="MagPilot Control Center" src="docs/launcher.png" width="100%">
+</div>
+
+```bash
+python3 colmag_launcher.py
+```
+
+The **Control Center** starts and monitors the robot, arm controller, and
+interface from one window. Green means running; amber means simulation is
+active with Gazebo closed. Select any stage to view and copy its live log. The
+**Action mapping** button opens the task vocabulary used by classified
+characters.
+
+For hardware, choose **magnetometer**, select the numbered serial port shown in
+the log, and enter the robot IP when needed. Startup clears stale ROS processes,
+and closing the app shuts the pipeline down in order.
+
+> **Pitch deck.** A keynote-style presentation of the project lives in
+> [`presentation/`](presentation/) (`MagPilot_Keynote.pptx`, 8 slides with
+> speaker notes) - see [presentation/README.md](presentation/README.md) for the
+> run-of-show and where the demo videos slot in.
 
 ## Quick start
 
