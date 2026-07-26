@@ -13,12 +13,11 @@ needs to be co-designed and validated with users.
 
 | File | Purpose |
 |---|---|
-| `MagPilot_Keynote.pptx` | 8-slide, 16:9 deck with speaker notes and two embedded videos |
+| `MagPilot_Keynote.pptx` | 8-slide, 16:9 deck with speaker notes and two auto-playing GIFs |
 | `build_keynote.py` | Rebuilds the presentation from the repository assets |
-| `assets/demo_command.mp4` | 20-second air-written command proof |
-| `assets/demo_pick.mp4` | 48-second package-pick proof |
-| `assets/poster_command.jpg` | Poster frame for the command video |
-| `assets/poster_pick.jpg` | Poster frame for the pick video |
+| `assets/assistive_concept.png` | AI-generated, clearly labeled concept visualization |
+| `assets/demo_classify_slide.gif` | 39-second classified-command proof |
+| `assets/demo_teleop_slide.gif` | 28-second MagPilot package-pick proof |
 
 Rebuild the deck from the repository root:
 
@@ -28,36 +27,46 @@ python3 presentation/build_keynote.py
 
 ## Running order
 
-The complete talk is about 3 minutes 25 seconds, including 68 seconds of video.
-The exact script and timestamps are in the speaker notes.
+The complete talk is about 3 minutes 34 seconds, including 67 seconds of
+auto-playing demonstrations. The exact script and timestamps are in the
+speaker notes.
 
 | Time | Slide | Point |
 |---|---|---|
 | 0:00 | MagPilot | One passive magnet can become the interface |
 | 0:18 | Accessibility gap | The robot can help while its controller excludes |
 | 0:40 | Assistive concept | Put the input where reliable movement remains |
-| 1:00 | Control language | Move, raise, tilt, and lift away to pause |
-| 1:20 | Proof 1 | Play the 20-second air-written command clip |
-| 1:45 | Proof 2 | Play the 48-second package-pick clip |
-| 2:38 | Working system | Show the real FR3, sensor array, loop, and workspace |
-| 2:58 | Next step | Mount, co-design, and validate with users |
+| 1:02 | Two operating modes | Classified tasks and direct MagPilot control |
+| 1:27 | Proof 1 | Auto-play 39 seconds of letter/digit classification |
+| 2:11 | Proof 2 | Auto-play 28 seconds of MagPilot teleoperation |
+| 2:44 | Modular pipeline | Trackpad input, Gazebo verification, and real FR3 |
+| 3:07 | Next step | Mount, co-design, and validate with users |
 
-Both videos are embedded in the PowerPoint file. Click each blue play prompt,
-let the clip run, and continue when it finishes. Avoid speaking over the clips
-unless the room needs a brief explanation.
+Both demonstrations are embedded as animated GIFs. They begin automatically
+when their slide appears, without a play-button click. Let each clip run and
+avoid speaking over it unless the room needs a brief explanation.
 
 ## Demo media
 
-The short presentation clips are cut from the full masked 1080p demonstrations:
+The slide GIFs are cut from the full masked 1080p demonstrations. They use
+monochrome 960x540 output at 20 fps with a 64-tone optimized palette. This keeps
+the motion smooth and the robot readable while keeping the PowerPoint below
+GitHub's 100 MB per-file limit.
 
 ```bash
-ffmpeg -ss 4 -i docs/demo_classify.mp4 -t 20 \
-  -c:v libx264 -preset slow -crf 20 -c:a aac -movflags +faststart \
-  presentation/assets/demo_command.mp4
+ffmpeg -ss 33 -i docs/demo_classify.mp4 -t 39 \
+  -filter_complex \
+  "fps=20,scale=960:540:flags=lanczos,hue=s=0,split[base][palette_input];\
+  [palette_input]palettegen=max_colors=64:stats_mode=diff[palette];\
+  [base][palette]paletteuse=dither=sierra2_4a:diff_mode=rectangle" \
+  -loop 0 presentation/assets/demo_classify_slide.gif
 
-ffmpeg -ss 18 -i docs/demo_teleop.mp4 -t 48 \
-  -c:v libx264 -preset slow -crf 20 -c:a aac -movflags +faststart \
-  presentation/assets/demo_pick.mp4
+ffmpeg -ss 38 -i docs/demo_teleop.mp4 -t 28 \
+  -filter_complex \
+  "fps=20,scale=960:540:flags=lanczos,hue=s=0,split[base][palette_input];\
+  [palette_input]palettegen=max_colors=64:stats_mode=diff[palette];\
+  [base][palette]paletteuse=dither=sierra2_4a:diff_mode=rectangle" \
+  -loop 0 presentation/assets/demo_teleop_slide.gif
 ```
 
 The full recordings remain linked from the project README for anyone who wants
@@ -65,10 +74,12 @@ to inspect the complete demonstrations.
 
 ## Delivery
 
-Open the deck in PowerPoint and test both videos before presenting. Keynote and
-LibreOffice Impress can import the file, but media playback should be checked on
-the exact presentation computer.
+Open the deck in PowerPoint and test both animations before presenting. Animated
+GIFs start when a slide opens and restart when that slide is entered again.
+Keynote and LibreOffice Impress can import the file, but playback should still
+be checked on the exact presentation computer.
 
 Keep the assistive claim precise: MagPilot currently demonstrates the sensing,
 mapping, and real-robot control mechanism. It has not yet been tested as an
-assistive device. The final slide makes that next research step explicit.
+assistive device. Slide 3 labels its AI-generated image as a concept
+visualization, and the final slide makes the next research step explicit.

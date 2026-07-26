@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Generate the short MagPilot assistive-robotics keynote.
 
-The deck is deliberately concise: eight slides, about 137 seconds of spoken
-material, and 68 seconds of embedded demo video. At a calm pace it runs for
-roughly 3:25, leaving room for pauses while staying below five minutes.
+The deck is deliberately concise: eight slides, about 147 seconds of spoken
+material, and 67 seconds of auto-playing demo GIFs. At a calm pace it runs for
+roughly 3:34, leaving room for pauses while staying below five minutes.
 
 Regenerate with:
     python3 presentation/build_keynote.py
@@ -151,18 +151,6 @@ def add_cover(s, path, left, top, width, height):
     return pic
 
 
-def add_movie(s, movie_path, poster_path, left=0, top=0, width=SW, height=SH):
-    return s.shapes.add_movie(
-        movie_path,
-        left,
-        top,
-        width,
-        height,
-        poster_frame_image=poster_path,
-        mime_type="video/mp4",
-    )
-
-
 def kicker(s, value, dark=False, left=Inches(0.78), top=Inches(0.55)):
     add_text(
         s, left, top, Inches(8.5), Inches(0.35),
@@ -200,14 +188,14 @@ def metric(s, left, top, number, label, dark=False):
 
 SETUP = os.path.join(DOCS, "setup.png")
 SENSOR = os.path.join(DOCS, "hardware.jpg")
+WRITING_UI = os.path.join(DOCS, "interface.png")
 UI = os.path.join(DOCS, "magpilot.png")
 LOGO = os.path.join(ASSETS, "logo.png")
 TUM_LOGO = os.path.join(ASSETS, "tum-logo.png")
 MIRMI_LOGO = os.path.join(DOCS, "affiliations", "mirmi-logo.png")
-VIDEO_COMMAND = os.path.join(ASSETS, "demo_command.mp4")
-VIDEO_PICK = os.path.join(ASSETS, "demo_pick.mp4")
-POSTER_COMMAND = os.path.join(ASSETS, "poster_command.jpg")
-POSTER_PICK = os.path.join(ASSETS, "poster_pick.jpg")
+ASSISTIVE_CONCEPT = os.path.join(ASSETS, "assistive_concept.png")
+GIF_CLASSIFY = os.path.join(ASSETS, "demo_classify_slide.gif")
+GIF_TELEOP = os.path.join(ASSETS, "demo_teleop_slide.gif")
 
 
 # 1. Title and promise
@@ -302,118 +290,108 @@ is not robot capability. It is access to that capability.
 
 # 3. Assistive concept
 s = make_slide(NAVY)
-kicker(s, "The idea", dark=True)
+add_cover(s, ASSISTIVE_CONCEPT, 0, 0, SW, SH)
+concept_scrim_top = box(s, 0, 0, Inches(6.65), Inches(2.35), NAVY)
+set_opacity(concept_scrim_top, 0.90)
+concept_scrim_bottom = box(
+    s, 0, Inches(5.42), Inches(6.65), Inches(2.08), NAVY
+)
+set_opacity(concept_scrim_bottom, 0.90)
+kicker(s, "The assistive direction", dark=True, top=Inches(0.34))
 add_text(
-    s, Inches(0.78), Inches(1.03), Inches(5.55), Inches(1.7),
+    s, Inches(0.78), Inches(0.86), Inches(5.65), Inches(1.25),
     [
-        ("Put the input where", 35, False, WHITE),
-        ("reliable movement remains.", 35, True, BLUE),
+        ("Put the input where", 31, False, WHITE),
+        ("reliable movement remains.", 31, True, BLUE),
     ],
     space_after=2,
 )
 add_text(
-    s, Inches(0.8), Inches(2.95), Inches(5.0), Inches(1.4),
+    s, Inches(0.8), Inches(5.64), Inches(5.55), Inches(0.72),
     [
-        ("A small magnet could sit on a cuff or residual limb. The sensor board "
-         "reads its movement through the air.", 19, False, MIST)
+        ("A passive magnet on a comfortable cuff could turn residual-limb "
+         "movement into direct robot control.", 16, False, MIST)
     ],
-    line_spacing=1.12,
-)
-magnet = s.shapes.add_shape(
-    MSO_SHAPE.OVAL, Inches(0.85), Inches(4.72), Inches(1.18), Inches(1.18)
-)
-magnet.fill.solid()
-magnet.fill.fore_color.rgb = BLUE
-magnet.line.fill.background()
-magnet.shadow.inherit = False
-tf = magnet.text_frame
-tf.clear()
-tf.vertical_anchor = MSO_ANCHOR.MIDDLE
-p = tf.paragraphs[0]
-p.alignment = PP_ALIGN.CENTER
-r = p.add_run()
-r.text = "N\nS"
-r.font.name = FONT
-r.font.size = Pt(19)
-r.font.bold = True
-r.font.color.rgb = WHITE
-add_text(
-    s, Inches(2.3), Inches(4.63), Inches(3.6), Inches(1.35),
-    [
-        ("NO BATTERY", 14, True, BLUE),
-        ("NO BUTTONS", 14, True, BLUE),
-        ("NO GRIP REQUIRED", 14, True, BLUE),
-    ],
-    space_after=7,
-)
-box(s, Inches(6.48), Inches(0.58), Inches(6.25), Inches(6.28), WHITE, radius=True)
-add_picture(
-    s, SENSOR, Inches(6.7), Inches(0.78), Inches(5.82), Inches(5.82)
+    line_spacing=1.05,
 )
 add_text(
-    s, Inches(6.75), Inches(6.26), Inches(5.7), Inches(0.35),
-    [("16 x three-axis MLX90393 magnetometers", 12, True, SUBTLE)],
-    align=PP_ALIGN.CENTER,
+    s, Inches(0.8), Inches(6.43), Inches(5.55), Inches(0.3),
+    [("NO BATTERY  |  NO BUTTONS  |  NO GRIP REQUIRED", 11, True, BLUE)],
 )
-footer(s, 3, dark=True)
+add_text(
+    s, Inches(0.8), Inches(6.96), Inches(5.55), Inches(0.25),
+    [("AI-GENERATED CONCEPT | NOT USER-VALIDATED", 9, True, MIST)],
+)
 add_notes(s, """
-[0:40-1:00]
-The proposed assistive form is simple: mount a small passive magnet wherever a
-person has comfortable, repeatable movement, for example on a cuff or residual
-limb. Nothing needs charging, gripping, or pressing. A flat sensor array turns
-that movement into robot commands.
+[0:40-1:02]
+This image is an AI-generated concept, not a user trial. The proposed assistive
+form is simple: place a passive magnet on a comfortable cuff wherever a person
+has reliable movement, for example on a residual limb. Nothing needs charging,
+gripping, or pressing. The sensor array reads that movement through the air.
 """)
 
 
-# 4. Control language
+# 4. Two operating modes
 s = make_slide(SKY)
-kicker(s, "The control language")
+kicker(s, "Two modes, one interface")
 add_text(
-    s, Inches(0.78), Inches(1.02), Inches(5.35), Inches(1.0),
-    [("One magnet. Four direct actions.", 32, True, INK)],
+    s, Inches(0.78), Inches(1.02), Inches(11.8), Inches(0.72),
+    [("Choose a task, or pilot continuously.", 32, True, INK)],
 )
-controls = [
-    ("MOVE", "30 x 60 cm X/Y workspace"),
-    ("RAISE", "56 cm vertical travel"),
-    ("TILT", "open or close the gripper"),
-    ("LIFT AWAY", "pause and hold safely"),
+mode_columns = [
+    (
+        Inches(0.78),
+        "01  CLASSIFIED COMMANDS",
+        "Write a letter or digit",
+        "The classifier maps the symbol to a stored robot task.",
+        WRITING_UI,
+        "AIR-WRITE  |  CLASSIFY  |  EXECUTE",
+    ),
+    (
+        Inches(6.82),
+        "02  MAGPILOT TELEOPERATION",
+        "Move the magnet directly",
+        "X/Y, height, and gripper state follow continuously.",
+        UI,
+        "MOVE  |  RAISE  |  TILT  |  LIFT AWAY TO PAUSE",
+    ),
 ]
-for i, (title, detail) in enumerate(controls):
-    top = Inches(2.18 + i * 1.05)
-    box(s, Inches(0.82), top + Inches(0.04), Inches(0.10), Inches(0.72), BLUE)
+for left, label, title, detail, image_path, flow in mode_columns:
+    box(s, left, Inches(1.88), Inches(5.72), Inches(4.87), WHITE, radius=True)
     add_text(
-        s, Inches(1.17), top, Inches(1.48), Inches(0.75),
-        [(title, 15, True, BLUE)],
-        anchor=MSO_ANCHOR.MIDDLE,
+        s, left + Inches(0.25), Inches(2.1), Inches(5.2), Inches(0.3),
+        [(label, 11, True, BLUE)],
     )
     add_text(
-        s, Inches(2.58), top, Inches(3.35), Inches(0.75),
-        [(detail, 17, False, INK)],
-        anchor=MSO_ANCHOR.MIDDLE,
+        s, left + Inches(0.25), Inches(2.46), Inches(5.2), Inches(0.42),
+        [(title, 21, True, INK)],
     )
-box(s, Inches(6.28), Inches(0.75), Inches(6.42), Inches(5.98), WHITE, radius=True)
-add_picture(
-    s, UI, Inches(6.5), Inches(0.98), Inches(5.98), Inches(5.52)
-)
-add_text(
-    s, Inches(6.45), Inches(6.35), Inches(6.0), Inches(0.3),
-    [("The live interface shows position, height, tilt, and gripper state.",
-      11, False, SUBTLE)],
-    align=PP_ALIGN.CENTER,
-)
+    add_text(
+        s, left + Inches(0.25), Inches(2.9), Inches(5.2), Inches(0.42),
+        [(detail, 13, False, SUBTLE)],
+    )
+    add_picture(
+        s, image_path, left + Inches(0.25), Inches(3.42),
+        Inches(5.22), Inches(2.65),
+    )
+    add_text(
+        s, left + Inches(0.25), Inches(6.22), Inches(5.2), Inches(0.28),
+        [(flow, 10, True, BLUE)],
+        align=PP_ALIGN.CENTER,
+    )
 footer(s, 4)
 add_notes(s, """
-[1:00-1:20]
-The mapping stays physical: move the magnet and the arm moves in X and Y;
-raise it and the arm rises; tilt it to control the gripper; lift it away and
-the robot pauses. The interface exposes a bounded workspace and makes the
-current state visible.
+[1:02-1:27]
+The same interface offers two ways to work. In command mode, a person writes a
+letter or digit and the classifier maps it to a stored robot task. In MagPilot
+mode, the magnet becomes a continuous controller for position, height, and the
+gripper. Lifting it away pauses the arm.
 """)
 
 
-# 5. Embedded command demo
+# 5. Auto-playing classified-command demo
 s = make_slide(NAVY)
-add_movie(s, VIDEO_COMMAND, POSTER_COMMAND)
+s.shapes.add_picture(GIF_CLASSIFY, 0, 0, SW, SH)
 top_band = box(s, 0, 0, SW, Inches(1.03), NAVY)
 set_opacity(top_band, 0.92)
 add_text(
@@ -425,25 +403,24 @@ add_text(
     anchor=MSO_ANCHOR.MIDDLE,
 )
 badge = box(
-    s, Inches(10.72), Inches(0.23), Inches(1.88), Inches(0.52), BLUE, radius=True
+    s, Inches(10.62), Inches(0.23), Inches(1.98), Inches(0.52), BLUE, radius=True
 )
 add_text(
-    s, Inches(10.72), Inches(0.23), Inches(1.88), Inches(0.52),
-    [("CLICK TO PLAY  0:20", 10, True, WHITE)],
+    s, Inches(10.62), Inches(0.23), Inches(1.98), Inches(0.52),
+    [("AUTO PLAY  0:39", 10, True, WHITE)],
     align=PP_ALIGN.CENTER,
     anchor=MSO_ANCHOR.MIDDLE,
 )
 add_notes(s, """
-[1:20-1:45]
-This is the current hand-held laboratory proof. One air-written A becomes a
-discrete robot command. Click the video and let the 20-second clip play. Do not
-talk over it unless the room needs a short explanation.
+[1:27-2:11]
+This is classified-command mode on the real robot. The animation starts
+automatically and runs for 39 seconds. Let it play without speaking over it.
 """)
 
 
-# 6. Embedded pick demo
+# 6. Auto-playing MagPilot demo
 s = make_slide(NAVY)
-add_movie(s, VIDEO_PICK, POSTER_PICK)
+s.shapes.add_picture(GIF_TELEOP, 0, 0, SW, SH)
 top_band = box(s, 0, 0, SW, Inches(1.03), NAVY)
 set_opacity(top_band, 0.92)
 add_text(
@@ -455,57 +432,68 @@ add_text(
     anchor=MSO_ANCHOR.MIDDLE,
 )
 badge = box(
-    s, Inches(10.72), Inches(0.23), Inches(1.88), Inches(0.52), BLUE, radius=True
+    s, Inches(10.62), Inches(0.23), Inches(1.98), Inches(0.52), BLUE, radius=True
 )
 add_text(
-    s, Inches(10.72), Inches(0.23), Inches(1.88), Inches(0.52),
-    [("CLICK TO PLAY  0:48", 10, True, WHITE)],
+    s, Inches(10.62), Inches(0.23), Inches(1.98), Inches(0.52),
+    [("AUTO PLAY  0:28", 10, True, WHITE)],
     align=PP_ALIGN.CENTER,
     anchor=MSO_ANCHOR.MIDDLE,
 )
 add_notes(s, """
-[1:45-2:38]
-Now the continuous mode: move, lower, close the gripper, and lift the package.
-Click the video and let the 48-second clip play. This is the central proof that
-the magnetic input can perform a useful physical task on a real robot.
+[2:11-2:44]
+Now MagPilot teleoperation: move, lower, close the gripper, and lift the
+package. The animation starts automatically and runs for 28 seconds. This is
+the direct proof that magnetic input can perform a useful physical task.
 """)
 
 
-# 7. What is working today
+# 7. Modular verification pipeline
 s = make_slide(NAVY)
 add_cover(s, SETUP, 0, 0, SW, SH)
-panel = box(s, 0, 0, Inches(5.25), SH, NAVY)
-set_opacity(panel, 0.92)
-kicker(s, "What works today", dark=True, left=Inches(0.68), top=Inches(0.58))
+panel = box(s, 0, 0, Inches(7.25), SH, NAVY)
+set_opacity(panel, 0.94)
+kicker(s, "Modular by design", dark=True, left=Inches(0.68), top=Inches(0.58))
 add_text(
-    s, Inches(0.68), Inches(1.12), Inches(4.15), Inches(1.55),
+    s, Inches(0.68), Inches(1.12), Inches(5.9), Inches(1.35),
     [
-        ("Not a simulation.", 34, False, WHITE),
-        ("A working real-robot system.", 34, True, WHITE),
+        ("One interface.", 33, False, WHITE),
+        ("Three verification layers.", 33, True, WHITE),
     ],
     space_after=3,
 )
-metric(s, Inches(0.72), Inches(3.08), "16", "three-axis magnetic sensors", True)
-metric(s, Inches(0.72), Inches(4.25), "30 Hz", "filtered Cartesian control", True)
-metric(s, Inches(0.72), Inches(5.42), "30 x 60 x 56 cm", "bounded robot workspace", True)
-caption_band = box(
-    s, Inches(7.15), Inches(6.47), Inches(5.58), Inches(0.56), NAVY, radius=True
-)
-set_opacity(caption_band, 0.84)
+layers = [
+    ("1", "TRACKPAD INPUT", "Simulate the magnet sensor for fast debugging."),
+    ("2", "GAZEBO", "Verify robot motion safely before hardware."),
+    ("3", "REAL SENSOR + FR3", "Run the same GUI and ROS command path."),
+]
+for index, (number, title, detail) in enumerate(layers):
+    top = Inches(2.72 + index * 1.12)
+    add_text(
+        s, Inches(0.72), top, Inches(0.48), Inches(0.48),
+        [(number, 23, True, BLUE)],
+    )
+    add_text(
+        s, Inches(1.35), top + Inches(0.02), Inches(2.2), Inches(0.32),
+        [(title, 13, True, WHITE)],
+    )
+    add_text(
+        s, Inches(3.55), top, Inches(3.05), Inches(0.65),
+        [(detail, 14, False, MIST)],
+        line_spacing=1.05,
+    )
+box(s, Inches(0.72), Inches(6.3), Inches(5.95), Inches(0.08), BLUE)
 add_text(
-    s, Inches(7.32), Inches(6.54), Inches(5.18), Inches(0.38),
-    [
-        ("Real FR3 | jerk-limited motion | one-window control center",
-         12, True, WHITE)
-    ],
-    align=PP_ALIGN.RIGHT,
+    s, Inches(0.72), Inches(6.54), Inches(5.95), Inches(0.32),
+    [("SAME GUI  |  SAME ROS TOPICS  |  SWAPPABLE INPUT AND BACKEND",
+      10, True, MIST)],
 )
 add_notes(s, """
-[2:38-2:58]
-What is already real: sixteen three-axis sensors, a 30-hertz filtered control
-loop, a bounded workspace, jerk-limited motion, and one control center driving
-the full FR3 pipeline. The assistive mount is future work, but the sensing and
-robot-control mechanism is working now.
+[2:44-3:07]
+The pipeline is fully modular. Trackpad mode simulates the magnet sensor for
+quick debugging. Gazebo verifies the same robot commands safely. Then the real
+sensor and FR3 use the same GUI and ROS path. Input and backend can change
+without changing the workflow.
 """)
 
 
@@ -568,7 +556,7 @@ add_text(
     anchor=MSO_ANCHOR.MIDDLE,
 )
 add_notes(s, """
-[2:58-3:25]
+[3:07-3:34]
 This is not yet an assistive product, and the next step should not begin with
 more software. It should begin with users: build a comfortable mount, co-design
 the control language and useful tasks, then validate safety and fatigue. What

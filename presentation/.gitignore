@@ -1,11 +1,10 @@
-# Raw demo videos live in ~/Downloads/COLMAG VIDEOS/ — gigabytes, never commit.
+# Raw demo videos live in ~/Downloads/COLMAG VIDEOS/ - gigabytes, never commit.
 *.mp4
 *.MP4
 *.mov
 *.MOV
-!assets/demo_command.mp4
-!assets/demo_pick.mp4
 # Local build/QA scratch
 *.pdf
+.~lock.*#
 assets/_full/
 mask_editor.html
