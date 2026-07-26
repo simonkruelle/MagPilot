@@ -18,7 +18,9 @@ SKIP_BUILD="${COLMAG_SKIP_BUILD:-0}"
 # into the image. Build a light ROS-only image with INSTALL_EASYOCR=0.
 INSTALL_EASYOCR="${INSTALL_EASYOCR:-${INSTALL_FULL_PYTHON_DEPS:-1}}"
 INSTALL_FULL_PYTHON_DEPS="${INSTALL_FULL_PYTHON_DEPS:-0}"
-INSTALL_GAZEBO="${INSTALL_GAZEBO:-0}"
+# The Control Center exposes simulation and real-FR3 modes, both of which need
+# the Franka/Gazebo stack. Set INSTALL_GAZEBO=0 only for a sensor/UI-only image.
+INSTALL_GAZEBO="${INSTALL_GAZEBO:-1}"
 INSTALL_MOVEIT="${INSTALL_MOVEIT:-0}"
 LIBFRANKA_VERSION="${LIBFRANKA_VERSION:-0.13.3}"
 FRANKA_ROS_VERSION="${FRANKA_ROS_VERSION:-0.10.2}"
@@ -230,7 +232,7 @@ echo "=== Setup complete ==="
 echo "Connect:    bash ros/docker_connect.sh"
 echo "Run node:   roslaunch colmag_ros colmag.launch"
 echo "EasyOCR:    INSTALL_EASYOCR=1 bash ros/docker_setup.sh"
-echo "Gazebo:     INSTALL_GAZEBO=1 bash ros/docker_setup.sh"
+echo "Gazebo:     included by default (INSTALL_GAZEBO=0 for sensor/UI only)"
 if [ "$INSTALL_GAZEBO" = "1" ]; then
     echo "Franka pin: libfranka=$LIBFRANKA_VERSION, franka_ros=$FRANKA_ROS_VERSION"
     echo "Verify pin (inside the container):"

@@ -295,9 +295,12 @@ Needs Docker and a Linux desktop (X11). NVIDIA GPU optional.
 ```bash
 git clone <this-repo> && cd COLMAG-seminar-SS26
 xhost +local:root
-INSTALL_GAZEBO=1 bash ros/docker_setup.sh   # build image + start container
+bash ros/docker_setup.sh                    # full Gazebo + Franka image
 python3 colmag_launcher.py                  # then Start 1 → 2 → 3
 ```
+
+Use `INSTALL_GAZEBO=0 bash ros/docker_setup.sh` only for a smaller
+sensor/UI-only image that will not run Simulation or connect to the FR3.
 
 <details>
 <summary><b>Manual commands</b> (alternative to the app)</summary>
@@ -338,7 +341,7 @@ mode (runs `fr3_real.launch robot_ip:=…`) and keep the E-stop reachable.
 | Robot dot is **amber** | Sim runs but the Gazebo window is closed - press Start to reopen it. |
 | Stage dot stays gray | Check that stage's log in the app's log pane. |
 | Sensor port is listed but will not open | Reconnect it, then run `COLMAG_SKIP_BUILD=1 bash ros/docker_setup.sh` once. |
-| `franka_control` is missing | Rebuild the full robot image: `INSTALL_GAZEBO=1 bash ros/docker_setup.sh`. |
+| `gazebo_ros` / `franka_control` is missing | The container was built in sensor/UI-only mode. Rebuild once without `COLMAG_SKIP_BUILD`: `INSTALL_GAZEBO=1 bash ros/docker_setup.sh`. |
 | Simulation and real robot both active | **Stop all** shuts down named ROS nodes across host-network containers; any survivor stays visible in the log without disabling the controls. |
 | Gestures move but MagPilot does not | Check `rosparam get /use_sim_time`. The real launch forces `false`; a leftover `true` without Gazebo freezes ROS timers at zero. |
 | A saved character action is not shown | Confirm another character and check the arm-node log. Invalid files are rejected while the last valid map remains active. |

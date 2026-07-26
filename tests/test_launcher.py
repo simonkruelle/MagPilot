@@ -20,12 +20,14 @@ from colmag_launcher import (
     build_live_ros_nodes_command,
     build_pipeline_probe_command,
     build_ros_pipeline_shutdown_command,
+    build_ros_package_probe_command,
     build_ros_node_shutdown_command,
     build_stage_probe_command,
     build_stop_all_command,
     controller_is_running,
     detect_robot_backend,
     format_serial_port_list,
+    missing_container_ros_packages,
     parse_local_stage_status,
     parse_franka_robot_mode,
     resolve_serial_port,
@@ -88,6 +90,23 @@ class ProcessLifecycleTests(unittest.TestCase):
         self.assertIn('/tmp/colmag_gui_nodes.pid', command)
         self.assertIn('/tmp/colmag_gui_nodes.log', command)
         self.assertIn('roslaunch example demo.launch', command)
+
+    def test_ros_package_probe_reports_each_missing_dependency(self):
+        command = build_ros_package_probe_command(
+            ('gazebo_ros', 'franka_gazebo'))
+
+        self.assertIn('rospack find "$package"', command)
+        self.assertIn('gazebo_ros franka_gazebo', command)
+        self.assertIn('echo "$package"', command)
+
+    @mock.patch('colmag_launcher.in_container')
+    def test_missing_ros_packages_are_parsed(self, run):
+        run.return_value = (True, 'gazebo_ros\nfranka_gazebo\n')
+
+        missing = missing_container_ros_packages(
+            ('gazebo_ros', 'franka_gazebo'))
+
+        self.assertEqual(missing, ('gazebo_ros', 'franka_gazebo'))
 
     def test_detached_stage_rejects_unknown_tag(self):
         with self.assertRaisesRegex(ValueError, 'Unknown launcher stage'):
@@ -261,6 +280,41 @@ class LauncherCleanupHookTests(unittest.TestCase):
         self.assertTrue(launcher._closing)
         self.assertFalse(launcher._poll_running)
         launcher._begin_pipeline_cleanup.assert_called_once_with('close')
+
+
+class LauncherSimulationPreflightTests(unittest.TestCase):
+    @mock.patch('colmag_launcher.messagebox.showerror')
+    @mock.patch(
+        'colmag_launcher.missing_container_ros_packages',
+        return_value=('gazebo_ros', 'franka_gazebo'))
+    @mock.patch('colmag_launcher.in_container', return_value=(True, ''))
+    def test_missing_gazebo_stops_before_roslaunch(
+            self, _run, _missing, showerror):
+        launcher = Launcher.__new__(Launcher)
+        launcher._pipeline_action_ready = mock.Mock(return_value=True)
+        launcher._ensure_container = mock.Mock(return_value=True)
+        launcher.mode = mock.Mock()
+        launcher.mode.get.return_value = 'sim'
+        launcher._select_stage_log = mock.Mock()
+        launcher._launch_stage = mock.Mock()
+
+        launcher.start_robot()
+
+        launcher._launch_stage.assert_not_called()
+        launcher._select_stage_log.assert_called_once()
+        message = showerror.call_args.args[1]
+        self.assertIn('gazebo_ros, franka_gazebo', message)
+        self.assertIn(
+            'INSTALL_GAZEBO=1 bash ros/docker_setup.sh', message)
+        self.assertIn('Do not use COLMAG_SKIP_BUILD=1', message)
+
+    def test_setup_builds_simulation_stack_by_default(self):
+        setup_path = _os.path.join(_ROOT, 'ros', 'docker_setup.sh')
+        with open(setup_path, 'r', encoding='utf-8') as handle:
+            setup = handle.read()
+
+        self.assertIn(
+            'INSTALL_GAZEBO="${INSTALL_GAZEBO:-1}"', setup)
 
 
 if __name__ == '__main__':

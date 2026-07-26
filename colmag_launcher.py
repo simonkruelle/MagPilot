@@ -61,6 +61,12 @@ DOT_OFF = '#c6d6e3'
 
 STAGES = ('robot', 'nodes', 'interface')
 DETACHED_TAGS = STAGES + ('window',)
+SIMULATION_ROS_PACKAGES = (
+    'gazebo_ros',
+    'franka_description',
+    'franka_gazebo',
+    'controller_manager',
+)
 FRANKA_ROBOT_MODES = {
     0: 'Other',
     1: 'Idle',
@@ -195,6 +201,23 @@ def in_container_detached(tag, command):
 def in_container(command, timeout=8):
     return sh('docker exec {} bash -lc {}'.format(
         CONTAINER, shlex.quote(ROS_SETUP + command)), timeout=timeout)
+
+
+def build_ros_package_probe_command(packages):
+    package_words = ' '.join(shlex.quote(package) for package in packages)
+    return (
+        'for package in {packages}; do '
+        'rospack find "$package" >/dev/null 2>&1 || echo "$package"; '
+        'done'
+    ).format(packages=package_words)
+
+
+def missing_container_ros_packages(packages):
+    ok, output = in_container(
+        build_ros_package_probe_command(packages), timeout=8)
+    if not ok:
+        return None
+    return tuple(line.strip() for line in output.splitlines() if line.strip())
 
 
 def _managed_stage_signal(tag, signal):
@@ -1208,6 +1231,28 @@ class Launcher(tk.Tk):
                         build_stage_probe_command('window'), timeout=5)
                     if active.strip() != 'running':
                         in_container_detached('window', 'gzclient')
+                return
+            missing = missing_container_ros_packages(
+                SIMULATION_ROS_PACKAGES)
+            if missing is None:
+                messagebox.showerror(
+                    'Simulation check failed',
+                    'Could not inspect ROS packages inside {}.\n\n'
+                    'Check that the container is running, then try again.'
+                    .format(CONTAINER))
+                return
+            if missing:
+                package_list = ', '.join(missing)
+                notice = (
+                    'Simulation is unavailable in this Docker image.\n\n'
+                    'Missing ROS packages: {}\n\n'
+                    'Rebuild the simulation-capable image once from the '
+                    'repository root:\n'
+                    'INSTALL_GAZEBO=1 bash ros/docker_setup.sh\n\n'
+                    'Do not use COLMAG_SKIP_BUILD=1 for this rebuild.'
+                ).format(package_list)
+                self._select_stage_log('robot', notice)
+                messagebox.showerror('Simulation dependencies missing', notice)
                 return
             cmd = ('roslaunch colmag_ros fr3.launch '
                    'controller:=effort_joint_trajectory_controller')

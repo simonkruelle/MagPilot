@@ -4,7 +4,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ARG INSTALL_EASYOCR=1
 ARG INSTALL_FULL_PYTHON_DEPS=0
-ARG INSTALL_GAZEBO=0
+ARG INSTALL_GAZEBO=1
 ARG INSTALL_MOVEIT=0
 ARG LIBFRANKA_VERSION=0.13.3
 ARG FRANKA_ROS_VERSION=0.10.2
@@ -53,9 +53,11 @@ RUN if [ "$INSTALL_EASYOCR" = "1" ] || [ "$INSTALL_FULL_PYTHON_DEPS" = "1" ]; th
         echo "Skipping EasyOCR (INSTALL_EASYOCR=0)."; \
     fi
 
-# Optional: Gazebo 11 + Franka Emika Panda / FR3 simulation stack.
-# ros:noetic-robot does not ship a simulator, so this is opt-in to keep the
-# default image small. INSTALL_GAZEBO=1 adds Gazebo, gazebo_ros_control (needed
+# Gazebo 11 + Franka Emika Panda / FR3 simulation stack.
+# ros:noetic-robot does not ship a simulator. This stack is included by default
+# because the Control Center supports both simulation and a real FR3.
+# INSTALL_GAZEBO=0 creates a smaller sensor/UI-only image. The full build adds
+# Gazebo and gazebo_ros_control (needed
 # by franka_gazebo, otherwise you get "Failed to create robot simulation
 # interface loader"), then builds pinned libfranka/franka_ros from source.
 RUN if [ "$INSTALL_GAZEBO" = "1" ]; then \
