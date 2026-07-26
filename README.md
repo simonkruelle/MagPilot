@@ -285,7 +285,8 @@ and closing the app shuts the pipeline down in order.
 Needs Docker and a Linux desktop (X11). NVIDIA GPU optional.
 
 ```bash
-git clone <this-repo> && cd COLMAG-seminar-SS26
+git clone https://github.com/simonkruelle/MagPilot.git
+cd MagPilot
 xhost +local:root
 bash ros/docker_setup.sh                    # full Gazebo + Franka image
 python3 colmag_launcher.py                  # then Start 1 → 2 → 3
@@ -307,6 +308,19 @@ roslaunch colmag_ros colmag_arm_nodes.launch dry_run:=false
 # 3 - interface (trackpad sim; use --clean --writing-max-z 0.05 for the real sensor)
 python3 magnetometer_reader.py --input-source trackpad --ros --classifier-labels ABCXLRUD0123
 ```
+</details>
+
+<details>
+<summary><b>Development checks</b></summary>
+
+Run the regression suite inside the project container:
+
+```bash
+docker exec colmag_simon python3 -m pip install -r /colmag/requirements-dev.txt
+docker exec colmag_simon bash -lc \
+  'source /opt/ros/noetic/setup.bash && source /catkin_ws/devel/setup.bash && cd /colmag && pytest -q'
+```
+
 </details>
 
 <details>
@@ -360,7 +374,7 @@ for their supervision and technical guidance, and to
 <pre>
                          ☁   MAGPILOT FLIGHT MAP   ☁
                                       │
-COLMAG-seminar-SS26/
+MagPilot/
 ├── <a href="colmag_launcher.py">colmag_launcher.py</a>              host control center and process lifecycle
 ├── <a href="magnetometer_reader.py">magnetometer_reader.py</a>          writing studio, flight deck, sensor and ROS bridge
 ├── <a href="colmag/">colmag/</a>                          interaction widgets, mappings and robot targets
