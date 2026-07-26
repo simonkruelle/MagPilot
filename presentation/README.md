@@ -36,7 +36,7 @@ speaker notes.
 | 0:00 | MagPilot | One passive magnet can become the interface |
 | 0:18 | Accessibility gap | The robot can help while its controller excludes |
 | 0:40 | Assistive concept | Put the input where reliable movement remains |
-| 1:02 | Two operating modes | Classified tasks and direct MagPilot control |
+| 1:02 | Two operating modes | Classified tasks and direct control, switched by magnet dwell |
 | 1:27 | Proof 1 | Auto-play 39 seconds of letter/digit classification |
 | 2:11 | Proof 2 | Auto-play 28 seconds of MagPilot teleoperation |
 | 2:44 | Modular pipeline | Trackpad input, Gazebo verification, and real FR3 |

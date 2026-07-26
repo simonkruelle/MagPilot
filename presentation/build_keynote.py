@@ -190,6 +190,7 @@ SETUP = os.path.join(DOCS, "setup.png")
 SENSOR = os.path.join(DOCS, "hardware.jpg")
 WRITING_UI = os.path.join(DOCS, "interface.png")
 UI = os.path.join(DOCS, "magpilot.png")
+LAUNCHER = os.path.join(DOCS, "launcher.png")
 LOGO = os.path.join(ASSETS, "logo.png")
 TUM_LOGO = os.path.join(ASSETS, "tum-logo.png")
 MIRMI_LOGO = os.path.join(DOCS, "affiliations", "mirmi-logo.png")
@@ -291,36 +292,40 @@ is not robot capability. It is access to that capability.
 # 3. Assistive concept
 s = make_slide(NAVY)
 add_cover(s, ASSISTIVE_CONCEPT, 0, 0, SW, SH)
-concept_scrim_top = box(s, 0, 0, Inches(6.65), Inches(2.35), NAVY)
-set_opacity(concept_scrim_top, 0.90)
-concept_scrim_bottom = box(
-    s, 0, Inches(5.42), Inches(6.65), Inches(2.08), NAVY
+concept_scrim = box(s, 0, 0, Inches(3.75), SH, NAVY)
+set_opacity(concept_scrim, 0.92)
+kicker(
+    s, "The assistive direction", dark=True,
+    left=Inches(0.58), top=Inches(0.48),
 )
-set_opacity(concept_scrim_bottom, 0.90)
-kicker(s, "The assistive direction", dark=True, top=Inches(0.34))
 add_text(
-    s, Inches(0.78), Inches(0.86), Inches(5.65), Inches(1.25),
+    s, Inches(0.58), Inches(1.1), Inches(2.8), Inches(1.92),
     [
-        ("Put the input where", 31, False, WHITE),
-        ("reliable movement remains.", 31, True, BLUE),
+        ("Put the input", 26, False, WHITE),
+        ("where reliable movement remains.", 26, True, BLUE),
     ],
     space_after=2,
 )
 add_text(
-    s, Inches(0.8), Inches(5.64), Inches(5.55), Inches(0.72),
+    s, Inches(0.6), Inches(3.34), Inches(2.72), Inches(1.42),
     [
         ("A passive magnet on a comfortable cuff could turn residual-limb "
-         "movement into direct robot control.", 16, False, MIST)
+         "movement into direct robot control.", 15, False, MIST)
     ],
-    line_spacing=1.05,
+    line_spacing=1.08,
+)
+box(s, Inches(0.6), Inches(5.12), Inches(0.09), Inches(0.82), BLUE)
+add_text(
+    s, Inches(0.92), Inches(5.12), Inches(2.4), Inches(0.86),
+    [
+        ("NO BATTERY\nNO BUTTONS\nNO GRIP REQUIRED", 12, True, WHITE),
+    ],
+    space_after=2,
 )
 add_text(
-    s, Inches(0.8), Inches(6.43), Inches(5.55), Inches(0.3),
-    [("NO BATTERY  |  NO BUTTONS  |  NO GRIP REQUIRED", 11, True, BLUE)],
-)
-add_text(
-    s, Inches(0.8), Inches(6.96), Inches(5.55), Inches(0.25),
-    [("AI-GENERATED CONCEPT | NOT USER-VALIDATED", 9, True, MIST)],
+    s, Inches(0.6), Inches(6.86), Inches(2.78), Inches(0.34),
+    [("AI-GENERATED CONCEPT\nNOT USER-VALIDATED", 8, True, MIST)],
+    space_after=1,
 )
 add_notes(s, """
 [0:40-1:02]
@@ -337,6 +342,14 @@ kicker(s, "Two modes, one interface")
 add_text(
     s, Inches(0.78), Inches(1.02), Inches(11.8), Inches(0.72),
     [("Choose a task, or pilot continuously.", 32, True, INK)],
+)
+add_text(
+    s, Inches(0.8), Inches(1.66), Inches(11.7), Inches(0.26),
+    [
+        ("MAGNET-ONLY SWITCH  |  Dwell on MagPilot to enter, "
+         "Draw to return.", 13, True, BLUE)
+    ],
+    align=PP_ALIGN.LEFT,
 )
 mode_columns = [
     (
@@ -357,25 +370,25 @@ mode_columns = [
     ),
 ]
 for left, label, title, detail, image_path, flow in mode_columns:
-    box(s, left, Inches(1.88), Inches(5.72), Inches(4.87), WHITE, radius=True)
+    box(s, left, Inches(2.03), Inches(5.72), Inches(4.72), WHITE, radius=True)
     add_text(
-        s, left + Inches(0.25), Inches(2.1), Inches(5.2), Inches(0.3),
+        s, left + Inches(0.25), Inches(2.22), Inches(5.2), Inches(0.3),
         [(label, 11, True, BLUE)],
     )
     add_text(
-        s, left + Inches(0.25), Inches(2.46), Inches(5.2), Inches(0.42),
+        s, left + Inches(0.25), Inches(2.57), Inches(5.2), Inches(0.42),
         [(title, 21, True, INK)],
     )
     add_text(
-        s, left + Inches(0.25), Inches(2.9), Inches(5.2), Inches(0.42),
+        s, left + Inches(0.25), Inches(3.0), Inches(5.2), Inches(0.42),
         [(detail, 13, False, SUBTLE)],
     )
     add_picture(
-        s, image_path, left + Inches(0.25), Inches(3.42),
-        Inches(5.22), Inches(2.65),
+        s, image_path, left + Inches(0.25), Inches(3.5),
+        Inches(5.22), Inches(2.55),
     )
     add_text(
-        s, left + Inches(0.25), Inches(6.22), Inches(5.2), Inches(0.28),
+        s, left + Inches(0.25), Inches(6.25), Inches(5.2), Inches(0.28),
         [(flow, 10, True, BLUE)],
         align=PP_ALIGN.CENTER,
     )
@@ -385,7 +398,8 @@ add_notes(s, """
 The same interface offers two ways to work. In command mode, a person writes a
 letter or digit and the classifier maps it to a stored robot task. In MagPilot
 mode, the magnet becomes a continuous controller for position, height, and the
-gripper. Lifting it away pauses the arm.
+gripper. The magnet itself switches modes by dwelling on MagPilot to enter or
+Draw to return. Lifting it away pauses the arm.
 """)
 
 
@@ -449,16 +463,13 @@ the direct proof that magnetic input can perform a useful physical task.
 
 
 # 7. Modular verification pipeline
-s = make_slide(NAVY)
-add_cover(s, SETUP, 0, 0, SW, SH)
-panel = box(s, 0, 0, Inches(7.25), SH, NAVY)
-set_opacity(panel, 0.94)
-kicker(s, "Modular by design", dark=True, left=Inches(0.68), top=Inches(0.58))
+s = make_slide(SKY)
+kicker(s, "Modular by design", left=Inches(0.68), top=Inches(0.55))
 add_text(
-    s, Inches(0.68), Inches(1.12), Inches(5.9), Inches(1.35),
+    s, Inches(0.68), Inches(1.02), Inches(4.25), Inches(1.35),
     [
-        ("One interface.", 33, False, WHITE),
-        ("Three verification layers.", 33, True, WHITE),
+        ("One control center.", 30, False, INK),
+        ("Verify three ways.", 30, True, INK),
     ],
     space_after=3,
 )
@@ -468,89 +479,94 @@ layers = [
     ("3", "REAL SENSOR + FR3", "Run the same GUI and ROS command path."),
 ]
 for index, (number, title, detail) in enumerate(layers):
-    top = Inches(2.72 + index * 1.12)
+    top = Inches(2.55 + index * 1.22)
     add_text(
         s, Inches(0.72), top, Inches(0.48), Inches(0.48),
         [(number, 23, True, BLUE)],
     )
     add_text(
-        s, Inches(1.35), top + Inches(0.02), Inches(2.2), Inches(0.32),
-        [(title, 13, True, WHITE)],
+        s, Inches(1.3), top + Inches(0.02), Inches(3.25), Inches(0.32),
+        [(title, 13, True, INK)],
     )
     add_text(
-        s, Inches(3.55), top, Inches(3.05), Inches(0.65),
-        [(detail, 14, False, MIST)],
+        s, Inches(1.3), top + Inches(0.4), Inches(3.25), Inches(0.62),
+        [(detail, 13, False, SUBTLE)],
         line_spacing=1.05,
     )
-box(s, Inches(0.72), Inches(6.3), Inches(5.95), Inches(0.08), BLUE)
-add_text(
-    s, Inches(0.72), Inches(6.54), Inches(5.95), Inches(0.32),
-    [("SAME GUI  |  SAME ROS TOPICS  |  SWAPPABLE INPUT AND BACKEND",
-      10, True, MIST)],
+box(s, Inches(5.0), Inches(0.62), Inches(7.72), Inches(6.18), WHITE, radius=True)
+add_picture(
+    s, LAUNCHER, Inches(5.2), Inches(0.83), Inches(7.32), Inches(5.72)
 )
+add_text(
+    s, Inches(5.25), Inches(6.47), Inches(7.2), Inches(0.27),
+    [("Simulation and real hardware share the same staged launch workflow.",
+      10, True, SUBTLE)],
+    align=PP_ALIGN.CENTER,
+)
+footer(s, 7)
 add_notes(s, """
 [2:44-3:07]
 The pipeline is fully modular. Trackpad mode simulates the magnet sensor for
 quick debugging. Gazebo verifies the same robot commands safely. Then the real
-sensor and FR3 use the same GUI and ROS path. Input and backend can change
-without changing the workflow.
+sensor and FR3 use the same GUI and ROS path. The Control Center makes those
+input and backend swaps explicit without changing the staged workflow.
 """)
 
 
 # 8. Honest next step and close
 s = make_slide(NAVY)
+add_cover(s, SENSOR, Inches(7.72), 0, Inches(5.61), SH)
+box(s, Inches(7.62), 0, Inches(0.1), SH, BLUE)
 kicker(s, "The next step", dark=True)
 add_text(
-    s, Inches(0.78), Inches(1.03), Inches(11.7), Inches(1.45),
+    s, Inches(0.78), Inches(1.02), Inches(6.4), Inches(1.35),
     [
-        ("The next prototype starts", 38, False, WHITE),
-        ("with the people who would use it.", 38, True, BLUE),
+        ("The mechanism works.", 34, False, WHITE),
+        ("Now design the tool with users.", 34, True, BLUE),
     ],
     space_after=2,
 )
 steps = [
-    ("1", "MOUNT", "Build a light, adjustable cuff or residual-limb carrier."),
-    ("2", "CO-DESIGN", "Choose movements and tasks with users, not for them."),
-    ("3", "VALIDATE", "Test comfort, safety, fatigue, and useful daily tasks."),
+    ("01", "MOUNT", "Build a light, adjustable cuff."),
+    ("02", "CO-DESIGN", "Choose movements and useful tasks together."),
+    ("03", "VALIDATE", "Test comfort, safety, fatigue, and daily use."),
 ]
 for i, (number, title, detail) in enumerate(steps):
-    left = Inches(0.8 + i * 4.12)
-    box(s, left, Inches(2.82), Inches(3.55), Inches(0.08), BLUE)
+    top = Inches(2.75 + i * 0.88)
     add_text(
-        s, left, Inches(3.16), Inches(0.52), Inches(0.52),
-        [(number, 26, True, BLUE)],
+        s, Inches(0.8), top, Inches(0.62), Inches(0.38),
+        [(number, 18, True, BLUE)],
     )
     add_text(
-        s, left + Inches(0.58), Inches(3.2), Inches(2.95), Inches(0.42),
-        [(title, 14, True, WHITE)],
+        s, Inches(1.55), top, Inches(1.35), Inches(0.36),
+        [(title, 13, True, WHITE)],
     )
     add_text(
-        s, left, Inches(3.86), Inches(3.55), Inches(1.15),
-        [(detail, 16, False, MIST)],
-        line_spacing=1.1,
+        s, Inches(2.92), top, Inches(4.15), Inches(0.42),
+        [(detail, 13, False, MIST)],
+        line_spacing=1.05,
     )
+box(s, Inches(0.8), Inches(5.47), Inches(6.35), Inches(0.08), BLUE)
 add_text(
-    s, Inches(0.8), Inches(5.32), Inches(11.7), Inches(0.75),
-    [("Extend a person's movement into robotic reach.", 30, True, WHITE)],
-    align=PP_ALIGN.CENTER,
+    s, Inches(0.8), Inches(5.72), Inches(6.35), Inches(0.7),
+    [("Extend movement into robotic reach.", 23, True, WHITE)],
 )
 add_text(
-    s, Inches(0.8), Inches(6.05), Inches(11.7), Inches(0.35),
+    s, Inches(0.8), Inches(6.33), Inches(6.35), Inches(0.3),
     [("Assistive use is a design direction and has not yet been user-validated.",
-      11, False, MIST)],
-    align=PP_ALIGN.CENTER,
+      10, False, MIST)],
 )
 add_picture(
-    s, TUM_LOGO, Inches(0.78), Inches(6.63), Inches(0.72), Inches(0.38)
+    s, TUM_LOGO, Inches(0.78), Inches(6.82), Inches(0.72), Inches(0.34)
 )
 add_picture(
-    s, MIRMI_LOGO, Inches(1.72), Inches(6.63), Inches(1.15), Inches(0.38)
+    s, MIRMI_LOGO, Inches(1.7), Inches(6.82), Inches(1.03), Inches(0.34)
 )
 add_text(
-    s, Inches(3.2), Inches(6.62), Inches(9.25), Inches(0.42),
+    s, Inches(2.95), Inches(6.79), Inches(4.2), Inches(0.4),
     [
         ("ARIES Lab | F. Masiero, E. Aimi, L. Borriello, Prof. L. Masia",
-         10, False, MIST)
+         8, False, MIST)
     ],
     align=PP_ALIGN.RIGHT,
     anchor=MSO_ANCHOR.MIDDLE,
