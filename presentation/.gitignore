@@ -3,6 +3,8 @@
 *.MP4
 *.mov
 *.MOV
+!assets/demo_command.mp4
+!assets/demo_pick.mp4
 # Local build/QA scratch
 *.pdf
 assets/_full/

@@ -1,77 +1,74 @@
-# MagPilot — pitch keynote
+# MagPilot - short keynote
 
-A startup-keynote-style deck for MagPilot: *pilot a robot arm with nothing but a
-magnet.* Built to be presented in ~8–10 minutes with two live demo videos.
+An eight-slide presentation about a concrete problem: robot arms can assist
+people, but their usual controllers can exclude people with an upper-limb
+difference or limited hand function.
+
+MagPilot explores whether a passive magnet, mounted wherever reliable movement
+remains, could provide direct access to a robot arm. The sensing and real-robot
+control are working today. The assistive mount is a design direction that still
+needs to be co-designed and validated with users.
 
 ## Files
 
-| File | What it is |
+| File | Purpose |
 |---|---|
-| `MagPilot_Keynote.pptx` | The deck — 16 slides, 16:9, **speaker notes on every slide**. Open in PowerPoint, Keynote, or LibreOffice Impress. |
-| `build_keynote.py` | Regenerates the `.pptx` from scratch (`python3 presentation/build_keynote.py`). Edit copy/design here, not by hand, so it stays reproducible. |
-| `workcell_mask_editor.html` | Standalone workcell-image mask tuner with polygon regions, color sampling, lightness, opacity, edge softness, and PNG export. |
-| `assets/` | All images the deck embeds: the sensor-board close-up, wide setup shots, video poster frames, and UI screenshots. |
+| `MagPilot_Keynote.pptx` | 8-slide, 16:9 deck with speaker notes and two embedded videos |
+| `build_keynote.py` | Rebuilds the presentation from the repository assets |
+| `assets/demo_command.mp4` | 20-second air-written command proof |
+| `assets/demo_pick.mp4` | 48-second package-pick proof |
+| `assets/poster_command.jpg` | Poster frame for the command video |
+| `assets/poster_pick.jpg` | Poster frame for the pick video |
 
-## The two demo videos
-
-The deck has a **poster frame** on each demo slide with a `▶ PLAY:` cue. Drop the
-matching video onto that slide in your presentation app and set it to play:
-
-| Slide | Full 4K source | Repository-ready copy | Shows |
-|---|---|---|---|
-| 6 · *Air-writing* | `ABD.MP4` | `docs/demo_classify.mp4` | Writing A/B/D on the board; the arm reads and performs each. |
-| 7 · *Teleoperation* | `Package_Lift_&_B.MP4` | `docs/demo_teleop.mp4` | Flying the arm, picking up a package, then a handwritten B. |
-
-The original 4K recordings remain outside git in
-`~/Downloads/COLMAG VIDEOS/`. The repository copies are H.264 1080p with the
-busy upper-left background replaced by a solid backdrop-colored mask. Nothing
-is blurred, so the robot stays sharp through its complete range of motion.
-`assets/demo_mask_overlay.png` stores the exact opaque polygon mask.
-
-To regenerate either repository copy:
+Rebuild the deck from the repository root:
 
 ```bash
-ffmpeg -i INPUT.MP4 -i presentation/assets/demo_mask_overlay.png \
-  -filter_complex \
-  "[0:v]scale=1920:1080:flags=lanczos:out_color_matrix=bt709,\
-   format=yuv420p[s];\
-   [1:v]format=yuva420p[mask];\
-   [s][mask]overlay=0:0:format=yuv420,format=yuv420p,\
-   setparams=range=limited:color_primaries=bt709:\
-   color_trc=bt709:colorspace=bt709[out]" \
-  -map "[out]" -map 0:a? -c:v libx264 -preset slow -crf 21 \
-  -x264-params "colorprim=bt709:transfer=bt709:colormatrix=bt709" \
-  -c:a copy -movflags +faststart OUTPUT.mp4
+python3 presentation/build_keynote.py
 ```
 
-The README uses full-length monochrome GIF previews at 800x450 and 18 fps.
-Monochrome keeps the image crisp and on-brand while keeping both complete
-recordings below GitHub's 100 MB per-file limit. GitHub strips custom HTML video
-controls from README files, so each preview links to its 1080p MP4 player for
-pause, timeline scrubbing, and audio.
+## Running order
 
-## Running order (≈9 min)
+The complete talk is about 3 minutes 25 seconds, including 68 seconds of video.
+The exact script and timestamps are in the speaker notes.
 
-1. **Title** — hold up the magnet. "I'll fly this arm and have it read handwriting
-   using only *this*."
-2. **Problem** — teleop is expensive, expert-only.
-3. **Insight** — a magnet costs cents and carries five signals through the air.
-4. **Product** — the five channels + air-writing.
-5. **Five channels** — the control vocabulary.
-6. **Demo 1** — play `ABD.MP4` (classification).
-7. **Demo 2** — play `Package_Lift_&_B.MP4` (teleop + pick).
-8. **How it works** — sensing / recognition / motion.
-9. **Hardware** — the 4×4 magnetometer board.
-10. **Setup** — the whole workcell.
-11. **Sim → real** — the staged, de-risked path.
-12. **Product UX** — one-window control center.
-13. **Market** — where it goes.
-14. **Why now** — cheap sensors, the software is the moat.
-15. **Vision** — "every magnet is a robot controller."
-16. **Close** — offer a hands-on: let someone fly the arm.
+| Time | Slide | Point |
+|---|---|---|
+| 0:00 | MagPilot | One passive magnet can become the interface |
+| 0:18 | Accessibility gap | The robot can help while its controller excludes |
+| 0:40 | Assistive concept | Put the input where reliable movement remains |
+| 1:00 | Control language | Move, raise, tilt, and lift away to pause |
+| 1:20 | Proof 1 | Play the 20-second air-written command clip |
+| 1:45 | Proof 2 | Play the 48-second package-pick clip |
+| 2:38 | Working system | Show the real FR3, sensor array, loop, and workspace |
+| 2:58 | Next step | Mount, co-design, and validate with users |
 
-## Still to add (optional)
+Both videos are embedded in the PowerPoint file. Click each blue play prompt,
+let the clip run, and continue when it finishes. Avoid speaking over the clips
+unless the room needs a brief explanation.
 
-- A **Gazebo screen-capture** on slide 11 (simulation). Record the sim following
-  the trackpad cursor, drop it in.
-- Trim the demo clips to their best ~20 s if the full takes run long.
+## Demo media
+
+The short presentation clips are cut from the full masked 1080p demonstrations:
+
+```bash
+ffmpeg -ss 4 -i docs/demo_classify.mp4 -t 20 \
+  -c:v libx264 -preset slow -crf 20 -c:a aac -movflags +faststart \
+  presentation/assets/demo_command.mp4
+
+ffmpeg -ss 18 -i docs/demo_teleop.mp4 -t 48 \
+  -c:v libx264 -preset slow -crf 20 -c:a aac -movflags +faststart \
+  presentation/assets/demo_pick.mp4
+```
+
+The full recordings remain linked from the project README for anyone who wants
+to inspect the complete demonstrations.
+
+## Delivery
+
+Open the deck in PowerPoint and test both videos before presenting. Keynote and
+LibreOffice Impress can import the file, but media playback should be checked on
+the exact presentation computer.
+
+Keep the assistive claim precise: MagPilot currently demonstrates the sensing,
+mapping, and real-robot control mechanism. It has not yet been tested as an
+assistive device. The final slide makes that next research step explicit.
