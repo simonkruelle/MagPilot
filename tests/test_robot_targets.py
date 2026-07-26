@@ -3,6 +3,8 @@
 
 import os as _os
 import sys as _sys
+import tempfile
+from unittest import mock
 
 import numpy as np
 
@@ -18,7 +20,14 @@ from colmag.robot_targets import (  # noqa: E402
     DIGIT_CUBE_EDGE_M,
     digit_cube_target,
 )
+from colmag.action_mapping import (  # noqa: E402
+    ReloadableActionMapping,
+    default_action_mapping,
+    save_action_mapping,
+)
+import colmag_robot_node as robot_module  # noqa: E402
 from colmag_robot_node import (  # noqa: E402
+    ColmagRobotNode,
     HOME_POSE,
     _Q_MAX,
     _Q_MIN,
@@ -50,6 +59,37 @@ def test_default_cube_is_reachable_with_shared_joint_limits():
         assert error < 0.001
         assert np.all(joints >= _Q_MIN)
         assert np.all(joints <= _Q_MAX)
+
+
+def test_robot_dispatch_reloads_only_valid_action_maps():
+    calls = []
+    with tempfile.TemporaryDirectory() as directory:
+        path = _os.path.join(directory, 'robot_actions.json')
+        mapping = default_action_mapping()
+        save_action_mapping(path, mapping)
+
+        node = ColmagRobotNode.__new__(ColmagRobotNode)
+        node._action_mapping = ReloadableActionMapping(path)
+        node._reported_action_map_error = None
+        node._action_registry = {
+            'wave': lambda: calls.append('wave'),
+            'cheer': lambda: calls.append('cheer'),
+            'nod_yes': lambda: calls.append('nod_yes'),
+        }
+
+        with mock.patch.object(robot_module.rospy, 'loginfo'), \
+                mock.patch.object(robot_module.rospy, 'logwarn'):
+            node.execute_command('A')
+
+            mapping['A'] = 'cheer'
+            save_action_mapping(path, mapping)
+            node.execute_command('A')
+
+            with open(path, 'w', encoding='utf-8') as handle:
+                handle.write('{"schema_version": 1, "bindings": {}}')
+            node.execute_command('A')
+
+    assert calls == ['wave', 'cheer', 'cheer']
 
 
 if __name__ == '__main__':

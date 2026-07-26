@@ -27,7 +27,17 @@ import subprocess
 import threading
 import tkinter as tk
 import tkinter.font as tkfont
-from tkinter import messagebox
+from tkinter import messagebox, ttk
+
+from colmag.action_mapping import (
+    ACTION_CATALOG,
+    DEFAULT_ACTION_MAP_PATH,
+    DIGIT_LABELS,
+    LETTER_LABELS,
+    default_action_mapping,
+    load_action_mapping,
+    save_action_mapping,
+)
 
 CONTAINER = 'colmag_simon'
 LEGACY_CONTAINERS = ('colmag_ros',)
@@ -680,6 +690,167 @@ class Card(tk.Canvas):
                            width=width - 28, height=height - 18)
 
 
+class ActionMappingEditor(tk.Toplevel):
+    """Modal editor for the validated character-to-action JSON file."""
+
+    def __init__(self, parent, path=DEFAULT_ACTION_MAP_PATH, on_saved=None):
+        super().__init__(parent)
+        self.parent = parent
+        self.path = path
+        self.on_saved = on_saved
+        self.title('Robot Action Mapping')
+        self.configure(bg=BG)
+        self.resizable(False, False)
+        self.transient(parent)
+        self.protocol('WM_DELETE_WINDOW', self.destroy)
+
+        try:
+            mapping = load_action_mapping(path)
+            load_error = None
+        except FileNotFoundError:
+            mapping = default_action_mapping()
+            load_error = None
+        except Exception as exc:
+            mapping = default_action_mapping()
+            load_error = str(exc)
+
+        self._action_name_to_id = {
+            display_name: action_id
+            for action_id, display_name in ACTION_CATALOG
+        }
+        self._action_names = tuple(self._action_name_to_id)
+        action_display = dict(ACTION_CATALOG)
+        self._variables = {
+            label: tk.StringVar(value=action_display[mapping[label]])
+            for label in DIGIT_LABELS + LETTER_LABELS
+        }
+        self._mode = tk.StringVar(value='letters')
+        self._frames = {}
+        combo_style = ttk.Style(self)
+        combo_style.configure(
+            'Action.TCombobox', padding=(6, 3), fieldbackground='#ffffff',
+            background='#ffffff', foreground=TEXT)
+        combo_style.map(
+            'Action.TCombobox',
+            fieldbackground=[('readonly', '#ffffff')],
+            foreground=[('readonly', TEXT)],
+            selectbackground=[('readonly', '#ffffff')],
+            selectforeground=[('readonly', TEXT)])
+        self._build()
+        self._show_mode()
+        self.update_idletasks()
+        x = parent.winfo_rootx() + max(
+            0, (parent.winfo_width() - self.winfo_reqwidth()) // 2)
+        y = parent.winfo_rooty() + 34
+        self.geometry('+{}+{}'.format(x, y))
+        self.grab_set()
+        self.focus_set()
+
+        if load_error:
+            self.after_idle(
+                lambda: messagebox.showwarning(
+                    'Mapping file needs repair',
+                    'The current mapping could not be loaded:\n\n{}\n\n'
+                    'The editor is showing the original defaults. Saving will '
+                    'repair the file; until then, the robot keeps its last '
+                    'valid mapping.'.format(load_error),
+                    parent=self))
+
+    def _build(self):
+        heading = tk.Frame(self, bg=BG)
+        heading.pack(fill='x', padx=28, pady=(22, 12))
+        tk.Label(heading, text='Robot action mapping', bg=BG, fg=TEXT,
+                 font=self.parent.f_title).pack(anchor='w')
+        tk.Label(
+            heading,
+            text='Assign recognized characters to the tested motion library.',
+            bg=BG, fg=SUBTLE, font=self.parent.f_body).pack(
+                anchor='w', pady=(3, 0))
+
+        Segmented(
+            self, self._mode,
+            [('letters', 'Letters A-Z'), ('digits', 'Digits 0-9')],
+            command=self._show_mode, width=300, height=32,
+            font=self.parent.f_body, parent_bg=BG).pack(
+                anchor='w', padx=28, pady=(0, 12))
+
+        holder = tk.Frame(self, bg=CARD, highlightbackground=BORDER,
+                          highlightthickness=1, width=664, height=480)
+        holder.pack(padx=28)
+        holder.pack_propagate(False)
+        self._frames['letters'] = self._mapping_frame(
+            holder, LETTER_LABELS, columns=2)
+        self._frames['digits'] = self._mapping_frame(
+            holder, DIGIT_LABELS, columns=2)
+
+        note = tk.Frame(self, bg=BG)
+        note.pack(fill='x', padx=28, pady=(12, 6))
+        tk.Label(
+            note,
+            text='Applies to the next confirmed character in simulation and '
+                 'real mode. Running motions are not interrupted.',
+            bg=BG, fg=SUBTLE, font=self.parent.f_small).pack(anchor='w')
+
+        controls = tk.Frame(self, bg=BG)
+        controls.pack(fill='x', padx=28, pady=(5, 22))
+        Pill(
+            controls, 'Restore defaults', self._restore_defaults,
+            kind='plain', width=142, font=self.parent.f_body,
+            parent_bg=BG).pack(side='left')
+        Pill(
+            controls, 'Cancel', self.destroy, kind='plain', width=90,
+            font=self.parent.f_body, parent_bg=BG).pack(
+                side='right', padx=(10, 0))
+        Pill(
+            controls, 'Save mapping', self._save, kind='primary', width=132,
+            font=self.parent.f_btn, parent_bg=BG).pack(side='right')
+
+    def _mapping_frame(self, parent, labels, columns):
+        frame = tk.Frame(parent, bg=CARD)
+        rows = (len(labels) + columns - 1) // columns
+        for index, label in enumerate(labels):
+            column_group = index // rows
+            row = index % rows
+            left = column_group * 2
+            tk.Label(
+                frame, text=label, width=3, bg='#eef4fb', fg=TEXT,
+                font=self.parent.f_h).grid(
+                    row=row, column=left, padx=(18, 8), pady=4, sticky='w')
+            combo = ttk.Combobox(
+                frame, textvariable=self._variables[label],
+                values=self._action_names, state='readonly', width=23,
+                font=self.parent.f_body, style='Action.TCombobox')
+            combo.grid(
+                row=row, column=left + 1, padx=(0, 18), pady=4, sticky='w')
+        return frame
+
+    def _show_mode(self):
+        for frame in self._frames.values():
+            frame.pack_forget()
+        self._frames[self._mode.get()].pack(fill='both', expand=True)
+
+    def _restore_defaults(self):
+        defaults = default_action_mapping()
+        display_names = dict(ACTION_CATALOG)
+        for label, action_id in defaults.items():
+            self._variables[label].set(display_names[action_id])
+
+    def _save(self):
+        mapping = {
+            label: self._action_name_to_id[self._variables[label].get()]
+            for label in DIGIT_LABELS + LETTER_LABELS
+        }
+        try:
+            save_action_mapping(self.path, mapping)
+        except Exception as exc:
+            messagebox.showerror(
+                'Could not save mapping', str(exc), parent=self)
+            return
+        if self.on_saved:
+            self.on_saved()
+        self.destroy()
+
+
 # ── The app ──────────────────────────────────────────────────────────────────
 
 class Launcher(tk.Tk):
@@ -793,8 +964,11 @@ class Launcher(tk.Tk):
         Pill(row, 'Stop all', self.stop_all, kind='danger', width=104,
              font=self.f_btn, parent_bg=BG).pack(side='left')
         Pill(row, 'Restart container', self.restart_container, kind='plain',
-             width=160, font=self.f_body, parent_bg=BG
+             width=150, font=self.f_body, parent_bg=BG
              ).pack(side='left', padx=12)
+        Pill(row, 'Action mapping', self.open_action_mapping, kind='plain',
+             width=142, font=self.f_body, parent_bg=BG
+             ).pack(side='left')
         self.container_light = tk.Label(row, text='●  container', bg=BG,
                                         fg=DOT_OFF, font=self.f_body)
         self.container_light.pack(side='right')
@@ -849,6 +1023,22 @@ class Launcher(tk.Tk):
         return inner
 
     # ── Actions ─────────────────────────────────────────────────────────────
+
+    def open_action_mapping(self):
+        existing = getattr(self, '_action_mapping_editor', None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            existing.focus_set()
+            return
+        self._action_mapping_editor = ActionMappingEditor(
+            self, on_saved=self._action_mapping_saved)
+
+    def _action_mapping_saved(self):
+        self._pipeline_notice = (
+            'Action mapping saved. It applies to the next confirmed character; '
+            'no ROS node restart is needed.')
+        self._replace_log(self._pipeline_notice)
+        self.after(5000, self._clear_pipeline_notice, self._pipeline_notice)
 
     def _mode_changed(self):
         real = self.mode.get() == 'real'

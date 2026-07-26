@@ -8,8 +8,8 @@ from the joystick node and executes the corresponding robot action.
 It ships with a set of PREPROGRAMMED demo motions for a 7-DOF Franka arm
 (Panda or FR3) running in Gazebo, so you can see the full pipeline move a robot
 end-to-end: classify an 'A' and the arm waves; classify a '0' and it returns
-home; 'L'/'R' rotate the base, etc.  Extend or replace NAMED_POSES and
-execute_command() with your own actions (MoveIt goals, real-robot API, …).
+home; 'L'/'R' rotate the base, etc. The launcher can safely remap every
+recognized character to one of these tested actions without restarting a node.
 
 How motion is sent:
   Joint-space FollowJointTrajectory goals are sent to a
@@ -45,6 +45,8 @@ Parameters:
                                                                     2.0 keeps every motion under ~70% of the limits.
   ~digit_cube_size (float, default 0.24)                          — digit-target cube edge length in meters
   ~digit_cube_center_{x,y,z} (float, defaults 0.45, 0.0, 0.40)  — cube center in the robot base frame
+  ~action_map_file  (str, default /colmag/config/robot_actions.json)
+                                                                — validated character-to-action mapping
 
 Usage:
   rosrun colmag_ros colmag_robot_node.py
@@ -66,6 +68,12 @@ from colmag.robot_targets import (  # noqa: E402
     DIGIT_CUBE_CENTER_M,
     DIGIT_CUBE_EDGE_M,
     digit_cube_target,
+)
+from colmag.action_mapping import (  # noqa: E402
+    ACTION_NAMES,
+    DEFAULT_ACTION_MAP_PATH,
+    ReloadableActionMapping,
+    bind_action_handlers,
 )
 
 # Actionlib + trajectory messages are only needed to actually drive an arm.
@@ -201,19 +209,16 @@ class ColmagRobotNode:
         _T_home = _fk(np.array(HOME_POSE, dtype=float))
         self._pen_R = _T_home[:3, :3]
 
-        # ── Gesture → motion map ──────────────────────────────────────────────
-        # Edit this (and the motion methods below) to change the robot's tricks.
-        self._motions = {
-            '0': self._home,        'X': self._home,         # reset / cancel
-            'A': self._wave,        'B': self._bow,          # wave, bow
-            'C': self._celebrate,   'D': self._dab,          # fist pumps, dab
-            'U': self._stretch_up,                            # reach tall
-            'L': self._point_left,  'R': self._point_right,  # point left / right
-        }
-        # Digits 1..8 → cube corners; digit 9 → cube center.
-        self._motions.update({
-            str(n): (lambda n=n: self._go_to_digit(n)) for n in range(1, 10)
-        })
+        # ── Gesture → tested motion map ───────────────────────────────────────
+        # The JSON mapping selects only from this fixed registry. It is checked
+        # immediately before a confirmed gesture is dispatched, so saving a
+        # mapping never restarts nodes or interrupts an active trajectory.
+        self.action_map_file = rospy.get_param(
+            '~action_map_file', DEFAULT_ACTION_MAP_PATH)
+        self._action_registry = bind_action_handlers(self)
+        self._action_mapping = ReloadableActionMapping(self.action_map_file)
+        self._reported_action_map_error = None
+        self._reload_action_mapping()
 
         # ── Classifier state ──────────────────────────────────────────────────
         self.last_label      = None
@@ -246,6 +251,9 @@ class ColmagRobotNode:
                 else 'LIVE (arm_id={}, controller={}, time_scale={:.1f})'.format(
                     self.arm_id, self.controller, self.time_scale))
         rospy.loginfo('colmag_robot_node ready | mode={}'.format(mode))
+        rospy.loginfo(
+            'Character actions: %s (checked before each confirmed gesture)',
+            self.action_map_file)
 
         # Home the arm on startup so every session begins from a known pose —
         # unless teleop is ACTIVE (draw node streaming): both nodes drive the
@@ -361,22 +369,44 @@ class ColmagRobotNode:
 
     def execute_command(self, label):
         """
-        Run the preprogrammed motion mapped to a confirmed character label.
-
-        Edit self._motions (in __init__) and the motion methods below to change
-        the repertoire, or replace this with MoveIt / real-robot API calls.
+        Run the tested motion currently mapped to a confirmed character label.
 
         Args:
             label: The confirmed character, e.g. 'A', '3', 'X'
         """
-        motion = self._motions.get(label)
-        if motion is None:
-            rospy.logwarn('No motion mapped for "%s" — small nod instead.', label)
-            self._nod_yes()
+        self._reload_action_mapping()
+        action_id = self._action_mapping.mapping.get(label, 'nod_yes')
+        motion = self._action_registry.get(action_id)
+        if action_id == 'none':
+            rospy.loginfo('Action "%s" -> Do nothing', label)
             return
-        rospy.loginfo('Action "%s" → %s', label,
-                      motion.__name__.lstrip('_').replace('_', ' '))
+        if motion is None:
+            # Validation should make this unreachable. Retaining the former nod
+            # fallback is safer than accepting an unknown motion dynamically.
+            rospy.logwarn(
+                'Action "%s" resolved to unknown id "%s"; small nod instead.',
+                label, action_id)
+            motion = self._nod_yes
+            action_id = 'nod_yes'
+        rospy.loginfo('Action "%s" -> %s', label, ACTION_NAMES[action_id])
         motion()
+
+    def _reload_action_mapping(self):
+        """Apply a valid replacement without disturbing active robot state."""
+        changed = self._action_mapping.refresh()
+        error = self._action_mapping.last_error
+        if error:
+            if error != self._reported_action_map_error:
+                rospy.logwarn(
+                    'Action mapping not applied (%s). Keeping last valid '
+                    'bindings.', error)
+                self._reported_action_map_error = error
+            return False
+        self._reported_action_map_error = None
+        if changed:
+            rospy.loginfo(
+                'Action mapping updated; it applies to this confirmed gesture.')
+        return changed
 
     # ── Motion primitives ───────────────────────────────────────────────────────
 

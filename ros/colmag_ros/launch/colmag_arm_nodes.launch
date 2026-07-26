@@ -30,6 +30,8 @@
   <arg name="digit_cube_center_x" default="0.45" doc="Digit cube center X in the robot base frame (m)"/>
   <arg name="digit_cube_center_y" default="0.0" doc="Digit cube center Y in the robot base frame (m)"/>
   <arg name="digit_cube_center_z" default="0.40" doc="Digit cube center Z in the robot base frame (m)"/>
+  <arg name="action_map_file" default="/colmag/config/robot_actions.json"
+       doc="Validated character-to-tested-action mapping shared with the GUI"/>
   <arg name="height_sensor_min" default="0.007" doc="Minimum magnet height over sensors (m), including board offset"/>
   <arg name="height_sensor_max" default="0.150" doc="Magnet height mapped to the workspace top (m)"/>
   <arg name="height_gain"       default="2.0"   doc="Saturating height gain; reduces sensitivity near the upper range"/>
@@ -86,6 +88,7 @@
     <param name="digit_cube_center_x" value="$(arg digit_cube_center_x)"/>
     <param name="digit_cube_center_y" value="$(arg digit_cube_center_y)"/>
     <param name="digit_cube_center_z" value="$(arg digit_cube_center_z)"/>
+    <param name="action_map_file" value="$(arg action_map_file)"/>
   </node>
 
 </launch>

@@ -35,6 +35,8 @@
   <arg name="arm_controller" default="effort_joint_trajectory_controller" doc="JointTrajectoryController to stream to (Gazebo default; use position_joint_trajectory_controller on the real FR3)"/>
   <arg name="run_robot"      default="true"   doc="Also start colmag_robot_node so Letters/Digits gestures execute"/>
   <arg name="time_scale"     default="2.0"    doc="Robot node: multiplies gesture waypoint times (see colmag_distributed.launch)"/>
+  <arg name="action_map_file" default="/colmag/config/robot_actions.json"
+       doc="Validated character-to-tested-action mapping shared with the GUI"/>
   <arg name="digit_cube_size" default="0.24" doc="Digit target cube edge length (m)"/>
   <arg name="digit_cube_center_x" default="0.45" doc="Digit cube center X (m)"/>
   <arg name="digit_cube_center_y" default="0.0" doc="Digit cube center Y (m)"/>
@@ -126,6 +128,7 @@
     <param name="digit_cube_center_x" value="$(arg digit_cube_center_x)"/>
     <param name="digit_cube_center_y" value="$(arg digit_cube_center_y)"/>
     <param name="digit_cube_center_z" value="$(arg digit_cube_center_z)"/>
+    <param name="action_map_file" value="$(arg action_map_file)"/>
   </node>
 
   <!-- rosbridge WebSocket — lets the Mac touchpad UI connect over port 9090. -->

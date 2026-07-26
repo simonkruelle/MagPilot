@@ -18,6 +18,7 @@ needs to be co-designed and validated with users.
 | `assets/assistive_concept.png` | AI-generated, clearly labeled concept visualization |
 | `assets/demo_classify_slide.gif` | 39-second classified-command proof |
 | `assets/demo_teleop_slide.gif` | 28-second MagPilot package-pick proof |
+| `../docs/action_mapping.png` | Verified configurable action editor shown on slide 8 |
 
 Rebuild the deck from the repository root:
 
@@ -40,7 +41,7 @@ speaker notes.
 | 1:27 | Proof 1 | Auto-play 39 seconds of letter/digit classification |
 | 2:11 | Proof 2 | Auto-play 28 seconds of MagPilot teleoperation |
 | 2:44 | Modular pipeline | Trackpad input, Gazebo verification, and real FR3 |
-| 3:07 | Next step | Mount, co-design, and validate with users |
+| 3:07 | Configurable tasks | Map tested actions, integrate a real workflow, and co-design with users |
 
 Both demonstrations are embedded as animated GIFs. They begin automatically
 when their slide appears, without a play-button click. Let each clip run and
@@ -80,6 +81,7 @@ Keynote and LibreOffice Impress can import the file, but playback should still
 be checked on the exact presentation computer.
 
 Keep the assistive claim precise: MagPilot currently demonstrates the sensing,
-mapping, and real-robot control mechanism. It has not yet been tested as an
-assistive device. Slide 3 labels its AI-generated image as a concept
-visualization, and the final slide makes the next research step explicit.
+configurable action mapping, and real-robot control mechanism. It has not yet
+been tested as an assistive device. Slide 3 labels its AI-generated image as a
+concept visualization. The final slide shows the working editor while stating
+that new domain actions still require engineering, co-design, and validation.

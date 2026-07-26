@@ -67,11 +67,33 @@ python3 colmag_launcher.py
 
 The **Control Center** starts and monitors the robot, arm controller, and
 interface from one window. Green means running; amber means simulation is
-active with Gazebo closed. Select any stage to view and copy its live log.
+active with Gazebo closed. Select any stage to view and copy its live log. The
+**Action mapping** button opens the task vocabulary used by classified
+characters.
 
 For hardware, choose **magnetometer**, select the numbered serial port shown in
 the log, and enter the robot IP when needed. Startup clears stale ROS processes,
 and closing the app shuts the pipeline down in order.
+
+## A control language for each task
+
+<div align="center">
+<img alt="Robot action mapping editor" src="docs/action_mapping.png" width="720">
+</div>
+
+Every recognized `A-Z` and `0-9` can be assigned to an action from the tested
+motion library. Saving is atomic and applies to the next confirmed character in
+both simulation and real-robot mode. It does not restart a ROS node or interrupt
+a running trajectory. If the file is invalid, the robot keeps its last valid
+mapping. **Restore defaults** returns every character to the original demo
+behavior.
+
+This makes MagPilot a practical base for company, lab, and private-user
+workflows. Existing motions can be rearranged without code. A new
+customer-specific task is first implemented and validated as a robot action,
+then added to the library so users can assign it from the same editor. The
+control language can change while the low-level controller, filtering, and
+safety behavior remain stable.
 
 ## Two modes, one surface
 
@@ -90,15 +112,21 @@ and closing the app shuts the pipeline down in order.
   </tr>
 </table>
 
-**Writing mode** - the legend beside the canvas shows the full mapping:
+**Writing mode** - the legend beside the canvas follows the saved mapping and
+switches between letters and digits. The original defaults are:
 
 | Letter | Action | Digit | Action |
 |:---:|---|:---:|---|
 | `A` | wave 👋 | `1`-`8` | move to the eight corners of a 24 cm cube |
-| `B` | bow 🙇 | `0` / `X` | home / reset |
-| `C` | fist pumps 💪 | `9` | move to the cube center |
-| `D` | dab 😎 | | *a 3D benchmark for the digit classifier* |
-| `U` | stretch up 🙆 | `L` / `R` | point left / right |
+| `B` | bow 🙇 | `9` | move to the cube center |
+| `C` | fist pumps 💪 | `0` | home / reset |
+| `D` | dab 😎 | | |
+| `L` / `R` | point left / right | | |
+| `U` | stretch up 🙆 | | |
+| `X` | home / reset | | |
+| other letters | small nod | | |
+
+All entries, including `0` and `X`, are adjustable in the editor.
 
 **Flight deck** - the live gyroscope shows the magnet's tilt and twist against
 the gripper thresholds, with a height gauge beside it. The top taskbar
@@ -204,7 +232,7 @@ scrubbing, and audio.</sub>
 </div>
 
 > **Pitch deck.** A keynote-style presentation of the project lives in
-> [`presentation/`](presentation/) (`MagPilot_Keynote.pptx`, 16 slides with
+> [`presentation/`](presentation/) (`MagPilot_Keynote.pptx`, 8 slides with
 > speaker notes) - see [presentation/README.md](presentation/README.md) for the
 > run-of-show and where the demo videos slot in.
 
@@ -223,7 +251,8 @@ flowchart LR
 - **Sense** - a 4×4 grid of 16 magnetometers samples the field 30× a second; a
   dipole model recovers the magnet's position, height, tilt and twist.
 - **Recognise** - air-written strokes are inked onto a canvas and classified
-  into letters and digits by **EasyOCR**, each mapped to a robot action.
+  into letters and digits by **EasyOCR**. The shared action map turns each
+  confirmed character into a task.
 - **Move** - the noisy magnet signal is smoothed and jerk-limited before
   inverse kinematics streams it to the arm, so the real robot tracks your hand
   without vibration.
@@ -252,6 +281,10 @@ flowchart LR
 - **Arbitration** - a latched ownership topic coordinates the gesture and
   teleop nodes (startup homing, mid-motion take-over, exit homing), and latches
   MagPilot's enable state so restarting the arm nodes never drops following.
+- **Action customization** - the launcher atomically writes a schema-validated
+  map containing only registered actions. The robot checks for a new valid
+  version at the next confirmed character and otherwise retains its last valid
+  in-memory map. The interface reads the same file for its live legend.
 
 </details>
 
@@ -308,6 +341,7 @@ mode (runs `fr3_real.launch robot_ip:=…`) and keep the E-stop reachable.
 | `franka_control` is missing | Rebuild the full robot image: `INSTALL_GAZEBO=1 bash ros/docker_setup.sh`. |
 | Simulation and real robot both active | **Stop all** shuts down named ROS nodes across host-network containers; any survivor stays visible in the log without disabling the controls. |
 | Gestures move but MagPilot does not | Check `rosparam get /use_sim_time`. The real launch forces `false`; a leftover `true` without Gazebo freezes ROS timers at zero. |
+| A saved character action is not shown | Confirm another character and check the arm-node log. Invalid files are rejected while the last valid map remains active. |
 | FR3 reports **Reflex** / gripper works but arm does not | Release the activation device, unlock the joints in Franka Desk, confirm FCI, then click **Recover**. |
 | *"new node registered with same name"* | Two copies of a stage from an older launcher - **Stop all**, then start each stage once. |
 | Anything weird / stuck | **Restart container** (bulletproof reset). |
@@ -335,6 +369,7 @@ COLMAG-seminar-SS26/
 ├── <a href="colmag_launcher.py">colmag_launcher.py</a>              host control center and process lifecycle
 ├── <a href="magnetometer_reader.py">magnetometer_reader.py</a>          writing studio, flight deck, sensor and ROS bridge
 ├── <a href="colmag/">colmag/</a>                          interaction widgets, mappings and robot targets
+├── <a href="config/robot_actions.json">config/robot_actions.json</a>           editable character-to-action defaults
 ├── <a href="digit_classifier/">digit_classifier/</a>                handwriting inference
 ├── <a href="ros/colmag_ros/">ros/colmag_ros/</a>
 │   ├── <a href="ros/colmag_ros/launch/">launch/</a>

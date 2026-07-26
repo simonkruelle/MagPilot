@@ -40,6 +40,8 @@
   <arg name="arm_id"          default="fr3"    doc="Robot node: joint prefix '&lt;arm_id&gt;_joint1..7' (fr3 or panda)"/>
   <arg name="arm_controller"  default="effort_joint_trajectory_controller" doc="Robot node: JointTrajectoryController to drive"/>
   <arg name="time_scale"      default="2.0"    doc="Robot node: multiplies all motion waypoint times; 1.0 restores the original Gazebo-tuned speed"/>
+  <arg name="action_map_file" default="/colmag/config/robot_actions.json"
+       doc="Validated character-to-tested-action mapping shared with the GUI"/>
   <arg name="digit_cube_size" default="0.24" doc="Digit target cube edge length (m)"/>
   <arg name="digit_cube_center_x" default="0.45" doc="Digit cube center X (m)"/>
   <arg name="digit_cube_center_y" default="0.0" doc="Digit cube center Y (m)"/>
@@ -98,6 +100,7 @@
     <param name="digit_cube_center_x" value="$(arg digit_cube_center_x)"/>
     <param name="digit_cube_center_y" value="$(arg digit_cube_center_y)"/>
     <param name="digit_cube_center_z" value="$(arg digit_cube_center_z)"/>
+    <param name="action_map_file" value="$(arg action_map_file)"/>
     <!-- <param name="robot_ip" value="192.168.1.100"/> -->
   </node>
 

@@ -187,10 +187,10 @@ def metric(s, left, top, number, label, dark=False):
 
 
 SETUP = os.path.join(DOCS, "setup.png")
-SENSOR = os.path.join(DOCS, "hardware.jpg")
 WRITING_UI = os.path.join(DOCS, "interface.png")
 UI = os.path.join(DOCS, "magpilot.png")
 LAUNCHER = os.path.join(DOCS, "launcher.png")
+ACTION_MAPPING = os.path.join(DOCS, "action_mapping.png")
 LOGO = os.path.join(ASSETS, "logo.png")
 TUM_LOGO = os.path.join(ASSETS, "tum-logo.png")
 MIRMI_LOGO = os.path.join(DOCS, "affiliations", "mirmi-logo.png")
@@ -513,26 +513,24 @@ input and backend swaps explicit without changing the staged workflow.
 """)
 
 
-# 8. Honest next step and close
+# 8. Configurable task vocabulary and honest next step
 s = make_slide(NAVY)
-add_cover(s, SENSOR, Inches(7.72), 0, Inches(5.61), SH)
-box(s, Inches(7.62), 0, Inches(0.1), SH, BLUE)
-kicker(s, "The next step", dark=True)
+kicker(s, "From prototype to useful tool", dark=True)
 add_text(
-    s, Inches(0.78), Inches(1.02), Inches(6.4), Inches(1.35),
+    s, Inches(0.78), Inches(1.02), Inches(5.9), Inches(1.35),
     [
-        ("The mechanism works.", 34, False, WHITE),
-        ("Now design the tool with users.", 34, True, BLUE),
+        ("One controller.", 35, False, WHITE),
+        ("Many task vocabularies.", 35, True, BLUE),
     ],
     space_after=2,
 )
 steps = [
-    ("01", "MOUNT", "Build a light, adjustable cuff."),
-    ("02", "CO-DESIGN", "Choose movements and useful tasks together."),
-    ("03", "VALIDATE", "Test comfort, safety, fatigue, and daily use."),
+    ("01", "MAP", "Assign every A-Z and 0-9 to a tested action."),
+    ("02", "INTEGRATE", "Add and validate actions for a real workflow."),
+    ("03", "CO-DESIGN", "Choose the vocabulary with its users."),
 ]
 for i, (number, title, detail) in enumerate(steps):
-    top = Inches(2.75 + i * 0.88)
+    top = Inches(2.6 + i * 0.88)
     add_text(
         s, Inches(0.8), top, Inches(0.62), Inches(0.38),
         [(number, 18, True, BLUE)],
@@ -542,42 +540,54 @@ for i, (number, title, detail) in enumerate(steps):
         [(title, 13, True, WHITE)],
     )
     add_text(
-        s, Inches(2.92), top, Inches(4.15), Inches(0.42),
+        s, Inches(2.92), top, Inches(3.65), Inches(0.52),
         [(detail, 13, False, MIST)],
         line_spacing=1.05,
     )
-box(s, Inches(0.8), Inches(5.47), Inches(6.35), Inches(0.08), BLUE)
-add_text(
-    s, Inches(0.8), Inches(5.72), Inches(6.35), Inches(0.7),
-    [("Extend movement into robotic reach.", 23, True, WHITE)],
+box(s, Inches(7.08), Inches(0.57), Inches(5.7), Inches(6.07),
+    WHITE, radius=True)
+add_picture(
+    s, ACTION_MAPPING, Inches(7.25), Inches(0.72),
+    Inches(5.36), Inches(5.36),
 )
 add_text(
-    s, Inches(0.8), Inches(6.33), Inches(6.35), Inches(0.3),
-    [("Assistive use is a design direction and has not yet been user-validated.",
-      10, False, MIST)],
+    s, Inches(7.35), Inches(6.12), Inches(5.15), Inches(0.28),
+    [("ATOMIC SAVE  |  NO ROS RESTART  |  SIM + REAL", 9, True, BLUE)],
+    align=PP_ALIGN.CENTER,
+)
+box(s, Inches(0.8), Inches(5.35), Inches(5.85), Inches(0.08), BLUE)
+add_text(
+    s, Inches(0.8), Inches(5.62), Inches(5.85), Inches(0.7),
+    [("Find the right users. Build the right tasks.", 21, True, WHITE)],
+)
+add_text(
+    s, Inches(0.8), Inches(6.22), Inches(5.85), Inches(0.38),
+    [("New domain actions still require engineering and validation. "
+      "Assistive use has not yet been user-tested.", 9, False, MIST)],
 )
 add_picture(
-    s, TUM_LOGO, Inches(0.78), Inches(6.82), Inches(0.72), Inches(0.34)
+    s, TUM_LOGO, Inches(0.78), Inches(6.83), Inches(0.72), Inches(0.34)
 )
 add_picture(
-    s, MIRMI_LOGO, Inches(1.7), Inches(6.82), Inches(1.03), Inches(0.34)
+    s, MIRMI_LOGO, Inches(1.7), Inches(6.83), Inches(1.03), Inches(0.34)
 )
 add_text(
-    s, Inches(2.95), Inches(6.79), Inches(4.2), Inches(0.4),
+    s, Inches(2.95), Inches(6.8), Inches(3.7), Inches(0.4),
     [
         ("ARIES Lab | F. Masiero, E. Aimi, L. Borriello, Prof. L. Masia",
-         8, False, MIST)
+         7.5, False, MIST)
     ],
     align=PP_ALIGN.RIGHT,
     anchor=MSO_ANCHOR.MIDDLE,
 )
 add_notes(s, """
 [3:07-3:34]
-This is not yet an assistive product, and the next step should not begin with
-more software. It should begin with users: build a comfortable mount, co-design
-the control language and useful tasks, then validate safety and fatigue. What
-we have proved is the mechanism: a person's chosen movement can be extended
-into robotic reach.
+The control language is no longer hardcoded. Every letter and digit can now be
+assigned to a tested action in the GUI, with the same map in simulation and on
+the real robot. That makes MagPilot a configurable base for an assistive user,
+a lab, or a company. New domain actions still need engineering and validation.
+The next step is to find the right users and tasks, then co-design the useful
+vocabulary with them.
 """)
 
 

@@ -30,6 +30,11 @@ from datetime import datetime
 import select
 
 from colmag.interaction import AppController, InputMode, VirtualJoystick
+from colmag.action_mapping import (
+    DEFAULT_ACTION_MAP_PATH,
+    ReloadableActionMapping,
+    action_legend_rows,
+)
 from colmag.control_mapping import (
     EE_HEIGHT_MAX_M,
     EE_HEIGHT_MIN_M,
@@ -241,25 +246,6 @@ CLASSIFIER_LABEL_PRESETS = {
 }
 SYMBOL_LABELS = ('heart', 'star', 'circle', 'cube', 'rectangle', 'diamond')
 DATA_MANIFEST_SCHEMA_VERSION = 1
-
-# Gesture → robot action legend shown beside the canvas in the clean view.
-# Mirrors NAMED_POSES in ros/colmag_ros/scripts/colmag_robot_node.py — keep the
-# two in sync if you change the robot's preprogrammed motions.
-# (key, action) rows; a (None, title) row renders as a section header.
-ROBOT_ACTION_LEGEND = (
-    (None, 'LETTERS · tricks'),
-    ('A', 'wave'),
-    ('B', 'bow'),
-    ('C', 'fist pumps'),
-    ('D', 'dab'),
-    ('U', 'stretch up'),
-    ('L / R', 'point left / right'),
-    ('X', 'home'),
-    (None, 'DIGITS · cube points'),
-    ('1 – 8', 'eight cube corners'),
-    ('9', 'cube center'),
-    ('0', 'home / reset'),
-)
 
 RECORDING_TARGETS = (
     tuple(f'digit_{d}' for d in '0123456789') +
@@ -561,6 +547,16 @@ class MagnetometerReader:
             digit_labels=digit_labels,
             teleop_joystick=self.teleop_joystick,
         )
+        self.action_mapping = ReloadableActionMapping(
+            DEFAULT_ACTION_MAP_PATH)
+        self.action_mapping.refresh()
+        self._action_mapping_error = self.action_mapping.last_error
+        if self._action_mapping_error:
+            print(
+                '[actions] Mapping not loaded ({}); using built-in defaults.'
+                .format(self._action_mapping_error))
+        self._action_legend_mode = None
+        self._action_legend_last_check = 0.0
         # UI refs for the teleop-mode layout swap (populated in plot_data).
         self._teleop_ui = None
         self._teleop_ui_active = False
@@ -3252,10 +3248,24 @@ class MagnetometerReader:
             except AttributeError:
                 pass
 
-    def _draw_robot_action_legend(self, ax):
-        """Render the gesture → robot action legend panel beside the canvas."""
+    def _draw_robot_action_legend(self, ax, mode=None):
+        """Render the active, shared character-to-action mapping."""
+        mode = mode or self.app_controller.mode.value
+        if mode == 'digits':
+            title = 'Digit Actions'
+            rows = action_legend_rows(
+                self.action_mapping.mapping, 'digits')
+        elif mode == 'letters':
+            title = 'Letter Actions'
+            rows = action_legend_rows(
+                self.action_mapping.mapping, 'letters')
+        else:
+            title = 'Sign Actions'
+            rows = (('Shapes', 'Not configured'),)
+
+        ax.clear()
         ax.axis('off')
-        ax.set_title('Robot Actions', fontsize=13, fontweight='bold', pad=14,
+        ax.set_title(title, fontsize=13, fontweight='bold', pad=14,
                      loc='left', color='#1d1d1f')
         keycap = {
             'boxstyle': 'round,pad=0.32',
@@ -3263,31 +3273,54 @@ class MagnetometerReader:
             'edgecolor': '#d3e2f0',
             'linewidth': 0.8,
         }
-        n = len(ROBOT_ACTION_LEGEND)
-        y0, y_end = 0.94, 0.13
+        n = len(rows)
+        y0, y_end = 0.92, 0.13
         dy = (y0 - y_end) / max(n - 1, 1)
-        for i, (label, action) in enumerate(ROBOT_ACTION_LEGEND):
+        for i, (label, action) in enumerate(rows):
             y = y0 - i * dy
-            if label is None:
-                # Section header: small uppercase gray, macOS settings style.
-                ax.text(0.04, y, action.upper(), transform=ax.transAxes,
-                        fontsize=7.5, fontweight='bold', va='center', ha='left',
-                        color='#98989d')
-                continue
-            if label:
-                # Key rendered as a macOS-style keycap chip.
-                ax.text(0.07, y, label, transform=ax.transAxes,
-                        fontsize=9, fontweight='bold', va='center', ha='left',
-                        color='#1d1d1f', bbox=dict(keycap))
-                ax.text(0.42, y, action, transform=ax.transAxes,
-                        fontsize=9.5, va='center', ha='left', color='#3a3a3c')
-            else:
-                # Continuation line of the row above.
-                ax.text(0.42, y + dy * 0.25, action, transform=ax.transAxes,
-                        fontsize=8.5, va='center', ha='left', color='#98989d')
-        ax.text(0.04, 0.015, 'write a character →  dwell to confirm',
+            compact = len(label) > 8
+            ax.text(0.05, y, label, transform=ax.transAxes,
+                    fontsize=7.5 if compact else 9,
+                    fontweight='bold', va='center', ha='left',
+                    color='#1d1d1f', bbox=dict(keycap))
+            ax.text(0.68 if compact else 0.42, y, action,
+                    transform=ax.transAxes,
+                    fontsize=8.5 if compact else 9.5,
+                    va='center', ha='left', color='#3a3a3c')
+        ax.text(0.04, 0.015, 'write a character -> dwell to confirm',
                 transform=ax.transAxes, fontsize=8, va='top', ha='left',
                 style='italic', color='#98989d')
+        self._action_legend_mode = mode
+
+    def _refresh_robot_action_legend(self, now):
+        """Watch the atomic map file and redraw only when its view changes."""
+        if now - self._action_legend_last_check < 1.0:
+            return
+        self._action_legend_last_check = now
+        changed = self.action_mapping.refresh()
+        error = self.action_mapping.last_error
+        if error and error != self._action_mapping_error:
+            print(
+                '[actions] Mapping not applied ({}); keeping last valid '
+                'legend.'.format(error))
+        elif self._action_mapping_error and not error:
+            print('[actions] Mapping file is valid again.')
+        self._action_mapping_error = error
+
+        mode = self.app_controller.mode.value
+        if not changed and mode == self._action_legend_mode:
+            return
+        ui = self._teleop_ui
+        if not ui or ui.get('ax_legend') is None:
+            return
+        self._draw_robot_action_legend(ui['ax_legend'], mode)
+        ui['fig'].canvas.draw()
+        animation = getattr(self, '_animation', None)
+        if animation is not None:
+            try:
+                animation._blit_cache.clear()
+            except AttributeError:
+                pass
 
     def plot_data(self):
         """Create real-time plot of Bx, By, Bz for the selected sensor."""
@@ -3707,6 +3740,7 @@ class MagnetometerReader:
 
         def update_plot(frame):
             self.append_touchpad_sample()
+            self._refresh_robot_action_legend(time.monotonic())
             # Fix 4: Only copy the last display_window rows instead of the full 30K buffer.
             data = self.get_data_copy(tail=self.display_window)
             if not data:
