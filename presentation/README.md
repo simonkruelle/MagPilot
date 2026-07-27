@@ -12,7 +12,7 @@ needs to be co-designed and validated with users.
 
 | File | Purpose |
 |---|---|
-| `MagPilot_Keynote.pptx` | 8-slide, 16:9 deck with large speaker prompts and two auto-playing GIFs |
+| `MagPilot_Keynote.pptx` | 8-slide, 16:9 deck with a concise speaker script and two auto-playing GIFs |
 | `build_keynote.py` | Rebuilds the presentation from the repository assets |
 | `assets/assistive_concept.png` | AI-generated, clearly labeled concept visualization |
 | `assets/demo_classify_slide.gif` | 39-second classified-command proof |
@@ -28,7 +28,7 @@ python3 presentation/build_keynote.py
 ## Running order
 
 The complete talk is exactly 3 minutes, including 67 seconds of auto-playing
-demonstrations. Presenter View contains large cue lines, not a script.
+demonstrations. Presenter View contains a short script paced to each slide.
 
 | Time | Slide | Point |
 |---|---|---|

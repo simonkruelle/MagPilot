@@ -52,19 +52,20 @@ def make_slide(bg=SKY):
 
 
 def add_notes(s, body):
-    """Add large, glanceable Presenter View prompts instead of a script."""
+    """Add a concise, readable Presenter View script."""
     lines = [line.strip() for line in body.strip().splitlines() if line.strip()]
+    entries = [lines[0], " ".join(lines[1:])]
     tf = s.notes_slide.notes_text_frame
     tf.clear()
-    for index, line in enumerate(lines):
+    for index, line in enumerate(entries):
         p = tf.paragraphs[0] if index == 0 else tf.add_paragraph()
         p.space_before = Pt(0)
         p.space_after = Pt(8 if index else 12)
         run = p.add_run()
         run.text = line
         run.font.name = FONT
-        run.font.size = Pt(14 if index == 0 else 20)
-        run.font.bold = index > 0
+        run.font.size = Pt(14 if index == 0 else 18)
+        run.font.bold = index == 0
 
 
 def box(s, left, top, width, height, color, radius=False, line=None):
@@ -264,8 +265,9 @@ add_text(
 )
 add_notes(s, """
 [0:00-0:14]
-PROBLEM: Robot arms can help, but their controllers can exclude.
-QUESTION: Can one passive magnet become the whole interface?
+Robot arms can give people more physical independence. But their controllers
+still assume two capable hands. MagPilot asks a simple question: could one
+passive magnet become the whole interface?
 """)
 
 
@@ -315,9 +317,10 @@ add_text(
 )
 add_notes(s, """
 [0:14-0:38]
-PICTURE: Put a passive magnet wherever reliable movement remains.
-WHY: No battery. No buttons. No grip required.
-HONESTY: This is the direction, not a user-validated assistive device yet.
+Imagine a person who cannot grip a joystick or use a keyboard, but can still
+move their forearm or residual limb. A small magnet on a cuff turns that
+movement into robot control, with no buttons, battery, or firm grip. This is a
+design direction that still needs testing with users.
 """)
 
 
@@ -374,10 +377,11 @@ for left, label, title, image_path, flow in mode_columns:
 footer(s, 3)
 add_notes(s, """
 [0:38-1:02]
-MODE 1: Write a symbol. Classify it. Run its mapped task.
-MODE 2: MagPilot is our continuous magnet TELEOPERATION mode.
-CONTROL: Position, height, tilt, and gripper follow the magnet.
-SWITCH: The magnet itself changes modes. Lift away to pause.
+The magnet supports two modes. First, write a letter or digit; the classifier
+recognizes it and runs a mapped task. Second, enter MagPilot Teleoperation:
+movement controls position and height, tilt controls the gripper, and lifting
+away pauses the arm. The magnet itself switches between them. Here are both
+modes on the real robot.
 """)
 
 
@@ -405,7 +409,7 @@ add_text(
 )
 add_notes(s, """
 [1:02-1:41]
-SAY NOTHING. LET THE 39-SECOND REAL-ROBOT PROOF PLAY.
+Do not speak. Let the 39-second classified-command demonstration play.
 """)
 
 
@@ -433,7 +437,7 @@ add_text(
 )
 add_notes(s, """
 [1:41-2:09]
-SAY NOTHING. LET THE 28-SECOND MAGPILOT TELEOPERATION PROOF PLAY.
+Do not speak. Let the 28-second MagPilot Teleoperation demonstration play.
 """)
 
 
@@ -486,9 +490,10 @@ s = make_slide(SKY)
 add_platform_base(s, 6)
 add_notes(s, """
 [2:09-2:29]
-PLATFORM: This is not one fragile demo.
-VERIFY: Trackpad first, Gazebo second, real FR3 third.
-CLICK: Now reveal how the same system changes for a new task.
+This is more than one successful demo. The same control center supports
+trackpad input for fast debugging, Gazebo for safe verification, and the real
+sensor with the FR3. Because every stage is modular, we can test changes before
+they ever reach the hardware.
 """)
 
 
@@ -524,9 +529,9 @@ add_text(
 add_click_transition(s, effect="wipe", direction="d")
 add_notes(s, """
 [2:29-2:44]
-CUSTOMIZE: Every letter and digit can map to a tested action.
-CUSTOMER VALUE: The controller stays. Their task vocabulary changes.
-BOUNDARY: New robot actions still need engineering and validation.
+The control language is customizable too. Letters and digits can map to tested
+actions. For each user or company, the reliable controller stays, while the
+task vocabulary adapts to their workflow.
 """)
 
 
@@ -594,10 +599,9 @@ add_text(
 add_click_transition(s, effect="fade")
 add_notes(s, """
 [2:44-3:00]
-CLOSE: MagPilot is a working platform, not the finished product.
-NEXT: One real user. One useful task. One measurable benefit. Then repeat.
-MAYBE A COMPANY: Help first. Scale second.
-THANK: Supervisors, professor, ARIES Lab, and TUM MIRMI.
+MagPilot is a working platform, not a finished product. The next step is one
+real user, one useful task, and one measurable benefit. If it works, we repeat.
+Help first, scale second. Thank you.
 """)
 
 
