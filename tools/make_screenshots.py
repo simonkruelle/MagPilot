@@ -7,6 +7,7 @@ import numpy as np
 import os, sys
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DOCS = os.path.join(_ROOT, 'docs')
+_PRESENTATION_ASSETS = os.path.join(_ROOT, 'presentation', 'assets')
 sys.path.insert(0, _ROOT)
 import magnetometer_reader as mr
 
@@ -67,13 +68,21 @@ def fake_show(*a, **k):
     class _RobotMode:
         value = 'robot'
     reader.app_controller.mode = _RobotMode()
+    reader.sim_magnet_theta = 62.0
+    reader.sim_magnet_phi = -35.0
+    reader.sim_magnet_height_m = 0.065
+    reader._magnet_grip_closed = False
     reader._sync_teleop_ui()
+    reader._update_gyro()
     ax5.images[0].set_data(white)
     cursor = reader._teleop_ui.get('cursor')
     if cursor is not None:
-        cursor.set_offsets(np.array([[0.15 * e, -0.1 * e]]))
+        cursor.set_offsets(np.array([[-0.16 * e, 0.02 * e]]))
         cursor.set_paths([reader._plane_path_for_heading(np.radians(28))])
+        cursor.set_sizes([950])
     fig.savefig(os.path.join(_DOCS, 'magpilot.png'), dpi=105,
+                facecolor=fig.get_facecolor())
+    fig.savefig(os.path.join(_PRESENTATION_ASSETS, 'ui_magpilot.png'), dpi=105,
                 facecolor=fig.get_facecolor())
     print('saved magpilot')
 

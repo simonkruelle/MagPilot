@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Generate the short MagPilot assistive-robotics keynote.
+"""Generate the three-minute MagPilot assistive-robotics keynote.
 
-The deck is deliberately concise: eight slides, about 147 seconds of spoken
-material, and 67 seconds of auto-playing demo GIFs. At a calm pace it runs for
-roughly 3:34, leaving room for pauses while staying below five minutes.
+The deck uses eight slides, 113 seconds of short speaker prompts, and 67
+seconds of auto-playing demo GIFs. The complete run is exactly three minutes.
 
 Regenerate with:
     python3 presentation/build_keynote.py
@@ -16,7 +15,8 @@ from pptx import Presentation
 from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
-from pptx.oxml.ns import qn
+from pptx.oxml import parse_xml
+from pptx.oxml.ns import nsdecls, qn
 from pptx.util import Inches, Pt
 
 
@@ -52,7 +52,19 @@ def make_slide(bg=SKY):
 
 
 def add_notes(s, body):
-    s.notes_slide.notes_text_frame.text = body.strip()
+    """Add large, glanceable Presenter View prompts instead of a script."""
+    lines = [line.strip() for line in body.strip().splitlines() if line.strip()]
+    tf = s.notes_slide.notes_text_frame
+    tf.clear()
+    for index, line in enumerate(lines):
+        p = tf.paragraphs[0] if index == 0 else tf.add_paragraph()
+        p.space_before = Pt(0)
+        p.space_after = Pt(8 if index else 12)
+        run = p.add_run()
+        run.text = line
+        run.font.name = FONT
+        run.font.size = Pt(14 if index == 0 else 20)
+        run.font.bold = index > 0
 
 
 def box(s, left, top, width, height, color, radius=False, line=None):
@@ -171,6 +183,24 @@ def footer(s, number, dark=False):
     )
 
 
+def add_click_transition(s, effect="fade", direction=None):
+    """Add a click-advanced PowerPoint transition to this slide."""
+    attrs = ' spd="fast" advClick="1"'
+    child_attrs = f' dir="{direction}"' if direction else ""
+    transition = parse_xml(
+        f'<p:transition {nsdecls("p")}{attrs}>'
+        f'<p:{effect}{child_attrs}/>'
+        '</p:transition>'
+    )
+    slide_element = s._element
+    for index, child in enumerate(slide_element):
+        if child.tag in (qn("p:timing"), qn("p:extLst")):
+            slide_element.insert(index, transition)
+            break
+    else:
+        slide_element.append(transition)
+
+
 def metric(s, left, top, number, label, dark=False):
     primary = WHITE if dark else INK
     secondary = MIST if dark else SUBTLE
@@ -233,84 +263,35 @@ add_text(
     [("COLMAG | TUM ARIES Lab | Simon Kruelle", 11, False, MIST)],
 )
 add_notes(s, """
-[0:00-0:18]
-Robot arms can already pick up objects for us. But their controllers still
-assume that a person can grip a joystick, use a keyboard, or operate a teach
-pendant. MagPilot asks a different question: can one passive magnet become the
-entire interface?
+[0:00-0:14]
+PROBLEM: Robot arms can help, but their controllers can exclude.
+QUESTION: Can one passive magnet become the whole interface?
 """)
 
 
-# 2. The accessibility gap
-s = make_slide(SKY)
-kicker(s, "The accessibility gap")
-add_text(
-    s, Inches(0.78), Inches(1.05), Inches(11.9), Inches(1.55),
-    [
-        ("The robot can help.", 42, False, INK),
-        ("The controller can exclude.", 42, True, INK),
-    ],
-    space_after=2,
-)
-labels = [
-    ("KEYBOARD", "precise reach and finger control"),
-    ("JOYSTICK", "a reliable grip"),
-    ("TEACH PENDANT", "both hands and training"),
-]
-for i, (title, detail) in enumerate(labels):
-    left = Inches(0.8 + i * 4.1)
-    box(s, left, Inches(3.12), Inches(3.55), Inches(0.08), BLUE)
-    add_text(
-        s, left, Inches(3.48), Inches(3.55), Inches(0.45),
-        [(title, 14, True, BLUE)],
-    )
-    add_text(
-        s, left, Inches(4.05), Inches(3.55), Inches(1.0),
-        [(detail, 22, True, INK)],
-        line_spacing=1.05,
-    )
-band = box(s, 0, Inches(5.72), SW, Inches(1.2), NAVY)
-add_text(
-    s, Inches(0.82), Inches(5.72), Inches(11.8), Inches(1.2),
-    [
-        ("For a person with an upper-limb difference or limited hand function, ",
-         19, False, MIST),
-        ("the interface can be the barrier.", 19, True, WHITE),
-    ],
-    anchor=MSO_ANCHOR.MIDDLE,
-)
-footer(s, 2)
-add_notes(s, """
-[0:18-0:40]
-For people with an upper-limb difference or limited hand function, the robot
-may be capable while its interface is not. Keyboards need finger precision,
-joysticks need grip, and teach pendants need both. The problem I want to address
-is not robot capability. It is access to that capability.
-""")
-
-
-# 3. Assistive concept
+# 2. Problem and assistive concept
 s = make_slide(NAVY)
 add_cover(s, ASSISTIVE_CONCEPT, 0, 0, SW, SH)
 concept_scrim = box(s, 0, 0, Inches(3.75), SH, NAVY)
 set_opacity(concept_scrim, 0.92)
 kicker(
-    s, "The assistive direction", dark=True,
+    s, "The problem, made tangible", dark=True,
     left=Inches(0.58), top=Inches(0.48),
 )
 add_text(
     s, Inches(0.58), Inches(1.1), Inches(2.8), Inches(1.92),
     [
         ("Put the input", 26, False, WHITE),
-        ("where reliable movement remains.", 26, True, BLUE),
+        ("where movement remains.", 26, True, BLUE),
     ],
     space_after=2,
 )
 add_text(
     s, Inches(0.6), Inches(3.34), Inches(2.72), Inches(1.42),
     [
-        ("A passive magnet on a comfortable cuff could turn residual-limb "
-         "movement into direct robot control.", 15, False, MIST)
+        ("A keyboard needs fingers. A joystick needs grip. A passive magnet "
+         "on a cuff could turn residual movement into robot control.",
+         15, False, MIST)
     ],
     line_spacing=1.08,
 )
@@ -327,83 +308,80 @@ add_text(
     [("AI-GENERATED CONCEPT\nNOT USER-VALIDATED", 8, True, MIST)],
     space_after=1,
 )
+add_text(
+    s, Inches(12.0), Inches(7.08), Inches(0.7), Inches(0.25),
+    [("2", 9, True, MIST)],
+    align=PP_ALIGN.RIGHT,
+)
 add_notes(s, """
-[0:40-1:02]
-This image is an AI-generated concept, not a user trial. The proposed assistive
-form is simple: place a passive magnet on a comfortable cuff wherever a person
-has reliable movement, for example on a residual limb. Nothing needs charging,
-gripping, or pressing. The sensor array reads that movement through the air.
+[0:14-0:38]
+PICTURE: Put a passive magnet wherever reliable movement remains.
+WHY: No battery. No buttons. No grip required.
+HONESTY: This is the direction, not a user-validated assistive device yet.
 """)
 
 
-# 4. Two operating modes
+# 3. Two operating modes
 s = make_slide(SKY)
 kicker(s, "Two modes, one interface")
 add_text(
-    s, Inches(0.78), Inches(1.02), Inches(11.8), Inches(0.72),
-    [("Choose a task, or pilot continuously.", 32, True, INK)],
+    s, Inches(0.78), Inches(1.0), Inches(11.8), Inches(0.72),
+    [("Choose a task, or enter MagPilot Teleoperation.", 30, True, INK)],
 )
 add_text(
-    s, Inches(0.8), Inches(1.66), Inches(11.7), Inches(0.26),
+    s, Inches(0.8), Inches(1.63), Inches(11.7), Inches(0.26),
     [
-        ("MAGNET-ONLY SWITCH  |  Dwell on MagPilot to enter, "
-         "Draw to return.", 13, True, BLUE)
+        ("ONE MAGNET  |  TWO CONTROL MODES  |  MAGNET-ONLY SWITCH",
+         13, True, BLUE)
     ],
     align=PP_ALIGN.LEFT,
 )
 mode_columns = [
     (
-        Inches(0.78),
+        Inches(0.48),
         "01  CLASSIFIED COMMANDS",
-        "Write a letter or digit",
-        "The classifier maps the symbol to a stored robot task.",
+        "Write a symbol. Trigger a task.",
         WRITING_UI,
-        "AIR-WRITE  |  CLASSIFY  |  EXECUTE",
+        "AIR-WRITE  >  CLASSIFY  >  EXECUTE",
     ),
     (
-        Inches(6.82),
+        Inches(6.77),
         "02  MAGPILOT TELEOPERATION",
-        "Move the magnet directly",
-        "X/Y, height, and gripper state follow continuously.",
+        "Pilot the robot continuously.",
         UI,
-        "MOVE  |  RAISE  |  TILT  |  LIFT AWAY TO PAUSE",
+        "MOVE  >  TILT  >  GRIP  >  LIFT AWAY TO PAUSE",
     ),
 ]
-for left, label, title, detail, image_path, flow in mode_columns:
-    box(s, left, Inches(2.03), Inches(5.72), Inches(4.72), WHITE, radius=True)
+for left, label, title, image_path, flow in mode_columns:
+    box(s, left, Inches(1.98), Inches(6.08), Inches(4.82), WHITE, radius=True)
     add_text(
-        s, left + Inches(0.25), Inches(2.22), Inches(5.2), Inches(0.3),
+        s, left + Inches(0.24), Inches(2.14), Inches(5.6), Inches(0.3),
         [(label, 11, True, BLUE)],
     )
     add_text(
-        s, left + Inches(0.25), Inches(2.57), Inches(5.2), Inches(0.42),
-        [(title, 21, True, INK)],
-    )
-    add_text(
-        s, left + Inches(0.25), Inches(3.0), Inches(5.2), Inches(0.42),
-        [(detail, 13, False, SUBTLE)],
+        s, left + Inches(0.24), Inches(2.49), Inches(5.6), Inches(0.4),
+        [(title, 20, True, INK)],
     )
     add_picture(
-        s, image_path, left + Inches(0.25), Inches(3.5),
-        Inches(5.22), Inches(2.55),
+        s, image_path, left + Inches(0.2), Inches(2.96),
+        Inches(5.68), Inches(3.28),
     )
     add_text(
-        s, left + Inches(0.25), Inches(6.25), Inches(5.2), Inches(0.28),
+        s, left + Inches(0.24), Inches(6.38), Inches(5.6), Inches(0.28),
         [(flow, 10, True, BLUE)],
         align=PP_ALIGN.CENTER,
     )
-footer(s, 4)
+footer(s, 3)
 add_notes(s, """
-[1:02-1:27]
-The same interface offers two ways to work. In command mode, a person writes a
-letter or digit and the classifier maps it to a stored robot task. In MagPilot
-mode, the magnet becomes a continuous controller for position, height, and the
-gripper. The magnet itself switches modes by dwelling on MagPilot to enter or
-Draw to return. Lifting it away pauses the arm.
+[0:38-1:02]
+MODE 1: Write a symbol. Classify it. Run its mapped task.
+MODE 2: MagPilot is our continuous magnet TELEOPERATION mode.
+CONTROL: Position, height, tilt, and gripper follow the magnet.
+SWITCH: The magnet itself changes modes. Lift away to pause.
 """)
 
 
-# 5. Auto-playing classified-command demo
+# 4. Auto-playing classified-command demo
 s = make_slide(NAVY)
 s.shapes.add_picture(GIF_CLASSIFY, 0, 0, SW, SH)
 top_band = box(s, 0, 0, SW, Inches(1.03), NAVY)
@@ -426,13 +404,12 @@ add_text(
     anchor=MSO_ANCHOR.MIDDLE,
 )
 add_notes(s, """
-[1:27-2:11]
-This is classified-command mode on the real robot. The animation starts
-automatically and runs for 39 seconds. Let it play without speaking over it.
+[1:02-1:41]
+SAY NOTHING. LET THE 39-SECOND REAL-ROBOT PROOF PLAY.
 """)
 
 
-# 6. Auto-playing MagPilot demo
+# 5. Auto-playing MagPilot demo
 s = make_slide(NAVY)
 s.shapes.add_picture(GIF_TELEOP, 0, 0, SW, SH)
 top_band = box(s, 0, 0, SW, Inches(1.03), NAVY)
@@ -441,7 +418,7 @@ add_text(
     s, Inches(0.68), Inches(0.18), Inches(9.8), Inches(0.7),
     [
         ("PROOF 2  ", 13, True, BLUE),
-        ("One magnet picks up an object.", 26, True, WHITE),
+        ("MagPilot Teleoperation picks up an object.", 26, True, WHITE),
     ],
     anchor=MSO_ANCHOR.MIDDLE,
 )
@@ -455,139 +432,172 @@ add_text(
     anchor=MSO_ANCHOR.MIDDLE,
 )
 add_notes(s, """
-[2:11-2:44]
-Now MagPilot teleoperation: move, lower, close the gripper, and lift the
-package. The animation starts automatically and runs for 28 seconds. This is
-the direct proof that magnetic input can perform a useful physical task.
+[1:41-2:09]
+SAY NOTHING. LET THE 28-SECOND MAGPILOT TELEOPERATION PROOF PLAY.
 """)
 
 
-# 7. Modular verification pipeline
+# 6-7. Reusable platform with a click-revealed customization screen
+def add_platform_base(s, slide_number):
+    kicker(s, "One reusable platform", left=Inches(0.68), top=Inches(0.55))
+    add_text(
+        s, Inches(0.68), Inches(1.02), Inches(4.18), Inches(1.35),
+        [
+            ("Same interface.", 30, False, INK),
+            ("Three ways to verify.", 30, True, INK),
+        ],
+        space_after=3,
+    )
+    layers = [
+        ("1", "TRACKPAD", "Fast sensor simulation."),
+        ("2", "GAZEBO", "Safe robot verification."),
+        ("3", "REAL FR3", "The same GUI and ROS path."),
+    ]
+    for index, (number, title, detail) in enumerate(layers):
+        top = Inches(2.55 + index * 1.1)
+        add_text(
+            s, Inches(0.72), top, Inches(0.48), Inches(0.48),
+            [(number, 23, True, BLUE)],
+        )
+        add_text(
+            s, Inches(1.3), top + Inches(0.02), Inches(3.2), Inches(0.3),
+            [(title, 13, True, INK)],
+        )
+        add_text(
+            s, Inches(1.3), top + Inches(0.38), Inches(3.25), Inches(0.48),
+            [(detail, 13, False, SUBTLE)],
+        )
+    box(
+        s, Inches(4.92), Inches(0.62), Inches(7.8), Inches(6.17),
+        WHITE, radius=True,
+    )
+    add_picture(
+        s, LAUNCHER, Inches(5.1), Inches(0.82), Inches(7.44), Inches(5.5)
+    )
+    add_text(
+        s, Inches(5.16), Inches(6.42), Inches(7.3), Inches(0.27),
+        [("TRACKPAD  >  GAZEBO  >  REAL SENSOR + FR3", 10, True, BLUE)],
+        align=PP_ALIGN.CENTER,
+    )
+    footer(s, slide_number)
+
+
 s = make_slide(SKY)
-kicker(s, "Modular by design", left=Inches(0.68), top=Inches(0.55))
-add_text(
-    s, Inches(0.68), Inches(1.02), Inches(4.25), Inches(1.35),
-    [
-        ("One control center.", 30, False, INK),
-        ("Verify three ways.", 30, True, INK),
-    ],
-    space_after=3,
-)
-layers = [
-    ("1", "TRACKPAD INPUT", "Simulate the magnet sensor for fast debugging."),
-    ("2", "GAZEBO", "Verify robot motion safely before hardware."),
-    ("3", "REAL SENSOR + FR3", "Run the same GUI and ROS command path."),
-]
-for index, (number, title, detail) in enumerate(layers):
-    top = Inches(2.55 + index * 1.22)
-    add_text(
-        s, Inches(0.72), top, Inches(0.48), Inches(0.48),
-        [(number, 23, True, BLUE)],
-    )
-    add_text(
-        s, Inches(1.3), top + Inches(0.02), Inches(3.25), Inches(0.32),
-        [(title, 13, True, INK)],
-    )
-    add_text(
-        s, Inches(1.3), top + Inches(0.4), Inches(3.25), Inches(0.62),
-        [(detail, 13, False, SUBTLE)],
-        line_spacing=1.05,
-    )
-box(s, Inches(5.0), Inches(0.62), Inches(7.72), Inches(6.18), WHITE, radius=True)
-add_picture(
-    s, LAUNCHER, Inches(5.2), Inches(0.83), Inches(7.32), Inches(5.72)
-)
-add_text(
-    s, Inches(5.25), Inches(6.47), Inches(7.2), Inches(0.27),
-    [("Simulation and real hardware share the same staged launch workflow.",
-      10, True, SUBTLE)],
-    align=PP_ALIGN.CENTER,
-)
-footer(s, 7)
+add_platform_base(s, 6)
 add_notes(s, """
-[2:44-3:07]
-The pipeline is fully modular. Trackpad mode simulates the magnet sensor for
-quick debugging. Gazebo verifies the same robot commands safely. Then the real
-sensor and FR3 use the same GUI and ROS path. The Control Center makes those
-input and backend swaps explicit without changing the staged workflow.
+[2:09-2:29]
+PLATFORM: This is not one fragile demo.
+VERIFY: Trackpad first, Gazebo second, real FR3 third.
+CLICK: Now reveal how the same system changes for a new task.
 """)
 
 
-# 8. Configurable task vocabulary and honest next step
-s = make_slide(NAVY)
-kicker(s, "From prototype to useful tool", dark=True)
-add_text(
-    s, Inches(0.78), Inches(1.02), Inches(5.9), Inches(1.35),
-    [
-        ("One controller.", 35, False, WHITE),
-        ("Many task vocabularies.", 35, True, BLUE),
-    ],
-    space_after=2,
+s = make_slide(SKY)
+add_platform_base(s, 7)
+window = box(
+    s, Inches(6.35), Inches(1.15), Inches(5.82), Inches(5.08),
+    NAVY, radius=True,
 )
-steps = [
-    ("01", "MAP", "Assign every A-Z and 0-9 to a tested action."),
-    ("02", "INTEGRATE", "Add and validate actions for a real workflow."),
-    ("03", "CO-DESIGN", "Choose the vocabulary with its users."),
-]
-for i, (number, title, detail) in enumerate(steps):
-    top = Inches(2.6 + i * 0.88)
-    add_text(
-        s, Inches(0.8), top, Inches(0.62), Inches(0.38),
-        [(number, 18, True, BLUE)],
-    )
-    add_text(
-        s, Inches(1.55), top, Inches(1.35), Inches(0.36),
-        [(title, 13, True, WHITE)],
-    )
-    add_text(
-        s, Inches(2.92), top, Inches(3.65), Inches(0.52),
-        [(detail, 13, False, MIST)],
-        line_spacing=1.05,
-    )
-box(s, Inches(7.08), Inches(0.57), Inches(5.7), Inches(6.07),
-    WHITE, radius=True)
+set_opacity(window, 0.97)
+add_text(
+    s, Inches(6.68), Inches(1.42), Inches(5.15), Inches(0.36),
+    [("CUSTOMIZABLE", 13, True, BLUE)],
+)
+add_text(
+    s, Inches(6.68), Inches(1.82), Inches(5.15), Inches(0.72),
+    [("Keep the controller.\nChange the vocabulary.", 23, True, WHITE)],
+    space_after=1,
+)
+box(
+    s, Inches(6.66), Inches(2.68), Inches(5.2), Inches(2.88),
+    WHITE, radius=True,
+)
 add_picture(
-    s, ACTION_MAPPING, Inches(7.25), Inches(0.72),
-    Inches(5.36), Inches(5.36),
+    s, ACTION_MAPPING, Inches(6.78), Inches(2.79),
+    Inches(4.96), Inches(2.62),
 )
 add_text(
-    s, Inches(7.35), Inches(6.12), Inches(5.15), Inches(0.28),
-    [("ATOMIC SAVE  |  NO ROS RESTART  |  SIM + REAL", 9, True, BLUE)],
+    s, Inches(6.7), Inches(5.7), Inches(5.1), Inches(0.3),
+    [("A-Z + 0-9  |  TESTED ACTIONS  |  SIM + REAL", 9, True, MIST)],
     align=PP_ALIGN.CENTER,
 )
-box(s, Inches(0.8), Inches(5.35), Inches(5.85), Inches(0.08), BLUE)
+add_click_transition(s, effect="wipe", direction="d")
+add_notes(s, """
+[2:29-2:44]
+CUSTOMIZE: Every letter and digit can map to a tested action.
+CUSTOMER VALUE: The controller stays. Their task vocabulary changes.
+BOUNDARY: New robot actions still need engineering and validation.
+""")
+
+
+# 8. Open-ended closing and acknowledgements
+s = make_slide(NAVY)
+kicker(s, "Where this could go", dark=True)
 add_text(
-    s, Inches(0.8), Inches(5.62), Inches(5.85), Inches(0.7),
-    [("Find the right users. Build the right tasks.", 21, True, WHITE)],
+    s, Inches(0.78), Inches(1.04), Inches(11.8), Inches(1.0),
+    [("One user. One task. One proof.", 40, True, WHITE)],
 )
 add_text(
-    s, Inches(0.8), Inches(6.22), Inches(5.85), Inches(0.38),
-    [("New domain actions still require engineering and validation. "
-      "Assistive use has not yet been user-tested.", 9, False, MIST)],
+    s, Inches(0.8), Inches(1.9), Inches(11.5), Inches(0.48),
+    [("Then repeat what genuinely helps.", 21, False, MIST)],
 )
-add_picture(
-    s, TUM_LOGO, Inches(0.78), Inches(6.83), Inches(0.72), Inches(0.34)
-)
-add_picture(
-    s, MIRMI_LOGO, Inches(1.7), Inches(6.83), Inches(1.03), Inches(0.34)
-)
+roadmap = [
+    ("01", "LISTEN", "Find the real barrier."),
+    ("02", "BUILD", "Co-design one useful task."),
+    ("03", "PROVE", "Measure whether it helps."),
+]
+for index, (number, title, detail) in enumerate(roadmap):
+    left = Inches(0.82 + index * 4.18)
+    box(s, left, Inches(2.72), Inches(3.56), Inches(0.08), BLUE)
+    add_text(
+        s, left, Inches(3.06), Inches(0.58), Inches(0.42),
+        [(number, 20, True, BLUE)],
+    )
+    add_text(
+        s, left + Inches(0.66), Inches(3.08), Inches(2.78), Inches(0.34),
+        [(title, 14, True, WHITE)],
+    )
+    add_text(
+        s, left, Inches(3.72), Inches(3.5), Inches(0.68),
+        [(detail, 17, False, MIST)],
+        line_spacing=1.05,
+    )
+box(s, Inches(0.82), Inches(4.72), Inches(11.72), Inches(0.88), BLUE_DK,
+    radius=True)
 add_text(
-    s, Inches(2.95), Inches(6.8), Inches(3.7), Inches(0.4),
-    [
-        ("ARIES Lab | F. Masiero, E. Aimi, L. Borriello, Prof. L. Masia",
-         7.5, False, MIST)
-    ],
-    align=PP_ALIGN.RIGHT,
+    s, Inches(0.82), Inches(4.72), Inches(11.72), Inches(0.88),
+    [("STARTUP PLAN v0.1:  HELP FIRST.  SCALE SECOND.", 17, True, WHITE)],
+    align=PP_ALIGN.CENTER,
     anchor=MSO_ANCHOR.MIDDLE,
 )
+box(s, 0, Inches(6.12), SW, Inches(1.38), WHITE)
+add_picture(
+    s, TUM_LOGO, Inches(0.78), Inches(6.58), Inches(0.78), Inches(0.36)
+)
+add_picture(
+    s, MIRMI_LOGO, Inches(1.82), Inches(6.58), Inches(1.1), Inches(0.36)
+)
+add_text(
+    s, Inches(3.28), Inches(6.35), Inches(8.9), Inches(0.36),
+    [("THANK YOU", 11, True, BLUE)],
+)
+add_text(
+    s, Inches(3.28), Inches(6.7), Inches(8.9), Inches(0.36),
+    [("Federico Masiero | Emanuele Aimi | Luca Borriello | "
+      "Prof. Dr. Lorenzo Masia", 12, True, INK)],
+)
+add_text(
+    s, Inches(11.9), Inches(7.08), Inches(0.7), Inches(0.25),
+    [("8", 9, True, SUBTLE)],
+    align=PP_ALIGN.RIGHT,
+)
+add_click_transition(s, effect="fade")
 add_notes(s, """
-[3:07-3:34]
-The control language is no longer hardcoded. Every letter and digit can now be
-assigned to a tested action in the GUI, with the same map in simulation and on
-the real robot. That makes MagPilot a configurable base for an assistive user,
-a lab, or a company. New domain actions still need engineering and validation.
-The next step is to find the right users and tasks, then co-design the useful
-vocabulary with them.
+[2:44-3:00]
+CLOSE: MagPilot is a working platform, not the finished product.
+NEXT: One real user. One useful task. One measurable benefit. Then repeat.
+MAYBE A COMPANY: Help first. Scale second.
+THANK: Supervisors, professor, ARIES Lab, and TUM MIRMI.
 """)
 
 
