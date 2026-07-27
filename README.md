@@ -276,9 +276,10 @@ the log, and enter the robot IP when needed. Startup clears stale ROS processes,
 and closing the app shuts the pipeline down in order.
 
 > **Pitch deck.** A keynote-style presentation of the project lives in
-> [`presentation/`](presentation/) (`MagPilot_Keynote.pptx`, 8 slides with
-> speaker notes) - see [presentation/README.md](presentation/README.md) for the
-> run-of-show and where the demo videos slot in.
+> [`presentation/`](presentation/) (`MagPilot_Keynote.pptx`, an eight-part
+> remote-controlled pitch with speaker notes) - see
+> [presentation/README.md](presentation/README.md) for the run-of-show and
+> where the demo videos slot in.
 
 ## Quick start
 

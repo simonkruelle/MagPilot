@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Generate the three-minute MagPilot assistive-robotics keynote.
 
-The deck uses eight slides, 113 seconds of short speaker prompts, and 67
-seconds of auto-playing demo GIFs. The complete run is exactly three minutes.
+The deck uses eight story beats across ten remote-controlled frames, 113
+seconds of spoken material, and 67 seconds of auto-playing demo GIFs. The
+complete run is exactly three minutes.
 
 Regenerate with:
     python3 presentation/build_keynote.py
@@ -51,10 +52,12 @@ def make_slide(bg=SKY):
     return s
 
 
-def add_notes(s, body):
+def add_notes(s, body, cue=None):
     """Add a concise, readable Presenter View script."""
     lines = [line.strip() for line in body.strip().splitlines() if line.strip()]
     entries = [lines[0], " ".join(lines[1:])]
+    if cue:
+        entries.append(cue)
     tf = s.notes_slide.notes_text_frame
     tf.clear()
     for index, line in enumerate(entries):
@@ -64,8 +67,9 @@ def add_notes(s, body):
         run = p.add_run()
         run.text = line
         run.font.name = FONT
-        run.font.size = Pt(14 if index == 0 else 18)
-        run.font.bold = index == 0
+        run.font.size = Pt(14 if index != 1 else 18)
+        run.font.bold = index != 1
+        run.font.color.rgb = BLUE if index == 2 else INK
 
 
 def box(s, left, top, width, height, color, radius=False, line=None):
@@ -234,155 +238,205 @@ GIF_TELEOP = os.path.join(ASSETS, "demo_teleop_slide.gif")
 s = make_slide(NAVY)
 add_cover(s, SETUP, 0, 0, SW, SH)
 scrim = box(s, 0, 0, Inches(7.45), SH, NAVY)
-set_opacity(scrim, 0.90)
+set_opacity(scrim, 0.89)
 add_picture(
     s, LOGO, Inches(0.8), Inches(0.62), Inches(0.82), Inches(0.82)
 )
 add_text(
-    s, Inches(0.8), Inches(1.72), Inches(6.25), Inches(1.35),
+    s, Inches(0.82), Inches(1.58), Inches(5.9), Inches(0.35),
+    [("INTRODUCING", 13, True, BLUE)],
+)
+add_text(
+    s, Inches(0.8), Inches(2.02), Inches(6.25), Inches(1.2),
     [("MagPilot", 72, True, WHITE)],
 )
 add_text(
-    s, Inches(0.82), Inches(3.02), Inches(5.95), Inches(1.65),
+    s, Inches(0.82), Inches(3.42), Inches(6.35), Inches(1.35),
     [
-        ("Robot control from", 33, False, MIST),
-        ("one passive magnet.", 37, True, WHITE),
+        ("Robot control from", 31, False, MIST),
+        ("one tiny passive magnet.", 31, True, WHITE),
     ],
     space_after=4,
-)
-box(s, Inches(0.82), Inches(5.12), Inches(0.12), Inches(0.92), BLUE)
-add_text(
-    s, Inches(1.15), Inches(5.1), Inches(5.7), Inches(1.1),
-    [
-        ("Toward assistance without a keyboard, joystick, or hand-held controller.",
-         20, True, WHITE)
-    ],
-    line_spacing=1.05,
 )
 add_text(
     s, Inches(0.82), Inches(6.76), Inches(6.3), Inches(0.35),
     [("COLMAG | TUM ARIES Lab | Simon Kruelle", 11, False, MIST)],
 )
 add_notes(s, """
-[0:00-0:14]
-Robot arms can give people more physical independence. But their controllers
-still assume two capable hands. MagPilot asks a simple question: could one
-passive magnet become the whole interface?
-""")
+[0:00-0:08]
+Introducing MagPilot: robot control from one tiny passive magnet. Hold up the
+magnet and pause for a moment.
+""", cue="REMOTE: click to introduce the problem.")
 
 
-# 2. Problem and assistive concept
-s = make_slide(NAVY)
-add_cover(s, ASSISTIVE_CONCEPT, 0, 0, SW, SH)
-concept_scrim = box(s, 0, 0, Inches(3.75), SH, NAVY)
-set_opacity(concept_scrim, 0.92)
+# 2. Problem and assistive concept, built in two remote clicks
+def add_concept_base():
+    slide = make_slide(NAVY)
+    add_cover(slide, ASSISTIVE_CONCEPT, 0, 0, SW, SH)
+    concept_scrim = box(slide, 0, 0, Inches(4.18), SH, NAVY)
+    set_opacity(concept_scrim, 0.93)
+    add_text(
+        slide, Inches(0.58), Inches(6.82), Inches(3.1), Inches(0.36),
+        [("AI-GENERATED CONCEPT | NOT USER-VALIDATED", 7.5, True, MIST)],
+    )
+    add_text(
+        slide, Inches(12.0), Inches(7.08), Inches(0.7), Inches(0.25),
+        [("2", 9, True, MIST)],
+        align=PP_ALIGN.RIGHT,
+    )
+    return slide
+
+
+s = add_concept_base()
 kicker(
-    s, "The problem, made tangible", dark=True,
+    s, "Why MagPilot", dark=True,
     left=Inches(0.58), top=Inches(0.48),
 )
 add_text(
-    s, Inches(0.58), Inches(1.1), Inches(2.8), Inches(1.92),
+    s, Inches(0.58), Inches(1.2), Inches(3.15), Inches(1.55),
     [
-        ("Put the input", 26, False, WHITE),
-        ("where movement remains.", 26, True, BLUE),
+        ("Robot arms can assist.", 29, False, WHITE),
+        ("Controllers can exclude.", 29, True, BLUE),
     ],
     space_after=2,
 )
+box(s, Inches(0.6), Inches(3.35), Inches(0.1), Inches(1.18), BLUE)
 add_text(
-    s, Inches(0.6), Inches(3.34), Inches(2.72), Inches(1.42),
+    s, Inches(0.92), Inches(3.34), Inches(2.9), Inches(1.2),
     [
-        ("A keyboard needs fingers. A joystick needs grip. A passive magnet "
-         "on a cuff could turn residual movement into robot control.",
-         15, False, MIST)
+        ("CAN ONE TINY MAGNET", 11, True, MIST),
+        ("BECOME THE WHOLE INTERFACE?", 18, True, WHITE),
     ],
-    line_spacing=1.08,
+    space_after=7,
 )
-box(s, Inches(0.6), Inches(5.12), Inches(0.09), Inches(0.82), BLUE)
-add_text(
-    s, Inches(0.92), Inches(5.12), Inches(2.4), Inches(0.86),
-    [
-        ("NO BATTERY\nNO BUTTONS\nNO GRIP REQUIRED", 12, True, WHITE),
-    ],
-    space_after=2,
-)
-add_text(
-    s, Inches(0.6), Inches(6.86), Inches(2.78), Inches(0.34),
-    [("AI-GENERATED CONCEPT\nNOT USER-VALIDATED", 8, True, MIST)],
-    space_after=1,
-)
-add_text(
-    s, Inches(12.0), Inches(7.08), Inches(0.7), Inches(0.25),
-    [("2", 9, True, MIST)],
-    align=PP_ALIGN.RIGHT,
-)
+add_click_transition(s, effect="fade")
 add_notes(s, """
-[0:14-0:38]
-Imagine a person who cannot grip a joystick or use a keyboard, but can still
-move their forearm or residual limb. A small magnet on a cuff turns that
-movement into robot control, with no buttons, battery, or firm grip. This is a
-design direction that still needs testing with users.
-""")
+[0:08-0:20]
+Robot arms can give people more physical independence, but their controllers
+still assume capable hands. MagPilot asks: can one tiny passive magnet become
+the whole interface?
+""", cue="REMOTE: click to reveal magnet placement and benefits.")
 
 
-# 3. Two operating modes
-s = make_slide(SKY)
-kicker(s, "Two modes, one interface")
-add_text(
-    s, Inches(0.78), Inches(1.0), Inches(11.8), Inches(0.72),
-    [("Choose a task, or enter MagPilot Teleoperation.", 30, True, INK)],
+s = add_concept_base()
+kicker(
+    s, "One tiny neodymium magnet", dark=True,
+    left=Inches(0.58), top=Inches(0.48),
 )
 add_text(
-    s, Inches(0.8), Inches(1.63), Inches(11.7), Inches(0.26),
+    s, Inches(0.58), Inches(1.08), Inches(3.15), Inches(1.0),
+    [("Place it almost anywhere.", 28, True, WHITE)],
+)
+add_text(
+    s, Inches(0.6), Inches(2.18), Inches(3.05), Inches(0.82),
     [
-        ("ONE MAGNET  |  TWO CONTROL MODES  |  MAGNET-ONLY SWITCH",
-         13, True, BLUE)
+        ("BANDAGE  |  GLOVE", 12, True, BLUE),
+        ("CUFF  |  RESIDUAL LIMB", 12, True, BLUE),
     ],
-    align=PP_ALIGN.LEFT,
+    space_after=5,
 )
-mode_columns = [
-    (
-        Inches(0.48),
-        "01  CLASSIFIED COMMANDS",
-        "Write a symbol. Trigger a task.",
-        WRITING_UI,
-        "AIR-WRITE  >  CLASSIFY  >  EXECUTE",
-    ),
-    (
-        Inches(6.77),
-        "02  MAGPILOT TELEOPERATION",
-        "Pilot the robot continuously.",
-        UI,
-        "MOVE  >  TILT  >  GRIP  >  LIFT AWAY TO PAUSE",
-    ),
-]
-for left, label, title, image_path, flow in mode_columns:
-    box(s, left, Inches(1.98), Inches(6.08), Inches(4.82), WHITE, radius=True)
-    add_text(
-        s, left + Inches(0.24), Inches(2.14), Inches(5.6), Inches(0.3),
-        [(label, 11, True, BLUE)],
-    )
-    add_text(
-        s, left + Inches(0.24), Inches(2.49), Inches(5.6), Inches(0.4),
-        [(title, 20, True, INK)],
-    )
-    add_picture(
-        s, image_path, left + Inches(0.2), Inches(2.96),
-        Inches(5.68), Inches(3.28),
-    )
-    add_text(
-        s, left + Inches(0.24), Inches(6.38), Inches(5.6), Inches(0.28),
-        [(flow, 10, True, BLUE)],
-        align=PP_ALIGN.CENTER,
-    )
-footer(s, 3)
+add_text(
+    s, Inches(0.6), Inches(3.22), Inches(3.05), Inches(0.68),
+    [
+        ("LOCATION  >  MOTION", 13, True, WHITE),
+        ("TILT  >  GRIP", 13, True, WHITE),
+    ],
+    space_after=5,
+)
+box(s, Inches(0.6), Inches(4.2), Inches(3.05), Inches(0.08), BLUE)
+add_text(
+    s, Inches(0.6), Inches(4.52), Inches(3.15), Inches(0.82),
+    [
+        ("NO BATTERY  |  NO CABLES", 12, True, MIST),
+        ("NO BUTTONS  |  NO GRIP", 12, True, MIST),
+    ],
+    space_after=6,
+)
+add_text(
+    s, Inches(0.6), Inches(5.66), Inches(3.1), Inches(0.48),
+    [("PURE MAGNETIC MAGIC.", 16, True, BLUE)],
+)
+add_click_transition(s, effect="wipe", direction="u")
 add_notes(s, """
-[0:38-1:02]
-The magnet supports two modes. First, write a letter or digit; the classifier
-recognizes it and runs a mapped task. Second, enter MagPilot Teleoperation:
-movement controls position and height, tilt controls the gripper, and lifting
-away pauses the arm. The magnet itself switches between them. Here are both
-modes on the real robot.
-""")
+[0:20-0:38]
+A small neodymium magnet can sit almost anywhere: on a bandage, glove, cuff, or
+residual limb. We only need its location, plus tilt for gripping. No battery,
+no cables, no buttons, no grip. Pure magnetic magic.
+""", cue="REMOTE: click to highlight classified commands.")
+
+
+# 3. Two operating modes, with the emphasis moved by the remote
+def add_modes_frame(active_mode):
+    slide = make_slide(SKY)
+    kicker(slide, "One magnet. Two modes.")
+    add_text(
+        slide, Inches(0.78), Inches(1.0), Inches(11.8), Inches(0.58),
+        [("Choose a task or pilot continuously.", 29, True, INK)],
+    )
+    modes = [
+        (
+            "commands", Inches(0.48), "01  CLASSIFIED COMMANDS",
+            WRITING_UI, "WRITE  >  RECOGNIZE  >  RUN",
+        ),
+        (
+            "teleop", Inches(6.77), "02  MAGPILOT TELEOPERATION",
+            UI, "MOVE  >  TILT  >  GRIP  >  PAUSE",
+        ),
+    ]
+    for key, left, label, image_path, flow in modes:
+        is_active = key == active_mode
+        card = box(
+            slide, left, Inches(1.78), Inches(6.08), Inches(5.02),
+            WHITE, radius=True, line=BLUE if is_active else None,
+        )
+        if is_active:
+            card.line.width = Pt(2.5)
+            box(
+                slide, left + Inches(0.18), Inches(1.78),
+                Inches(5.72), Inches(0.08), BLUE,
+            )
+        add_text(
+            slide, left + Inches(0.24), Inches(2.08),
+            Inches(5.6), Inches(0.34),
+            [(label, 13, True, BLUE if is_active else SUBTLE)],
+        )
+        add_picture(
+            slide, image_path, left + Inches(0.2), Inches(2.58),
+            Inches(5.68), Inches(3.47),
+        )
+        if not is_active:
+            shade = box(
+                slide, left + Inches(0.2), Inches(2.58),
+                Inches(5.68), Inches(3.47), SKY,
+            )
+            set_opacity(shade, 0.72)
+        add_text(
+            slide, left + Inches(0.24), Inches(6.28),
+            Inches(5.6), Inches(0.3),
+            [(flow, 11, True, BLUE if is_active else SUBTLE)],
+            align=PP_ALIGN.CENTER,
+        )
+    footer(slide, 3)
+    return slide
+
+
+s = add_modes_frame("commands")
+add_click_transition(s, effect="fade")
+add_notes(s, """
+[0:38-0:50]
+First, command mode. Write a letter or digit; the classifier recognizes it and
+runs the action mapped to that symbol.
+""", cue="REMOTE: click to move the highlight to Teleoperation.")
+
+
+s = add_modes_frame("teleop")
+add_click_transition(s, effect="fade")
+add_notes(s, """
+[0:50-1:02]
+Second, MagPilot Teleoperation. Position and height follow the magnet, tilt
+controls the gripper, and lifting away pauses the arm. The magnet itself
+switches between both modes.
+""", cue="REMOTE: click once to start the first demonstration.")
 
 
 # 4. Auto-playing classified-command demo
@@ -410,7 +464,7 @@ add_text(
 add_notes(s, """
 [1:02-1:41]
 Do not speak. Let the 39-second classified-command demonstration play.
-""")
+""", cue="REMOTE: when the clip finishes, click once.")
 
 
 # 5. Auto-playing MagPilot demo
@@ -438,24 +492,27 @@ add_text(
 add_notes(s, """
 [1:41-2:09]
 Do not speak. Let the 28-second MagPilot Teleoperation demonstration play.
-""")
+""", cue="REMOTE: when the clip finishes, click once.")
 
 
-# 6-7. Reusable platform with a click-revealed customization screen
+# 6-7. Customer journey with a click-revealed customization screen
 def add_platform_base(s, slide_number):
-    kicker(s, "One reusable platform", left=Inches(0.68), top=Inches(0.55))
+    kicker(
+        s, "From download to deployment",
+        left=Inches(0.68), top=Inches(0.55),
+    )
     add_text(
         s, Inches(0.68), Inches(1.02), Inches(4.18), Inches(1.35),
         [
-            ("Same interface.", 30, False, INK),
-            ("Three ways to verify.", 30, True, INK),
+            ("Software first.", 30, False, INK),
+            ("Hardware when it fits.", 30, True, INK),
         ],
         space_after=3,
     )
     layers = [
-        ("1", "TRACKPAD", "Fast sensor simulation."),
-        ("2", "GAZEBO", "Safe robot verification."),
-        ("3", "REAL FR3", "The same GUI and ROS path."),
+        ("1", "TRY NOW", "Trackpad + Gazebo"),
+        ("2", "ADD SENSING", "Our board or tailored hardware"),
+        ("3", "DEPLOY", "FR3 | Panda | commercial robots"),
     ]
     for index, (number, title, detail) in enumerate(layers):
         top = Inches(2.55 + index * 1.1)
@@ -480,7 +537,7 @@ def add_platform_base(s, slide_number):
     )
     add_text(
         s, Inches(5.16), Inches(6.42), Inches(7.3), Inches(0.27),
-        [("TRACKPAD  >  GAZEBO  >  REAL SENSOR + FR3", 10, True, BLUE)],
+        [("ONE SOFTWARE STACK  >  ANY SUPPORTED ROBOT", 10, True, BLUE)],
         align=PP_ALIGN.CENTER,
     )
     footer(s, slide_number)
@@ -490,11 +547,11 @@ s = make_slide(SKY)
 add_platform_base(s, 6)
 add_notes(s, """
 [2:09-2:29]
-This is more than one successful demo. The same control center supports
-trackpad input for fast debugging, Gazebo for safe verification, and the real
-sensor with the FR3. Because every stage is modular, we can test changes before
-they ever reach the hardware.
-""")
+The software can ship today. Customers first try MagPilot with a trackpad and
+Gazebo, without hardware. If the workflow fits, they add our sensor board or a
+tailored setup. The same stack then moves to an FR3, Panda, or another
+commercial robot we integrate.
+""", cue="REMOTE: click to drop in the customizable action screen.")
 
 
 s = make_slide(SKY)
@@ -529,10 +586,10 @@ add_text(
 add_click_transition(s, effect="wipe", direction="d")
 add_notes(s, """
 [2:29-2:44]
-The control language is customizable too. Letters and digits can map to tested
-actions. For each user or company, the reliable controller stays, while the
+Then we tailor the control language. Letters and digits can map to tested
+actions. For each user or company, the reliable controller stays while the
 task vocabulary adapts to their workflow.
-""")
+""", cue="REMOTE: click to close the pitch.")
 
 
 # 8. Open-ended closing and acknowledgements
