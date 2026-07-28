@@ -14,7 +14,7 @@ needs to be co-designed and validated with users.
 | File | Purpose |
 |---|---|
 | `MagPilot_Keynote.pptx` | 10-frame, 16:9 deck with a concise speaker script and two auto-playing GIFs |
-| `build_keynote.py` | Rebuilds the presentation from the repository assets |
+| `build_keynote.py` | Generates the editable presentation base from repository assets |
 | `assets/assistive_concept.png` | AI-generated, clearly labeled concept visualization |
 | `assets/demo_classify_slide.gif` | 39-second classified-command proof |
 | `assets/demo_teleop_slide.gif` | 28-second MagPilot package-pick proof |
@@ -25,6 +25,9 @@ Rebuild the deck from the repository root:
 ```bash
 python3 presentation/build_keynote.py
 ```
+
+The checked-in PowerPoint is the final hand-tuned presentation. Rebuilding it
+regenerates the scripted base and does not preserve later manual layout tweaks.
 
 ## Running order
 
