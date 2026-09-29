@@ -88,9 +88,12 @@ def test_skip_and_quit_prompts():
 
 def test_dry_run_creates_manifest_only():
     with tempfile.TemporaryDirectory() as tmpdir:
-        assert rte.main(['--dry-run', '--output-dir', tmpdir, '--run-id', 'dry']) == 0
+        assert rte.main(['--dry-run', '--output-dir', tmpdir, '--run-id', 'dry',
+                         '--magnet', '12x12mm_stack', '--spacer-mm', '10']) == 0
         with open(os.path.join(tmpdir, 'manifest.json'), encoding='utf-8') as f:
             manifest = json.load(f)
         assert manifest['target_count'] == 75
         assert manifest['sessions'] == []
+        assert manifest['settings']['magnet'] == '12x12mm_stack'
+        assert manifest['settings']['spacer_mm'] == 10.0
         assert os.listdir(os.path.join(tmpdir, 'samples')) == []

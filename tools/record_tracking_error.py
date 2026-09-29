@@ -641,9 +641,14 @@ def build_parser():
                         help='Comma-separated magnet heights above the sensors')
     parser.add_argument('--orientations', type=parse_orientations,
                         default=DEFAULT_ORIENTATIONS,
-                        help='Comma-separated tilt:azimuth pairs in degrees, e.g. 0:0,20:0,20:90')
+                        help='Comma-separated tilt:azimuth pairs in degrees, e.g. 0:0,20:0,20:90; '
+                             'use 90:0,90:90 for the stylus lying sideways')
     parser.add_argument('--targets-csv', default=None,
                         help='Custom targets (x_mm,y_mm,z_mm[,tilt_deg,azimuth_deg]); overrides the grid')
+    parser.add_argument('--magnet', default='unspecified',
+                        help="Magnet in the stylus, e.g. '12x12mm_stack' or 'D6x10mm'; logged in the manifest")
+    parser.add_argument('--spacer-mm', type=float, default=None,
+                        help='Cover spacer height in use (e.g. 7, 10, 15, 20); logged in the manifest')
     parser.add_argument('--settle-s', type=float, default=0.5,
                         help='Seconds discarded after Enter before capture')
     parser.add_argument('--capture-s', type=float, default=1.0,
@@ -675,6 +680,8 @@ def main(argv=None):
         'heights_mm': sorted({t['z_mm'] for t in targets}),
         'orientations_deg': sorted({(t['tilt_deg'], t['azimuth_deg']) for t in targets}),
         'targets_csv': args.targets_csv,
+        'magnet': args.magnet,
+        'spacer_mm': args.spacer_mm,
         'settle_s': args.settle_s,
         'capture_s': args.capture_s,
         'sensor_bias_m': MAGNET_HEIGHT_SENSOR_BIAS_M,
