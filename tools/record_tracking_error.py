@@ -69,10 +69,10 @@ TRACKING_TASK = 'magnet_tracking_error'
 DEFAULT_GRID_SPACING_MM = SENSOR_PITCH_MM / 2.0
 DEFAULT_GRID_EXTENT_MM = SENSOR_PITCH_MM * (SENSOR_GRID - 1) / 2.0
 # Heights are the gap between the sensor plane and the surface the stylus rests
-# on; 5 mm is the foam board that currently sits on the sensors. The magnet's
-# centre sits --magnet-offset-mm above that surface, which is what the board
-# estimates.
-DEFAULT_HEIGHTS_MM = (5.0, 15.0, 30.0)
+# on (the 5 mm foam board is the current minimum). The planned test heights run
+# from near-contact to beyond the tracking range. The magnet's centre sits
+# --magnet-offset-mm above that surface, which is what the board estimates.
+DEFAULT_HEIGHTS_MM = (10.0, 50.0, 100.0, 150.0, 200.0)
 DEFAULT_ORIENTATIONS = ((0.0, 0.0),)
 
 GT_COLUMNS = [
@@ -188,7 +188,7 @@ def target_label(target):
     """Folder/file label for one target, e.g. x-20_y+00_z15_t00_a000."""
     return (
         f"x{target['x_mm']:+04.0f}_y{target['y_mm']:+04.0f}"
-        f"_z{target['z_mm']:02.0f}_t{target['tilt_deg']:02.0f}"
+        f"_z{target['z_mm']:03.0f}_t{target['tilt_deg']:02.0f}"
         f"_a{target['azimuth_deg'] % 360:03.0f}"
     ).replace('+', 'p').replace('-', 'm')
 
@@ -657,7 +657,7 @@ def build_parser():
     parser.add_argument('--heights-mm', type=parse_float_list,
                         default=DEFAULT_HEIGHTS_MM,
                         help='Comma-separated surface heights above the sensors '
-                             '(default 5,15,30; 5 mm = foam board)')
+                             '(default 10,50,100,150,200; 5 mm foam board is the minimum)')
     parser.add_argument('--magnet-offset-mm', type=float, default=0.0,
                         help='Magnet centre above the surface the stylus rests on '
                              '(tip mode: tip to magnet centre; side mode: magnet radius)')

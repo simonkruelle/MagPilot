@@ -101,10 +101,10 @@ def test_dry_run_creates_manifest_only():
                          '--magnet-offset-mm', '6']) == 0
         with open(os.path.join(tmpdir, 'manifest.json'), encoding='utf-8') as f:
             manifest = json.load(f)
-        # 7x7 half-pitch grid over the outer sensors, times 3 heights.
-        assert manifest['target_count'] == 147
+        # 7x7 half-pitch grid over the outer sensors, times 5 heights.
+        assert manifest['target_count'] == 245
         assert manifest['settings']['sensor_pitch_mm'] == 37.5
-        assert manifest['settings']['heights_mm'] == [5.0, 15.0, 30.0]
+        assert manifest['settings']['heights_mm'] == [10.0, 50.0, 100.0, 150.0, 200.0]
         assert manifest['sessions'] == []
         assert manifest['settings']['magnet'] == '12x12mm_stack'
         assert manifest['settings']['spacer_mm'] == 10.0
