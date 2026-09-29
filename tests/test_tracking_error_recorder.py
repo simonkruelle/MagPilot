@@ -25,6 +25,14 @@ def test_grid_is_symmetric_and_serpentine():
     assert len({t['label'] for t in targets}) == 25
 
 
+def test_default_grid_hits_sensors_and_midpoints():
+    axis = rte.grid_axis(rte.DEFAULT_GRID_EXTENT_MM, rte.DEFAULT_GRID_SPACING_MM)
+    assert axis == [-56.25, -37.5, -18.75, 0.0, 18.75, 37.5, 56.25]
+    targets = rte.build_targets(rte.DEFAULT_GRID_SPACING_MM, rte.DEFAULT_GRID_EXTENT_MM,
+                                (15.0,), ((0.0, 0.0),))
+    assert len({t['label'] for t in targets}) == 49
+
+
 def test_direction_matches_reader_angle_convention():
     for tilt, azimuth in ((0, 0), (20, 0), (30, 90), (45, -135)):
         got_tilt, got_azimuth = magnet_angles_degrees(*rte.direction_from_angles(tilt, azimuth))
@@ -92,7 +100,9 @@ def test_dry_run_creates_manifest_only():
                          '--magnet', '12x12mm_stack', '--spacer-mm', '10']) == 0
         with open(os.path.join(tmpdir, 'manifest.json'), encoding='utf-8') as f:
             manifest = json.load(f)
-        assert manifest['target_count'] == 75
+        # 7x7 half-pitch grid over the outer sensors, times 3 heights.
+        assert manifest['target_count'] == 147
+        assert manifest['settings']['sensor_pitch_mm'] == 37.5
         assert manifest['sessions'] == []
         assert manifest['settings']['magnet'] == '12x12mm_stack'
         assert manifest['settings']['spacer_mm'] == 10.0

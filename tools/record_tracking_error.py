@@ -54,13 +54,20 @@ PACKET_SIZE = 218
 PACKET_HEADER = 0xAA
 PACKET_TAIL = 0xBB
 PACKET_STRUCT = struct.Struct('<54f')
-POSE_LIMIT = 0.05
+
+# Sensor board: 4x4 magnetometers on a 150 x 150 mm board, assumed evenly
+# spaced with half a pitch of margin (37.5 mm pitch, sensors at +/-18.75 and
+# +/-56.25 mm). The default grid uses half the pitch so it alternates between
+# points above sensors and points between them, out to the outer sensors.
+BOARD_SIZE_MM = 150.0
+SENSOR_GRID = 4
+SENSOR_PITCH_MM = BOARD_SIZE_MM / SENSOR_GRID
 
 TRACKING_MANIFEST_SCHEMA_VERSION = 1
 TRACKING_TASK = 'magnet_tracking_error'
 
-DEFAULT_GRID_SPACING_MM = 20.0
-DEFAULT_GRID_EXTENT_MM = 40.0
+DEFAULT_GRID_SPACING_MM = SENSOR_PITCH_MM / 2.0
+DEFAULT_GRID_EXTENT_MM = SENSOR_PITCH_MM * (SENSOR_GRID - 1) / 2.0
 DEFAULT_HEIGHTS_MM = (15.0, 30.0, 50.0)
 DEFAULT_ORIENTATIONS = ((0.0, 0.0),)
 
@@ -518,7 +525,7 @@ class TrackingErrorRecorder:
     @staticmethod
     def describe(target):
         return (
-            f"x={target['x_mm']:+.0f} mm  y={target['y_mm']:+.0f} mm  "
+            f"x={target['x_mm']:+.2f} mm  y={target['y_mm']:+.2f} mm  "
             f"z={target['z_mm']:.0f} mm  tilt={target['tilt_deg']:.0f} deg  "
             f"azimuth={target['azimuth_deg']:.0f} deg"
         )
@@ -633,9 +640,11 @@ def build_parser():
     parser.add_argument('--output-dir', default=None,
                         help='Defaults to data/tracking_YYYY-MM-DD/')
     parser.add_argument('--run-id', default=None, help='Defaults to run_YYYYmmdd_HHMMSS')
-    parser.add_argument('--grid-spacing-mm', type=float, default=DEFAULT_GRID_SPACING_MM)
+    parser.add_argument('--grid-spacing-mm', type=float, default=DEFAULT_GRID_SPACING_MM,
+                        help='Default: half the sensor pitch (18.75 mm)')
     parser.add_argument('--grid-extent-mm', type=float, default=DEFAULT_GRID_EXTENT_MM,
-                        help='Grid runs from -extent to +extent on x and y')
+                        help='Grid runs from -extent to +extent on x and y; '
+                             'default: the outer sensor row (56.25 mm)')
     parser.add_argument('--heights-mm', type=parse_float_list,
                         default=DEFAULT_HEIGHTS_MM,
                         help='Comma-separated magnet heights above the sensors')
@@ -670,9 +679,9 @@ def main(argv=None):
         targets = build_targets(
             args.grid_spacing_mm, args.grid_extent_mm, args.heights_mm, args.orientations,
         )
-    if max(abs(t['x_mm']) for t in targets) > POSE_LIMIT * 1000 or \
-            max(abs(t['y_mm']) for t in targets) > POSE_LIMIT * 1000:
-        print(f"Warning: some targets lie outside the +/-{POSE_LIMIT * 1000:.0f} mm tracked area")
+    half_board = BOARD_SIZE_MM / 2.0
+    if any(max(abs(t['x_mm']), abs(t['y_mm'])) > half_board for t in targets):
+        print(f"Warning: some targets lie outside the +/-{half_board:.0f} mm board")
 
     settings = {
         'grid_spacing_mm': None if args.targets_csv else args.grid_spacing_mm,
@@ -680,6 +689,9 @@ def main(argv=None):
         'heights_mm': sorted({t['z_mm'] for t in targets}),
         'orientations_deg': sorted({(t['tilt_deg'], t['azimuth_deg']) for t in targets}),
         'targets_csv': args.targets_csv,
+        'board_size_mm': BOARD_SIZE_MM,
+        'sensor_grid': [SENSOR_GRID, SENSOR_GRID],
+        'sensor_pitch_mm': SENSOR_PITCH_MM,
         'magnet': args.magnet,
         'spacer_mm': args.spacer_mm,
         'settle_s': args.settle_s,
