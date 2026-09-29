@@ -136,11 +136,87 @@ def test_control_labels_are_separate():
         assert labels == ['control_blank', 'control_still']
 
 
+def test_participant_and_session_ids():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        reader = MagnetometerReader(
+            enable_classifier=False,
+            record_data=True,
+            output_dir=tmpdir,
+            run_id='pilot',
+            participant_id='P 01',
+            session_id='S01',
+            writing_min_velocity=0.0,
+        )
+        reader.prepare_recording_layout(raw_csv_path=None, raw_csv_enabled=False)
+        manifest = load_manifest(tmpdir)
+        assert manifest['participant_id'] == 'P_01'
+        assert manifest['session_id'] == 'S01'
+
+        for _ in range(2):
+            reader.current_session = 'digit_3'
+            reader.current_session_started_at = make_rows()[0][0]
+            reader.session_data = make_rows()
+            reader.stop_session()
+
+        label_dir = os.path.join(tmpdir, 'samples', 'digit_3')
+        assert glob.glob(os.path.join(label_dir, 'pilot_P_01_S01_digit_3_rep001_*.csv'))
+        assert glob.glob(os.path.join(label_dir, 'pilot_P_01_S01_digit_3_rep002_*.png'))
+        sidecars = glob.glob(os.path.join(label_dir, 'pilot_P_01_S01_digit_3_rep001_*.json'))
+        with open(sidecars[0], 'r', encoding='utf-8') as f:
+            sidecar = json.load(f)
+        assert sidecar['participant_id'] == 'P_01'
+        assert sidecar['session_id'] == 'S01'
+
+        manifest = load_manifest(tmpdir)
+        assert [e['participant_id'] for e in manifest['sessions']] == ['P_01', 'P_01']
+        assert [e['session_id'] for e in manifest['sessions']] == ['S01', 'S01']
+
+        # A second participant in the same output dir starts its own repetition count.
+        other = MagnetometerReader(
+            enable_classifier=False,
+            record_data=True,
+            output_dir=tmpdir,
+            run_id='pilot',
+            participant_id='P02',
+            session_id='S01',
+            writing_min_velocity=0.0,
+        )
+        other.current_session = 'digit_3'
+        other.current_session_started_at = make_rows()[0][0]
+        other.session_data = make_rows()
+        other.stop_session()
+        assert glob.glob(os.path.join(label_dir, 'pilot_P02_S01_digit_3_rep001_*.csv'))
+
+
+def test_without_ids_keeps_legacy_names():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        reader = MagnetometerReader(
+            enable_classifier=False,
+            record_data=True,
+            output_dir=tmpdir,
+            run_id='legacy',
+            writing_min_velocity=0.0,
+        )
+        assert reader.file_prefix() == 'legacy'
+        reader.prepare_recording_layout(raw_csv_path=None, raw_csv_enabled=False)
+        reader.current_session = 'letter_B'
+        reader.current_session_started_at = make_rows()[0][0]
+        reader.session_data = make_rows()
+        reader.stop_session()
+        label_dir = os.path.join(tmpdir, 'samples', 'letter_B')
+        assert glob.glob(os.path.join(label_dir, 'legacy_letter_B_rep001_*.csv'))
+        entry = load_manifest(tmpdir)['sessions'][0]
+        assert entry['participant_id'] is None
+        assert entry['session_id'] is None
+
+
 def main():
     test_live_mode_does_not_create_layout()
     test_dry_run_layout()
     test_recording_artifacts_and_manifest()
     test_control_labels_are_separate()
+    test_participant_and_session_ids()
+    test_without_ids_keeps_legacy_names()
     print("Structured data recording smoke test passed")
 
 
