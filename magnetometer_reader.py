@@ -319,6 +319,8 @@ class MagnetometerReader:
         validation_mode=False,
         output_dir=None,
         run_id=None,
+        participant_id=None,
+        session_id=None,
         # ROS bridge
         ros=False,
         # UI
@@ -392,6 +394,10 @@ class MagnetometerReader:
         self.validation_mode = validation_mode
         self.output_dir = output_dir
         self.run_id = self.sanitize_path_component(run_id) if run_id else run_id
+        self.participant_id = (
+            self.sanitize_path_component(participant_id) if participant_id else None
+        )
+        self.session_id = self.sanitize_path_component(session_id) if session_id else None
         self.command_line = list(sys.argv)
         self.raw_csv_path = None
         self.raw_csv_enabled = False
@@ -607,6 +613,19 @@ class MagnetometerReader:
         safe = safe.strip('._-')
         return safe or 'unnamed'
 
+    def file_prefix(self):
+        """Return the shared filename prefix: run_id plus optional participant/session IDs.
+
+        Without participant/session IDs this is just run_id, so older recordings
+        and scripts that parse ``<run_id>_<label>_repNNN_...`` keep working.
+        """
+        parts = [self.run_id]
+        if self.participant_id:
+            parts.append(self.participant_id)
+        if self.session_id:
+            parts.append(self.session_id)
+        return '_'.join(parts)
+
     def session_label(self, session_name):
         """Return the exact label folder name for a recording session."""
         return self.sanitize_path_component(session_name)
@@ -742,6 +761,8 @@ class MagnetometerReader:
             'schema_version': DATA_MANIFEST_SCHEMA_VERSION,
             'updated_at': datetime.now().isoformat(),
             'run_id': self.run_id,
+            'participant_id': self.participant_id,
+            'session_id': self.session_id,
             'output_dir': os.path.abspath(self.output_dir) if self.output_dir else None,
             'command_line': self.command_line,
             'input_source': self.input_source,
@@ -764,18 +785,23 @@ class MagnetometerReader:
         os.replace(temp_path, self.manifest_path)
 
     def next_session_repetition(self, label):
-        """Return the next repetition number for run_id + exact label."""
+        """Return the next repetition number for run_id + participant/session + exact label."""
         next_rep = 1
         manifest = self.load_manifest()
         for session in manifest.get('sessions', []):
-            if session.get('run_id') == self.run_id and session.get('label') == label:
+            if (
+                session.get('run_id') == self.run_id
+                and session.get('participant_id') == self.participant_id
+                and session.get('session_id') == self.session_id
+                and session.get('label') == label
+            ):
                 try:
                     next_rep = max(next_rep, int(session.get('repetition', 0)) + 1)
                 except (TypeError, ValueError):
                     next_rep = max(next_rep, 2)
 
         label_dir = os.path.join(self.output_dir, 'samples', label)
-        basename_prefix = f"{self.run_id}_{label}_rep"
+        basename_prefix = f"{self.file_prefix()}_{label}_rep"
         if os.path.isdir(label_dir):
             for filename in os.listdir(label_dir):
                 match = re.match(
@@ -842,7 +868,7 @@ class MagnetometerReader:
 
         repetition = self.next_session_repetition(label)
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        basename = f"{self.run_id}_{label}_rep{repetition:03d}_{timestamp}"
+        basename = f"{self.file_prefix()}_{label}_rep{repetition:03d}_{timestamp}"
         return {
             'label': label,
             'label_dir': label_dir,
@@ -1653,6 +1679,8 @@ class MagnetometerReader:
             'session_name': session_name,
             'label': paths['label'],
             'run_id': self.run_id,
+            'participant_id': self.participant_id,
+            'session_id': self.session_id,
             'repetition': paths['repetition'],
             'basename': paths['basename'],
             'started_at': start_time,
@@ -2069,6 +2097,8 @@ class MagnetometerReader:
             'session_name': session_name,
             'label': paths['label'],
             'run_id': self.run_id,
+            'participant_id': self.participant_id,
+            'session_id': self.session_id,
             'repetition': paths['repetition'],
             'basename': paths['basename'],
             'created_at': datetime.now().isoformat(),
@@ -4392,7 +4422,7 @@ def main():
                             'If omitted, prompt from detected ports.')
     parser.add_argument('--csv', '-c', type=str, default='magnetometer_data.csv',
                        help='Explicit continuous raw CSV output filename. '
-                            'Default is off in live mode, or output_dir/raw/<run_id>_raw.csv with --record-data')
+                            'Default is off in live mode, or output_dir/raw/<run_id>[_<participant>][_<session>]_raw.csv with --record-data')
     parser.add_argument('--no-csv', action='store_true',
                        help='Disable CSV logging for maximum live read rate')
     parser.add_argument('--input-source', choices=['serial', 'touchpad', 'trackpad'], default='serial',
@@ -4494,6 +4524,10 @@ def main():
                        help='Base output directory for recorded session data; defaults to data/lab_YYYY-MM-DD/')
     parser.add_argument('--run-id', type=str, default=None,
                        help='Optional run label prefix for the shared basename (e.g. run_001)')
+    parser.add_argument('--participant-id', type=str, default=None,
+                       help='Participant ID stored in filenames and the manifest (e.g. P01)')
+    parser.add_argument('--session-id', type=str, default=None,
+                       help='Recording session ID stored in filenames and the manifest (e.g. S01)')
 
     argcomplete.autocomplete(parser)
     args = parser.parse_args()
@@ -4553,6 +4587,13 @@ def main():
         args.run_id = datetime.now().strftime('run_%Y%m%d_%H%M%S')
     if args.run_id:
         args.run_id = MagnetometerReader.sanitize_path_component(args.run_id)
+    if args.participant_id:
+        args.participant_id = MagnetometerReader.sanitize_path_component(args.participant_id)
+    if args.session_id:
+        args.session_id = MagnetometerReader.sanitize_path_component(args.session_id)
+    file_prefix = '_'.join(
+        part for part in (args.run_id, args.participant_id, args.session_id) if part
+    )
 
     writing_min_velocity_was_explicit = any(
         arg == '--writing-min-velocity' or arg.startswith('--writing-min-velocity=')
@@ -4601,6 +4642,12 @@ def main():
         print("MODE: VALIDATION — sensor connected, packet health check, NO files saved")
     elif args.record_data:
         print(f"MODE: RECORD — explicit recording, output dir: {args.output_dir}")
+        print(
+            f"Participant: {args.participant_id or 'not set'}, "
+            f"Session: {args.session_id or 'not set'}"
+        )
+        if not args.participant_id:
+            print("  (use --participant-id / --session-id to tag recordings for the dataset)")
     else:
         print("MODE: LIVE VIEW — no data saved, use --record-data to enable recording")
     print(f"Input Source: {args.input_source}")
@@ -4619,7 +4666,7 @@ def main():
         if csv_was_explicit:
             csv_filename = args.csv
         elif args.record_data:
-            csv_filename = os.path.join(args.output_dir, 'raw', f"{args.run_id}_raw.csv")
+            csv_filename = os.path.join(args.output_dir, 'raw', f"{file_prefix}_raw.csv")
     print(f"CSV Output: {'disabled' if csv_filename is None else csv_filename}")
     print(f"Verbose Packet Output: {args.verbose}")
     if args.input_source == 'touchpad':
@@ -4723,6 +4770,8 @@ def main():
         validation_mode=args.validation_mode,
         output_dir=args.output_dir,
         run_id=args.run_id,
+        participant_id=args.participant_id,
+        session_id=args.session_id,
         ros=args.ros,
         clean_view=args.clean,
     )
