@@ -97,13 +97,23 @@ def test_skip_and_quit_prompts():
 def test_dry_run_creates_manifest_only():
     with tempfile.TemporaryDirectory() as tmpdir:
         assert rte.main(['--dry-run', '--output-dir', tmpdir, '--run-id', 'dry',
-                         '--magnet', '12x12mm_stack', '--spacer-mm', '10']) == 0
+                         '--magnet', '12x12mm_stack', '--spacer-mm', '10',
+                         '--magnet-offset-mm', '6']) == 0
         with open(os.path.join(tmpdir, 'manifest.json'), encoding='utf-8') as f:
             manifest = json.load(f)
         # 7x7 half-pitch grid over the outer sensors, times 3 heights.
         assert manifest['target_count'] == 147
         assert manifest['settings']['sensor_pitch_mm'] == 37.5
+        assert manifest['settings']['heights_mm'] == [5.0, 15.0, 30.0]
         assert manifest['sessions'] == []
         assert manifest['settings']['magnet'] == '12x12mm_stack'
         assert manifest['settings']['spacer_mm'] == 10.0
+        assert manifest['settings']['magnet_offset_mm'] == 6.0
         assert os.listdir(os.path.join(tmpdir, 'samples')) == []
+
+
+def test_magnet_offset_shifts_ground_truth_height():
+    target = {'index': 0, 'label': 't', 'x_mm': 0.0, 'y_mm': 0.0, 'z_mm': 5.0,
+              'tilt_deg': 0.0, 'azimuth_deg': 0.0, 'magnet_offset_mm': 6.0}
+    summary = rte.summarize_capture(target, [], 0.01, 0.007)
+    assert math.isclose(summary['gt_z'], 0.011)

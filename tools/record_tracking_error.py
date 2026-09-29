@@ -68,7 +68,11 @@ TRACKING_TASK = 'magnet_tracking_error'
 
 DEFAULT_GRID_SPACING_MM = SENSOR_PITCH_MM / 2.0
 DEFAULT_GRID_EXTENT_MM = SENSOR_PITCH_MM * (SENSOR_GRID - 1) / 2.0
-DEFAULT_HEIGHTS_MM = (15.0, 30.0, 50.0)
+# Heights are the gap between the sensor plane and the surface the stylus rests
+# on; 5 mm is the foam board that currently sits on the sensors. The magnet's
+# centre sits --magnet-offset-mm above that surface, which is what the board
+# estimates.
+DEFAULT_HEIGHTS_MM = (5.0, 15.0, 30.0)
 DEFAULT_ORIENTATIONS = ((0.0, 0.0),)
 
 GT_COLUMNS = [
@@ -175,6 +179,11 @@ def grid_axis(extent_mm, spacing_mm):
     return [i * spacing_mm for i in range(-steps, steps + 1)]
 
 
+def magnet_z_m(target):
+    """Ground-truth magnet-centre height in metres (surface gap + offset)."""
+    return (target['z_mm'] + target.get('magnet_offset_mm', 0.0)) / 1000.0
+
+
 def target_label(target):
     """Folder/file label for one target, e.g. x-20_y+00_z15_t00_a000."""
     return (
@@ -224,7 +233,7 @@ def load_targets_csv(path):
 
 def summarize_capture(target, rows, sensor_bias_m, height_min_m):
     """Mean pose estimate and error metrics for one captured target."""
-    gt = (target['x_mm'] / 1000.0, target['y_mm'] / 1000.0, target['z_mm'] / 1000.0)
+    gt = (target['x_mm'] / 1000.0, target['y_mm'] / 1000.0, magnet_z_m(target))
     gt_dir = direction_from_angles(target['tilt_deg'], target['azimuth_deg'])
     summary = {
         'target_index': target['index'],
@@ -346,7 +355,7 @@ class SimulatedSource:
                 target['x_mm'] / 1000.0 + noise(self.pos_noise_m),
                 target['y_mm'] / 1000.0 + noise(self.pos_noise_m),
                 # Board reports biased raw Z; undo the recorder's calibration.
-                target['z_mm'] / 1000.0 + self.sensor_bias_m + noise(self.pos_noise_m),
+                magnet_z_m(target) + self.sensor_bias_m + noise(self.pos_noise_m),
                 *[c + noise(self.dir_noise) for c in gt_dir],
             ]
             yield [datetime.now().isoformat(), *([0.0] * 48), *pose]
@@ -466,7 +475,7 @@ class TrackingErrorRecorder:
         height_min = self.settings['height_min_m']
         gt_values = [
             target['index'], target['x_mm'] / 1000.0, target['y_mm'] / 1000.0,
-            target['z_mm'] / 1000.0, target['tilt_deg'], target['azimuth_deg'],
+            magnet_z_m(target), target['tilt_deg'], target['azimuth_deg'],
         ]
         with open(csv_path, 'w', newline='') as f:
             writer = csv.writer(f)
@@ -647,7 +656,11 @@ def build_parser():
                              'default: the outer sensor row (56.25 mm)')
     parser.add_argument('--heights-mm', type=parse_float_list,
                         default=DEFAULT_HEIGHTS_MM,
-                        help='Comma-separated magnet heights above the sensors')
+                        help='Comma-separated surface heights above the sensors '
+                             '(default 5,15,30; 5 mm = foam board)')
+    parser.add_argument('--magnet-offset-mm', type=float, default=0.0,
+                        help='Magnet centre above the surface the stylus rests on '
+                             '(tip mode: tip to magnet centre; side mode: magnet radius)')
     parser.add_argument('--orientations', type=parse_orientations,
                         default=DEFAULT_ORIENTATIONS,
                         help='Comma-separated tilt:azimuth pairs in degrees, e.g. 0:0,20:0,20:90; '
@@ -679,6 +692,8 @@ def main(argv=None):
         targets = build_targets(
             args.grid_spacing_mm, args.grid_extent_mm, args.heights_mm, args.orientations,
         )
+    for target in targets:
+        target['magnet_offset_mm'] = args.magnet_offset_mm
     half_board = BOARD_SIZE_MM / 2.0
     if any(max(abs(t['x_mm']), abs(t['y_mm'])) > half_board for t in targets):
         print(f"Warning: some targets lie outside the +/-{half_board:.0f} mm board")
@@ -686,6 +701,7 @@ def main(argv=None):
     settings = {
         'grid_spacing_mm': None if args.targets_csv else args.grid_spacing_mm,
         'grid_extent_mm': None if args.targets_csv else args.grid_extent_mm,
+        'magnet_offset_mm': args.magnet_offset_mm,
         'heights_mm': sorted({t['z_mm'] for t in targets}),
         'orientations_deg': sorted({(t['tilt_deg'], t['azimuth_deg']) for t in targets}),
         'targets_csv': args.targets_csv,
@@ -698,7 +714,8 @@ def main(argv=None):
         'capture_s': args.capture_s,
         'sensor_bias_m': MAGNET_HEIGHT_SENSOR_BIAS_M,
         'height_min_m': MAGNET_HEIGHT_MIN_M,
-        'frame': 'board centre origin, metres; z = calibrated height above sensors',
+        'frame': ('board centre origin, metres; GT_z = surface height + magnet offset, '
+                  'compared with the calibrated height estimate'),
     }
 
     input_source = 'simulated' if args.simulate else 'serial'
