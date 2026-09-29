@@ -330,6 +330,7 @@ class DataCollectionCommandTests(unittest.TestCase):
         self.assertIn('--record-data', command)
         self.assertIn('--output-dir data_collection/characters/P03/S01', command)
         self.assertIn('--participant-id P03 --session-id S01 --height-mm 0', command)
+        self.assertIn('--target-reps 10', command)
         self.assertIn('--writing-max-z 0.05', command)
         self.assertNotIn('--ros', command)
         self.assertNotIn('--classifier-labels', command)
@@ -375,6 +376,9 @@ class DataCollectionCommandTests(unittest.TestCase):
         self.assertIn("'cd /colmag && echo hi'", argv[4])
         self.assertIn('Press Enter to close', argv[4])
         self.assertEqual(build_terminal_argv('xterm', 'x')[:2], ['xterm', '-e'])
+
+    def test_stop_all_also_ends_the_tracking_error_recorder(self):
+        self.assertIn("'[r]ecord_tracking_error.py'", build_stop_all_command())
 
 
 if __name__ == '__main__':

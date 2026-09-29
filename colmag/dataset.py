@@ -51,10 +51,15 @@ def load_participants(data_dir):
             payload = json.load(f)
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError('{} cannot be read: {}'.format(path, exc))
-    if payload.get('schema_version') != SCHEMA_VERSION:
-        raise ValueError('{} has an unknown schema_version {!r}'.format(
-            path, payload.get('schema_version')))
-    return list(payload.get('participants', []))
+    if not isinstance(payload, dict) or payload.get('schema_version') != SCHEMA_VERSION:
+        raise ValueError('{} is not a version {} participants file'.format(
+            path, SCHEMA_VERSION))
+    participants = payload.get('participants')
+    if not isinstance(participants, list) or not all(
+            isinstance(p, dict) and PARTICIPANT_ID.match(str(p.get('participant_id')))
+            for p in participants):
+        raise ValueError('{} has a participant without a valid ID'.format(path))
+    return participants
 
 
 def save_participants(data_dir, participants):
@@ -180,8 +185,12 @@ def scan_samples(data_dir):
             seen_basenames.add(basename)
             height_mm = take.get('height_mm')
             if height_mm is None:
-                skip('no height (counted as 0 mm)')
+                skip('without height, shown at 0 mm')
                 height_mm = 0
+            elif not isinstance(height_mm, (int, float)) or height_mm not in HEIGHTS_MM:
+                skip('at a height outside {} mm'.format(
+                    '/'.join(str(h) for h in HEIGHTS_MM)))
+                continue
             samples.append({
                 'participant_id': take.get('participant_id') or 'unassigned',
                 'session_id': take.get('session_id'),
@@ -200,6 +209,15 @@ def count_coverage(samples, chars, height_mm):
         counts = coverage.setdefault(sample['participant_id'], {})
         counts[sample['char']] = counts.get(sample['char'], 0) + 1
     return coverage
+
+
+def progress(samples, participant_ids, height_mm):
+    """Takes that count toward the target: at most TARGET_REPS per character."""
+    coverage = count_coverage(samples, DIGITS + LETTERS, height_mm)
+    return sum(min(n, TARGET_REPS)
+               for participant_id, counts in coverage.items()
+               if participant_id in participant_ids
+               for n in counts.values())
 
 
 # ── Tracking error runs ─────────────────────────────────────────────────────
@@ -223,11 +241,15 @@ def list_tracking_runs(data_dir):
         except (OSError, json.JSONDecodeError):
             continue
         settings = manifest.get('settings') or {}
+        # A redone target is saved twice, so count distinct targets.
+        captured = {s.get('target_index') for s in manifest.get('sessions', [])
+                    if s.get('sample_count')}
         runs.append({
             'run_id': manifest.get('run_id') or name,
             'magnet': settings.get('magnet'),
+            'magnet_offset_mm': settings.get('magnet_offset_mm'),
             'heights_mm': settings.get('heights_mm') or [],
             'targets': manifest.get('target_count') or 0,
-            'captured': len(manifest.get('sessions', [])),
+            'captured': len(captured),
         })
     return runs

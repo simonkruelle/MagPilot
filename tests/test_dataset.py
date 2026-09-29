@@ -56,10 +56,13 @@ class ParticipantTests(unittest.TestCase):
 
     def test_damaged_file_raises_instead_of_resetting(self):
         with tempfile.TemporaryDirectory() as data_dir:
-            with open(os.path.join(data_dir, dataset.PARTICIPANTS_FILE), 'w') as f:
-                f.write('{not json')
-            with self.assertRaises(ValueError):
-                dataset.load_participants(data_dir)
+            path = os.path.join(data_dir, dataset.PARTICIPANTS_FILE)
+            for content in ('{not json', '[]', '{"schema_version": 1, "participants": {}}',
+                            '{"schema_version": 1, "participants": [{"participant_id": "Simon"}]}'):
+                with open(path, 'w') as f:
+                    f.write(content)
+                with self.assertRaises(ValueError):
+                    dataset.load_participants(data_dir)
 
     def test_next_id_never_reuses_an_id_seen_in_recordings(self):
         people = [dataset.new_participant('P01')]
@@ -128,26 +131,52 @@ class CoverageTests(unittest.TestCase):
             samples, problems = dataset.scan_samples(data_dir)
             self.assertEqual(samples[0]['participant_id'], 'unassigned')
             self.assertEqual(samples[0]['height_mm'], 0)
-            self.assertEqual(problems, {'no height (counted as 0 mm)': 1})
+            self.assertEqual(problems, {'without height, shown at 0 mm': 1})
+
+    def test_float_heights_from_the_recorder_match_the_height_tabs(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            write_take(data_dir, height_mm=50.0, basename='a')
+            write_take(data_dir, height_mm=37.5, basename='b')
+            samples, problems = dataset.scan_samples(data_dir)
+            self.assertEqual(
+                dataset.count_coverage(samples, dataset.DIGITS, 50), {'P01': {'3': 1}})
+            self.assertEqual(list(problems.values()), [1])
+            self.assertIn('outside', list(problems)[0])
+
+    def test_progress_caps_each_character_at_the_target(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            for i in range(dataset.TARGET_REPS + 5):
+                write_take(data_dir, basename='x{}'.format(i))
+            write_take(data_dir, participant_id='P09', basename='other')
+            samples, _ = dataset.scan_samples(data_dir)
+            self.assertEqual(dataset.progress(samples, {'P01'}, 0), dataset.TARGET_REPS)
+            self.assertEqual(dataset.progress(samples, {'P01'}, 50), 0)
 
 
 class TrackingRunTests(unittest.TestCase):
     def test_lists_runs_newest_first(self):
         with tempfile.TemporaryDirectory() as data_dir:
-            for run_id, captured in (('run_20261001_1000', 2), ('run_20261002_0900', 0)):
+            # Target 0 was redone, target 2 captured nothing.
+            sessions = [{'target_index': 0, 'sample_count': 90},
+                        {'target_index': 0, 'sample_count': 95},
+                        {'target_index': 1, 'sample_count': 80},
+                        {'target_index': 2, 'sample_count': 0}]
+            for run_id, captured in (('run_20261001_1000', sessions), ('run_20261002_0900', [])):
                 folder = os.path.join(data_dir, dataset.TRACKING_DIR, run_id)
                 os.makedirs(folder)
                 with open(os.path.join(folder, 'manifest.json'), 'w') as f:
                     json.dump({
                         'run_id': run_id,
                         'target_count': 10,
-                        'settings': {'magnet': '12x12mm_stack', 'heights_mm': [10.0, 50.0]},
-                        'sessions': [{}] * captured,
+                        'settings': {'magnet': '12x12mm_stack', 'heights_mm': [10.0, 50.0],
+                                     'magnet_offset_mm': 6.0},
+                        'sessions': captured,
                     }, f)
             runs = dataset.list_tracking_runs(data_dir)
             self.assertEqual([r['run_id'] for r in runs],
                              ['run_20261002_0900', 'run_20261001_1000'])
             self.assertEqual(runs[1]['captured'], 2)
+            self.assertEqual(runs[1]['magnet_offset_mm'], 6.0)
             self.assertEqual(runs[1]['heights_mm'], [10.0, 50.0])
 
     def test_no_tracking_folder(self):

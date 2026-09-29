@@ -26,6 +26,7 @@ import shutil
 import signal
 import subprocess
 import threading
+import time
 import tkinter as tk
 import tkinter.font as tkfont
 from datetime import date, datetime
@@ -270,7 +271,7 @@ def _legacy_process_signals(signal, groups=('interface', 'nodes', 'robot')):
     # Bracketed patterns deliberately cannot match this cleanup shell's own
     # command line. The old "pkill -f roslaunch" did, aborting Stop All early.
     by_group = {
-        'interface': ('[m]agnetometer_reader.py',),
+        'interface': ('[m]agnetometer_reader.py', '[r]ecord_tracking_error.py'),
         'nodes': (
             '[c]olmag_arm_nodes[.]launch',
             '[c]olmag_draw_node.py',
@@ -517,6 +518,7 @@ def build_record_command(serial_port, participant_id, session_id, height_mm):
         '--participant-id', participant_id,
         '--session-id', session_id,
         '--height-mm', '{:g}'.format(height_mm),
+        '--target-reps', str(dataset.TARGET_REPS),
     ]
     if height_mm == 0:
         # Same pen-up filter as the Interface stage. Raised heights skip it,
@@ -979,13 +981,16 @@ class ActionMappingEditor(tk.Toplevel):
 class DataPanel(tk.Toplevel):
     """Participants, recorded coverage and data-collection starts.
 
-    Not modal, so the launcher's port field, log and Stop all stay usable
-    while it is open. Reading and writing files happens in colmag/dataset.py.
+    A normal window beside the launcher (not modal, not kept on top), so the
+    launcher's port field, log and Stop all stay usable while it is open.
+    Reading and writing files happens in colmag/dataset.py.
     """
 
     EMPTY = TRACK          # no takes yet
     PARTIAL = '#ffefd2'    # some takes
     COMPLETE = '#dcf5e2'   # TARGET_REPS or more
+    TABLE_ROWS = 8         # visible participant rows before the table scrolls
+    RESCAN_MS = 5000       # how often new takes are picked up while open
 
     def __init__(self, parent, data_dir=DATA_DIR):
         super().__init__(parent)
@@ -994,7 +999,6 @@ class DataPanel(tk.Toplevel):
         self.title('MagPilot Data')
         self.configure(bg=BG)
         self.resizable(False, False)
-        self.transient(parent)
         self.protocol('WM_DELETE_WINDOW', self.destroy)
         os.makedirs(data_dir, exist_ok=True)
 
@@ -1025,11 +1029,17 @@ class DataPanel(tk.Toplevel):
             self.load_participant(self.participants[0]['participant_id'])
         else:
             self.new_participant()
+        runs = dataset.list_tracking_runs(data_dir)
+        if runs:  # start from the settings of the last tracking run
+            self.magnet.set(runs[0]['magnet'] or self.magnet.get())
+            self.magnet_offset.set('{:g}'.format(runs[0]['magnet_offset_mm'] or 0))
+        # Open beside the launcher when there is room.
         self.update_idletasks()
-        x = parent.winfo_rootx() + max(
-            0, (parent.winfo_width() - self.winfo_reqwidth()) // 2)
-        self.geometry('+{}+{}'.format(x, parent.winfo_rooty() + 34))
+        x = parent.winfo_rootx() + parent.winfo_width() + 12
+        x = max(0, min(x, self.winfo_screenwidth() - self.winfo_reqwidth()))
+        self.geometry('+{}+{}'.format(x, parent.winfo_rooty()))
         self.focus_set()
+        self.after(self.RESCAN_MS, self._rescan)
 
     # ── Layout ──────────────────────────────────────────────────────────────
 
@@ -1093,13 +1103,27 @@ class DataPanel(tk.Toplevel):
         Segmented(
             switches, self.height,
             [(str(h), '{} mm'.format(h)) for h in dataset.HEIGHTS_MM],
-            command=self.show_table, width=420, height=30, font=f.f_small,
+            command=self.show_table, width=390, height=30, font=f.f_small,
             parent_bg=BG).pack(side='right')
+        tk.Label(switches, text='height', bg=BG, fg=SUBTLE,
+                 font=f.f_body).pack(side='right', padx=(0, 8))
 
-        # Coverage table: one row per participant, one column per character
-        self.table = tk.Frame(self, bg=CARD, highlightbackground=BORDER,
-                              highlightthickness=1)
-        self.table.pack(fill='x', padx=28)
+        # Coverage table: one row per participant, one column per character.
+        # It sits in a canvas so it can scroll when there are many people.
+        holder = tk.Frame(self, bg=CARD, highlightbackground=BORDER,
+                          highlightthickness=1)
+        holder.pack(fill='x', padx=28)
+        self.table_view = tk.Canvas(holder, bg=CARD, highlightthickness=0,
+                                    width=WIDTH - 40)
+        self.table_scroll = tk.Scrollbar(holder, orient='vertical',
+                                         command=self.table_view.yview)
+        self.table_view.configure(yscrollcommand=self.table_scroll.set)
+        self.table_view.pack(side='left', fill='both', expand=True)
+        self.table = tk.Frame(self.table_view, bg=CARD)
+        self.table_view.create_window(0, 0, window=self.table, anchor='nw')
+        for event, step in (('<Button-4>', -1), ('<Button-5>', 1)):
+            self.bind(event, lambda _, step=step: self.table_view.yview_scroll(
+                step, 'units'))
         self.problems = tk.Label(self, bg=BG, fg=SUBTLE, font=f.f_small,
                                  justify='left')
         self.problems.pack(anchor='w', padx=28, pady=(4, 0))
@@ -1128,9 +1152,10 @@ class DataPanel(tk.Toplevel):
         footer.pack(fill='x', padx=28, pady=(12, 22))
         tk.Label(
             footer,
-            text='Start opens the recorder with the port # from the main '
-                 'window. Press a character key to record a take, s to save it.',
-            bg=BG, fg=SUBTLE, font=f.f_small).pack(side='left')
+            text='Start records at the height selected above, using the '
+                 'port # of the main window.\nIn the recorder window: press a '
+                 'character key to record a take, s to save it.',
+            bg=BG, fg=SUBTLE, font=f.f_small, justify='left').pack(side='left')
         Pill(footer, 'Close', self.destroy, kind='plain', width=80,
              font=f.f_body, parent_bg=BG).pack(side='right')
 
@@ -1167,13 +1192,12 @@ class DataPanel(tk.Toplevel):
         wanted = len(active) * (len(dataset.DIGITS) + len(dataset.LETTERS)) \
             * dataset.TARGET_REPS
         active_ids = {p['participant_id'] for p in active}
-        done = sum(1 for s in self.samples
-                   if s['participant_id'] in active_ids and s['height_mm'] == 0)
+        done = dataset.progress(self.samples, active_ids, 0)
         self.summary.configure(text='Folder: {}/ · {} participants · {} / {} '
                                'takes at 0 mm'.format(
                                    dataset.DATA_DIR_NAME, len(active), done,
                                    wanted))
-        self.problems.configure(text='Not counted: ' + ' · '.join(
+        self.problems.configure(text='Check: ' + ' · '.join(
             '{} {}'.format(n, reason) for reason, n in sorted(problems.items()))
             if problems else '')
 
@@ -1209,6 +1233,7 @@ class DataPanel(tk.Toplevel):
                      text='No participants yet. Fill in the form above and '
                           'press Save.').grid(
                 row=1, column=0, columnspan=len(headers) + 1, pady=12)
+            self._fit_table()
             return
 
         totals = dict.fromkeys(chars, 0)
@@ -1255,6 +1280,30 @@ class DataPanel(tk.Toplevel):
         tk.Label(self.table, text=str(sum(totals.values())), bg=CARD,
                  fg=SUBTLE, font=f.f_h).grid(row=last, column=len(chars) + 2,
                                              pady=(4, 8))
+        self._fit_table()
+
+    def _fit_table(self):
+        """Show up to TABLE_ROWS participants; scroll for the rest."""
+        self.table.update_idletasks()
+        width, height = self.table.winfo_reqwidth(), self.table.winfo_reqheight()
+        rows = max(1, self.table.grid_size()[1])
+        visible = int(height * min(1.0, (self.TABLE_ROWS + 2) / rows))
+        self.table_view.configure(scrollregion=(0, 0, width, height),
+                                  height=visible)
+        if visible < height:
+            self.table_scroll.pack(side='right', fill='y')
+        else:
+            self.table_scroll.pack_forget()
+            self.table_view.yview_moveto(0)
+
+    def _rescan(self):
+        """Pick up new takes while the window is open (not participants.json)."""
+        if not self.winfo_exists():
+            return
+        samples, _ = dataset.scan_samples(self.data_dir)
+        if samples != self.samples:
+            self.refresh()
+        self.after(self.RESCAN_MS, self._rescan)
 
     def _cell_colour(self, n):
         if n >= dataset.TARGET_REPS:
@@ -1451,9 +1500,10 @@ class Launcher(tk.Tk):
                             self.start_interface)
         self.input_src = tk.StringVar(value='trackpad')
         self.input_src.trace_add('write', self._input_changed)
-        Selector(inner, self.input_src, ('trackpad', 'magnetometer'),
-                 width=138, height=30, font=self.f_body
-                 ).pack(side='right', padx=(0, 12))
+        self._input_selector = Selector(
+            inner, self.input_src, ('trackpad', 'magnetometer'),
+            width=138, height=30, font=self.f_body)
+        self._input_selector.pack(side='right', padx=(0, 12))
 
         # Control row
         row = tk.Frame(self, bg=BG)
@@ -1535,6 +1585,7 @@ class Launcher(tk.Tk):
     def open_data_panel(self):
         existing = getattr(self, '_data_panel', None)
         if existing is not None and existing.winfo_exists():
+            existing.refresh()
             existing.lift()
             existing.focus_set()
             return
@@ -1556,6 +1607,7 @@ class Launcher(tk.Tk):
                 'README: dry-run first, supervisor present, E-stop reachable.')
 
     def _input_changed(self, *_):
+        self._input_selector._redraw()  # input_src may be set from code
         magnetometer = self.input_src.get() == 'magnetometer'
         state = 'normal' if magnetometer else 'disabled'
         self._sensor_port.entry.configure(state=state)
@@ -1851,15 +1903,17 @@ class Launcher(tk.Tk):
             return
         if not self._ensure_container():
             return
-        _, processes = in_container(
-            "pgrep -f '[m]agnetometer_reader.py' || true", timeout=5)
-        if processes.strip():
+        busy = self._sensor_in_use()
+        if busy == 'interface':
             self._select_stage_log(
                 'interface', 'The MagPilot interface is already running.')
             messagebox.showwarning(
                 'Interface already running',
                 'The interface process is already active. Press Stop all '
                 'before starting another copy.')
+            return
+        if busy:
+            self._warn_sensor_busy(busy)
             return
         input_source = self.input_src.get()
         port = ''
@@ -1880,8 +1934,10 @@ class Launcher(tk.Tk):
             self.input_src.set('magnetometer')
             messagebox.showinfo(
                 title,
-                'Enter the sensor board\'s port number from the log in the '
-                '"port #" field of the main window, then press Start again.')
+                'The Interface card is now set to magnetometer and the log of '
+                'the main window lists the serial ports.\n\nType the sensor '
+                'board\'s number into "port #" there, then press Start again. '
+                '(Switch the card back to trackpad for trackpad demos.)')
             return None
         port = self.sensor_port.get().strip()
         if not port:
@@ -1906,15 +1962,25 @@ class Launcher(tk.Tk):
         return port
 
     def _sensor_in_use(self):
-        """Name of the program holding the sensor board, or None."""
+        """'tracking', 'interface' (magnetometer_reader) or None."""
         _, processes = in_container(
             "pgrep -af '[m]agnetometer_reader.py|[r]ecord_tracking_error.py' "
             "|| true", timeout=5)
         if 'record_tracking_error' in processes:
-            return 'The tracking-error recorder'
+            return 'tracking'
         if 'magnetometer_reader' in processes:
-            return 'The interface'
+            return 'interface'
         return None
+
+    def _warn_sensor_busy(self, busy):
+        if busy == 'tracking':
+            text = ('The tracking-error recorder is still open in its '
+                    'terminal. Type q and Enter there, or press Stop all.')
+        else:
+            text = ('A character recording or the Interface '
+                    '(magnetometer_reader.py) is running. Close its window '
+                    'or press Stop all first.')
+        messagebox.showwarning('Sensor board busy', text)
 
     def start_character_recording(self, participant_id, height_mm):
         """Data window: record digits and letters for one participant."""
@@ -1922,20 +1988,29 @@ class Launcher(tk.Tk):
             return
         busy = self._sensor_in_use()
         if busy:
-            messagebox.showwarning(
-                'Sensor board busy',
-                '{} is already running. Close it or press Stop all '
-                'first.'.format(busy))
+            self._warn_sensor_busy(busy)
             return
         port = self._checked_sensor_port('Data collection')
         if not port:
             return
         session_id = dataset.next_session_id(DATA_DIR, participant_id)
-        # Create the folder from here so it belongs to you, not to root
-        # inside Docker.
-        os.makedirs(os.path.join(
-            REPO_DIR, dataset.session_output_dir(participant_id, session_id)),
-            exist_ok=True)
+        where = ('on the cover (0 mm)' if height_mm == 0 else
+                 'at {0:g} mm. Fit the {0:g} mm spacer first'.format(height_mm))
+        if not messagebox.askokcancel(
+                'Record characters',
+                'Record {} session {} {}?'.format(
+                    participant_id, session_id, where)):
+            return
+        # Creating the folder now reserves the session number, even if the
+        # recorder stops before its first take.
+        try:
+            os.makedirs(os.path.join(
+                REPO_DIR,
+                dataset.session_output_dir(participant_id, session_id)),
+                exist_ok=True)
+        except OSError as exc:
+            messagebox.showerror('Data collection', str(exc))
+            return
         cmd = build_record_command(port, participant_id, session_id, height_mm)
         if self._launch_stage('interface', cmd):
             self._interface_notice = None
@@ -1948,14 +2023,15 @@ class Launcher(tk.Tk):
         except ValueError as exc:
             messagebox.showerror('Tracking error', str(exc))
             return
+        # docker exec takes a moment before the recorder shows up in pgrep,
+        # so ignore a second click right after a start.
+        if time.monotonic() - getattr(self, '_tracking_started_at', -60) < 10:
+            return
         if not self._pipeline_action_ready() or not self._ensure_container():
             return
         busy = self._sensor_in_use()
         if busy:
-            messagebox.showwarning(
-                'Sensor board busy',
-                '{} is already running. Close it or press Stop all '
-                'first.'.format(busy))
+            self._warn_sensor_busy(busy)
             return
         port = self._checked_sensor_port('Tracking error')
         if not port:
@@ -1969,17 +2045,20 @@ class Launcher(tk.Tk):
                 'Run this in a terminal instead:\n\ndocker exec -it {} bash '
                 '-lc {}'.format(CONTAINER, shlex.quote(cmd)))
             return
-        os.makedirs(os.path.join(REPO_DIR, dataset.tracking_output_dir(run_id)),
-                    exist_ok=True)
         try:
+            os.makedirs(os.path.join(
+                REPO_DIR, dataset.tracking_output_dir(run_id)), exist_ok=True)
             subprocess.Popen(build_terminal_argv(terminal, cmd),
                              start_new_session=True)
         except OSError as exc:
             messagebox.showerror('Tracking error', str(exc))
             return
-        self._replace_log(
+        self._tracking_started_at = time.monotonic()
+        self._pipeline_notice = (
             'Tracking-error run {} opened in a new {} window. Follow the '
-            'prompts there.'.format(run_id, terminal))
+            'prompts there; Stop all also ends it.'.format(run_id, terminal))
+        self._replace_log(self._pipeline_notice)
+        self.after(8000, self._clear_pipeline_notice, self._pipeline_notice)
 
     def stop_all(self):
         self._begin_pipeline_cleanup('manual')
