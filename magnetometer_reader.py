@@ -321,6 +321,8 @@ class MagnetometerReader:
         run_id=None,
         participant_id=None,
         session_id=None,
+        height_mm=None,
+        target_reps=TARGET_REPS_DEFAULT,
         # ROS bridge
         ros=False,
         # UI
@@ -398,6 +400,8 @@ class MagnetometerReader:
             self.sanitize_path_component(participant_id) if participant_id else None
         )
         self.session_id = self.sanitize_path_component(session_id) if session_id else None
+        self.height_mm = height_mm
+        self.target_reps = target_reps
         self.command_line = list(sys.argv)
         self.raw_csv_path = None
         self.raw_csv_enabled = False
@@ -763,6 +767,7 @@ class MagnetometerReader:
             'run_id': self.run_id,
             'participant_id': self.participant_id,
             'session_id': self.session_id,
+            'height_mm': self.height_mm,
             'output_dir': os.path.abspath(self.output_dir) if self.output_dir else None,
             'command_line': self.command_line,
             'input_source': self.input_source,
@@ -820,8 +825,9 @@ class MagnetometerReader:
             counts[label] = counts.get(label, 0) + 1
         return counts
 
-    def print_recording_checklist(self, target_reps=TARGET_REPS_DEFAULT):
+    def print_recording_checklist(self, target_reps=None):
         """Print an ASCII checklist showing recording progress for all standard targets."""
+        target_reps = target_reps or self.target_reps
         counts = self.reps_by_label()
 
         digits  = [f'digit_{d}' for d in '0123456789']
@@ -1627,13 +1633,13 @@ class MagnetometerReader:
         label = self.session_label(session_name)
         completed_reps = self.reps_by_label().get(label, 1)
 
-        print(f"\n<<< SAVED: '{session_name}'  rep {completed_reps}/{TARGET_REPS_DEFAULT}  ({data_points} samples) >>>")
+        print(f"\n<<< SAVED: '{session_name}'  rep {completed_reps}/{self.target_reps}  ({data_points} samples) >>>")
 
         if self.record_data:
             self.save_session_artifacts(session_name, start_time, end_time, data_points)
             self.print_recording_checklist()
             self._set_key_feedback(
-                f"Saved  {session_name}  rep {completed_reps}/{TARGET_REPS_DEFAULT}  ({data_points} pts)",
+                f"Saved  {session_name}  rep {completed_reps}/{self.target_reps}  ({data_points} pts)",
                 duration=3.0,
             )
         else:
@@ -1681,6 +1687,7 @@ class MagnetometerReader:
             'run_id': self.run_id,
             'participant_id': self.participant_id,
             'session_id': self.session_id,
+            'height_mm': self.height_mm,
             'repetition': paths['repetition'],
             'basename': paths['basename'],
             'started_at': start_time,
@@ -2099,6 +2106,7 @@ class MagnetometerReader:
             'run_id': self.run_id,
             'participant_id': self.participant_id,
             'session_id': self.session_id,
+            'height_mm': self.height_mm,
             'repetition': paths['repetition'],
             'basename': paths['basename'],
             'created_at': datetime.now().isoformat(),
@@ -4528,6 +4536,11 @@ def main():
                        help='Participant ID stored in filenames and the manifest (e.g. P01)')
     parser.add_argument('--session-id', type=str, default=None,
                        help='Recording session ID stored in filenames and the manifest (e.g. S01)')
+    parser.add_argument('--target-reps', type=int, default=TARGET_REPS_DEFAULT,
+                       help='Takes wanted per character; shown as "rep n/N" and in the checklist')
+    parser.add_argument('--height-mm', type=float, default=None,
+                       help='Stylus writing height above the board in mm (0 = on the cover); '
+                            'stored in the manifest and every sample JSON')
 
     argcomplete.autocomplete(parser)
     args = parser.parse_args()
@@ -4579,6 +4592,10 @@ def main():
         parser.error(f"--touchpad-magnetic-calibration not found: {args.touchpad_magnetic_calibration}")
     if args.touchpad_speed_report_interval < 0:
         parser.error("--touchpad-speed-report-interval must be non-negative")
+    if args.height_mm is not None and args.height_mm < 0:
+        parser.error("--height-mm must be non-negative")
+    if args.target_reps < 1:
+        parser.error("--target-reps must be at least 1")
 
     # Resolve output_dir with date-based smart default
     if args.output_dir is None:
@@ -4644,7 +4661,8 @@ def main():
         print(f"MODE: RECORD — explicit recording, output dir: {args.output_dir}")
         print(
             f"Participant: {args.participant_id or 'not set'}, "
-            f"Session: {args.session_id or 'not set'}"
+            f"Session: {args.session_id or 'not set'}, "
+            f"Height: {'not set' if args.height_mm is None else f'{args.height_mm:g} mm'}"
         )
         if not args.participant_id:
             print("  (use --participant-id / --session-id to tag recordings for the dataset)")
@@ -4772,6 +4790,8 @@ def main():
         run_id=args.run_id,
         participant_id=args.participant_id,
         session_id=args.session_id,
+        height_mm=args.height_mm,
+        target_reps=args.target_reps,
         ros=args.ros,
         clean_view=args.clean,
     )

@@ -16,6 +16,9 @@ from colmag_launcher import (
     build_clear_stale_launcher_state_command,
     build_detached_inner,
     build_interface_command,
+    build_record_command,
+    build_terminal_argv,
+    build_tracking_command,
     build_local_stage_status_command,
     build_live_ros_nodes_command,
     build_pipeline_probe_command,
@@ -30,6 +33,7 @@ from colmag_launcher import (
     missing_container_ros_packages,
     parse_local_stage_status,
     parse_franka_robot_mode,
+    parse_tracking_settings,
     resolve_serial_port,
     serial_port_label,
     stop_conflicting_colmag_containers,
@@ -315,6 +319,66 @@ class LauncherSimulationPreflightTests(unittest.TestCase):
 
         self.assertIn(
             'INSTALL_GAZEBO="${INSTALL_GAZEBO:-1}"', setup)
+
+
+class DataCollectionCommandTests(unittest.TestCase):
+    def test_record_command_tags_the_participant_and_never_uses_ros(self):
+        command = build_record_command('/host/dev/ttyACM0', 'P03', 'S01', 0)
+
+        self.assertTrue(command.startswith('cd /colmag && python3 magnetometer_reader.py'))
+        self.assertIn('--input-source serial --port /host/dev/ttyACM0', command)
+        self.assertIn('--record-data', command)
+        self.assertIn('--output-dir data_collection/characters/P03/S01', command)
+        self.assertIn('--participant-id P03 --session-id S01 --height-mm 0', command)
+        self.assertIn('--target-reps 10', command)
+        self.assertIn('--writing-max-z 0.05', command)
+        self.assertNotIn('--ros', command)
+        self.assertNotIn('--classifier-labels', command)
+
+    def test_raised_heights_skip_the_pen_up_filter(self):
+        command = build_record_command('/host/dev/ttyACM0', 'P01', 'S02', 50)
+
+        self.assertIn('--height-mm 50', command)
+        self.assertNotIn('--writing-max-z', command)
+
+    def test_record_command_rejects_bad_ids_and_missing_port(self):
+        with self.assertRaisesRegex(ValueError, 'serial port'):
+            build_record_command('', 'P01', 'S01', 0)
+        with self.assertRaisesRegex(ValueError, 'Participant'):
+            build_record_command('/dev/ttyACM0', 'Simon', 'S01', 0)
+        with self.assertRaisesRegex(ValueError, 'Session'):
+            build_record_command('/dev/ttyACM0', 'P01', '../x', 0)
+
+    def test_tracking_settings_are_checked(self):
+        self.assertEqual(
+            parse_tracking_settings(' 12x12mm_stack ', '6', '10, 50,100'),
+            ('12x12mm_stack', 6.0, [10.0, 50.0, 100.0]))
+        for magnet, offset, heights in (('', '0', '10'), ('m', 'x', '10'),
+                                        ('m', '0', '10,abc'), ('m', '0', ''),
+                                        ('m', '-1', '10')):
+            with self.assertRaises(ValueError):
+                parse_tracking_settings(magnet, offset, heights)
+
+    def test_tracking_command_writes_into_data_collection(self):
+        command = build_tracking_command(
+            '/host/dev/ttyACM0', '12x12mm_stack', 6.0, [10.0, 50.0], 'run_x')
+
+        self.assertIn('python3 tools/record_tracking_error.py', command)
+        self.assertIn('--magnet 12x12mm_stack --magnet-offset-mm 6', command)
+        self.assertIn('--heights-mm 10,50 --run-id run_x', command)
+        self.assertIn('--output-dir data_collection/tracking_error/run_x', command)
+
+    def test_terminal_runs_docker_interactively_and_stays_open(self):
+        argv = build_terminal_argv('gnome-terminal', 'cd /colmag && echo hi')
+
+        self.assertEqual(argv[:4], ['gnome-terminal', '--', 'bash', '-lc'])
+        self.assertIn('docker exec -it colmag_simon bash -lc', argv[4])
+        self.assertIn("'cd /colmag && echo hi'", argv[4])
+        self.assertIn('Press Enter to close', argv[4])
+        self.assertEqual(build_terminal_argv('xterm', 'x')[:2], ['xterm', '-e'])
+
+    def test_stop_all_also_ends_the_tracking_error_recorder(self):
+        self.assertIn("'[r]ecord_tracking_error.py'", build_stop_all_command())
 
 
 if __name__ == '__main__':
