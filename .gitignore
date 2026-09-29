@@ -46,3 +46,6 @@ htmlcov/
 
 # Node modules (if any)
 node_modules/
+
+# Participant data (character dataset, tracking error, participants.json)
+data_collection/

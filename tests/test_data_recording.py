@@ -210,6 +210,33 @@ def test_without_ids_keeps_legacy_names():
         assert entry['session_id'] is None
 
 
+def test_height_is_stored_in_manifest_and_sidecar():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        reader = MagnetometerReader(
+            enable_classifier=False,
+            record_data=True,
+            output_dir=tmpdir,
+            run_id='heights',
+            participant_id='P01',
+            session_id='S02',
+            height_mm=50.0,
+            writing_min_velocity=0.0,
+        )
+        reader.prepare_recording_layout(raw_csv_path=None, raw_csv_enabled=False)
+        reader.current_session = 'letter_C'
+        reader.current_session_started_at = make_rows()[0][0]
+        reader.session_data = make_rows()
+        reader.stop_session()
+
+        manifest = load_manifest(tmpdir)
+        assert manifest['height_mm'] == 50.0
+        assert manifest['sessions'][0]['height_mm'] == 50.0
+        label_dir = os.path.join(tmpdir, 'samples', 'letter_C')
+        sidecar_path = glob.glob(os.path.join(label_dir, 'heights_P01_S02_letter_C_rep001_*.json'))[0]
+        with open(sidecar_path, 'r', encoding='utf-8') as f:
+            assert json.load(f)['height_mm'] == 50.0
+
+
 def main():
     test_live_mode_does_not_create_layout()
     test_dry_run_layout()
@@ -217,6 +244,7 @@ def main():
     test_control_labels_are_separate()
     test_participant_and_session_ids()
     test_without_ids_keeps_legacy_names()
+    test_height_is_stored_in_manifest_and_sidecar()
     print("Structured data recording smoke test passed")
 
 

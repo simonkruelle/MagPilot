@@ -22,13 +22,16 @@ and tailed in the bottom pane.
 
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import threading
 import tkinter as tk
 import tkinter.font as tkfont
+from datetime import date, datetime
 from tkinter import messagebox, ttk
 
+from colmag import dataset
 from colmag.action_mapping import (
     ACTION_CATALOG,
     DEFAULT_ACTION_MAP_PATH,
@@ -42,6 +45,9 @@ from colmag.action_mapping import (
 CONTAINER = 'colmag_simon'
 LEGACY_CONTAINERS = ('colmag_ros',)
 REPO_DIR = os.path.dirname(os.path.abspath(__file__))
+# Recorded participant data; gitignored. The container sees it as
+# /colmag/data_collection because the whole repo is mounted there.
+DATA_DIR = os.path.join(REPO_DIR, dataset.DATA_DIR_NAME)
 ROS_SETUP = ('source /opt/ros/noetic/setup.bash; '
              '[ -f /catkin_ws/devel/setup.bash ] && source /catkin_ws/devel/setup.bash; ')
 
@@ -487,6 +493,102 @@ def build_interface_command(input_source, serial_port=''):
     return 'cd /colmag && {}'.format(' '.join(shlex.quote(arg) for arg in args))
 
 
+def build_record_command(serial_port, participant_id, session_id, height_mm):
+    """Record one participant's characters with the sensor board.
+
+    Unlike the Interface stage this never passes --ros: a recording must not
+    send commands to the robot.
+    """
+    if not serial_port:
+        raise ValueError('A serial port is required for recording.')
+    if not dataset.PARTICIPANT_ID.match(participant_id or ''):
+        raise ValueError('Participant IDs look like P01, got {!r}.'.format(
+            participant_id))
+    if not dataset.SESSION_ID.match(session_id or ''):
+        raise ValueError('Session IDs look like S01, got {!r}.'.format(
+            session_id))
+    args = [
+        'python3', 'magnetometer_reader.py',
+        '--input-source', 'serial',
+        '--port', serial_port,
+        '--clean',
+        '--record-data',
+        '--output-dir', dataset.session_output_dir(participant_id, session_id),
+        '--participant-id', participant_id,
+        '--session-id', session_id,
+        '--height-mm', '{:g}'.format(height_mm),
+    ]
+    if height_mm == 0:
+        # Same pen-up filter as the Interface stage. Raised heights skip it,
+        # because it would blank the saved picture above 5 cm.
+        args.extend(['--writing-max-z', '0.05'])
+    return 'cd /colmag && {}'.format(' '.join(shlex.quote(arg) for arg in args))
+
+
+def parse_tracking_settings(magnet, magnet_offset_mm, heights_mm):
+    """Check the Data window's tracking-error fields; return clean values."""
+    magnet = magnet.strip()
+    if not magnet:
+        raise ValueError('Enter the magnet, e.g. 12x12mm_stack.')
+    try:
+        offset = float(magnet_offset_mm)
+    except ValueError:
+        raise ValueError('The magnet offset must be a number in mm.')
+    try:
+        heights = [float(h) for h in heights_mm.split(',') if h.strip()]
+    except ValueError:
+        raise ValueError('Heights must be numbers in mm, e.g. 10,50,100,150,200.')
+    if not heights or min(heights) < 0 or offset < 0:
+        raise ValueError('Enter at least one height; heights and offset '
+                         'cannot be negative.')
+    return magnet, offset, heights
+
+
+def build_tracking_command(serial_port, magnet, magnet_offset_mm, heights_mm,
+                           run_id):
+    """Run tools/record_tracking_error.py for one run (it prompts per target)."""
+    if not serial_port:
+        raise ValueError('A serial port is required for tracking error.')
+    args = [
+        'python3', 'tools/record_tracking_error.py',
+        '--port', serial_port,
+        '--magnet', magnet,
+        '--magnet-offset-mm', '{:g}'.format(magnet_offset_mm),
+        '--heights-mm', ','.join('{:g}'.format(h) for h in heights_mm),
+        '--run-id', run_id,
+        '--output-dir', dataset.tracking_output_dir(run_id),
+    ]
+    return 'cd /colmag && {}'.format(' '.join(shlex.quote(arg) for arg in args))
+
+
+# Host terminals that can run an interactive command, with the flag that
+# precedes it. The tracking-error recorder asks for Enter at every target, so it
+# needs a real terminal instead of a detached launcher stage.
+TERMINALS = (
+    ('gnome-terminal', ['--']),
+    ('konsole', ['-e']),
+    ('xfce4-terminal', ['-x']),
+    ('xterm', ['-e']),
+    ('x-terminal-emulator', ['-e']),
+)
+
+
+def find_terminal():
+    for name, _ in TERMINALS:
+        if shutil.which(name):
+            return name
+    return None
+
+
+def build_terminal_argv(terminal, container_command):
+    """Open `terminal` running container_command interactively in Docker."""
+    docker = 'docker exec -it {} bash -lc {}'.format(
+        CONTAINER, shlex.quote(container_command))
+    # Keep the window open afterwards so the summary can be read.
+    host = '{}; echo; read -r -p "Finished. Press Enter to close."'.format(docker)
+    return [terminal] + dict(TERMINALS)[terminal] + ['bash', '-lc', host]
+
+
 def serial_port_label(port):
     return port[5:] if port.startswith('/host/dev/') else port
 
@@ -874,6 +976,378 @@ class ActionMappingEditor(tk.Toplevel):
         self.destroy()
 
 
+class DataPanel(tk.Toplevel):
+    """Participants, recorded coverage and data-collection starts.
+
+    Not modal, so the launcher's port field, log and Stop all stay usable
+    while it is open. Reading and writing files happens in colmag/dataset.py.
+    """
+
+    EMPTY = TRACK          # no takes yet
+    PARTIAL = '#ffefd2'    # some takes
+    COMPLETE = '#dcf5e2'   # TARGET_REPS or more
+
+    def __init__(self, parent, data_dir=DATA_DIR):
+        super().__init__(parent)
+        self.parent = parent
+        self.data_dir = data_dir
+        self.title('MagPilot Data')
+        self.configure(bg=BG)
+        self.resizable(False, False)
+        self.transient(parent)
+        self.protocol('WM_DELETE_WINDOW', self.destroy)
+        os.makedirs(data_dir, exist_ok=True)
+
+        self.participants = []
+        self.samples = []
+        self.participants_error = None
+        self.record = None  # participant shown in the form
+
+        # Form of the selected participant
+        self.pid = tk.StringVar()
+        self.hand = tk.StringVar(value=dataset.HANDS[0])
+        self.age = tk.StringVar(value=dataset.AGE_BANDS[0])
+        self.consent = tk.BooleanVar(value=False)
+        self.excluded = tk.BooleanVar(value=False)
+        self.notes = tk.StringVar()
+        # Table switches
+        self.char_set = tk.StringVar(value='digits')
+        self.height = tk.StringVar(value='0')
+        # Tracking-error settings
+        self.magnet = tk.StringVar(value='12x12mm_stack')
+        self.magnet_offset = tk.StringVar(value='0')
+        self.tracking_heights = tk.StringVar(
+            value=','.join(str(h) for h in dataset.HEIGHTS_MM if h > 0))
+
+        self._build()
+        self.refresh()
+        if self.participants:
+            self.load_participant(self.participants[0]['participant_id'])
+        else:
+            self.new_participant()
+        self.update_idletasks()
+        x = parent.winfo_rootx() + max(
+            0, (parent.winfo_width() - self.winfo_reqwidth()) // 2)
+        self.geometry('+{}+{}'.format(x, parent.winfo_rooty() + 34))
+        self.focus_set()
+
+    # ── Layout ──────────────────────────────────────────────────────────────
+
+    def _build(self):
+        f = self.parent
+        heading = tk.Frame(self, bg=BG)
+        heading.pack(fill='x', padx=28, pady=(22, 10))
+        Pill(heading, 'Refresh', self.refresh, kind='plain', width=90,
+             font=f.f_body, parent_bg=BG).pack(side='right')
+        tk.Label(heading, text='Data collection', bg=BG, fg=TEXT,
+                 font=f.f_title).pack(anchor='w')
+        self.summary = tk.Label(heading, bg=BG, fg=SUBTLE, font=f.f_body)
+        self.summary.pack(anchor='w', pady=(3, 0))
+
+        # Participant form
+        form = self._box('Participant')
+        row = tk.Frame(form, bg=CARD)
+        row.pack(fill='x', pady=(0, 8))
+        tk.Label(row, textvariable=self.pid, width=5, bg='#eef4fb', fg=TEXT,
+                 font=f.f_h).pack(side='left')
+        self._caption(row, 'hand')
+        self._hand = Segmented(
+            row, self.hand, [('right', 'Right'), ('left', 'Left')],
+            width=150, height=30, font=f.f_body, parent_bg=CARD)
+        self._hand.pack(side='left')
+        self._caption(row, 'age')
+        self._age = Selector(row, self.age, dataset.AGE_BANDS, width=120,
+                             height=30, font=f.f_body)
+        self._age.pack(side='left')
+        self._caption(row, 'consent')
+        self._consent = Toggle(row, self.consent)
+        self._consent.pack(side='left')
+
+        row = tk.Frame(form, bg=CARD)
+        row.pack(fill='x')
+        tk.Label(row, text='notes', bg=CARD, fg=SUBTLE, font=f.f_body).pack(
+            side='left', padx=(0, 8))
+        RoundEntry(row, self.notes, width=250, height=30, font=f.f_body,
+                   parent_bg=CARD).pack(side='left')
+        self._caption(row, 'excluded')
+        self._excluded = Toggle(row, self.excluded)
+        self._excluded.pack(side='left')
+        Pill(row, 'Save', self.save_participant, kind='primary', width=80,
+             font=f.f_btn).pack(side='right')
+        Pill(row, 'New', self.new_participant, kind='plain', width=70,
+             font=f.f_body).pack(side='right', padx=(0, 8))
+        self.form_status = tk.Label(
+            form, bg=CARD, fg=SUBTLE, font=f.f_small,
+            text='No names here: the name-to-ID list stays on the paper '
+                 'consent form.')
+        self.form_status.pack(anchor='w', pady=(8, 0))
+
+        # Which part of the dataset the table shows
+        switches = tk.Frame(self, bg=BG)
+        switches.pack(fill='x', padx=28, pady=(14, 8))
+        Segmented(
+            switches, self.char_set,
+            [('digits', 'Digits 0-9'), ('letters', 'Letters A-J')],
+            command=self.show_table, width=230, height=30, font=f.f_body,
+            parent_bg=BG).pack(side='left')
+        Segmented(
+            switches, self.height,
+            [(str(h), '{} mm'.format(h)) for h in dataset.HEIGHTS_MM],
+            command=self.show_table, width=420, height=30, font=f.f_small,
+            parent_bg=BG).pack(side='right')
+
+        # Coverage table: one row per participant, one column per character
+        self.table = tk.Frame(self, bg=CARD, highlightbackground=BORDER,
+                              highlightthickness=1)
+        self.table.pack(fill='x', padx=28)
+        self.problems = tk.Label(self, bg=BG, fg=SUBTLE, font=f.f_small,
+                                 justify='left')
+        self.problems.pack(anchor='w', padx=28, pady=(4, 0))
+
+        # Tracking error
+        tracking = self._box('Tracking error')
+        row = tk.Frame(tracking, bg=CARD)
+        row.pack(fill='x')
+        tk.Label(row, text='magnet', bg=CARD, fg=SUBTLE, font=f.f_body).pack(
+            side='left', padx=(0, 8))
+        RoundEntry(row, self.magnet, width=165, height=30, font=f.f_body,
+                   parent_bg=CARD).pack(side='left')
+        self._caption(row, 'offset mm')
+        RoundEntry(row, self.magnet_offset, width=60, height=30,
+                   font=f.f_body, parent_bg=CARD).pack(side='left')
+        self._caption(row, 'heights mm')
+        RoundEntry(row, self.tracking_heights, width=185, height=30,
+                   font=f.f_body, parent_bg=CARD).pack(side='left')
+        Pill(row, 'Start', self.start_tracking, kind='primary', width=80,
+             font=f.f_btn).pack(side='right')
+        self.tracking_runs = tk.Label(tracking, bg=CARD, fg=SUBTLE,
+                                      font=f.f_small, justify='left')
+        self.tracking_runs.pack(anchor='w', pady=(8, 0))
+
+        footer = tk.Frame(self, bg=BG)
+        footer.pack(fill='x', padx=28, pady=(12, 22))
+        tk.Label(
+            footer,
+            text='Start opens the recorder with the port # from the main '
+                 'window. Press a character key to record a take, s to save it.',
+            bg=BG, fg=SUBTLE, font=f.f_small).pack(side='left')
+        Pill(footer, 'Close', self.destroy, kind='plain', width=80,
+             font=f.f_body, parent_bg=BG).pack(side='right')
+
+    def _box(self, title):
+        tk.Label(self, text=title, bg=BG, fg=TEXT, font=self.parent.f_h).pack(
+            anchor='w', padx=28, pady=(12, 4))
+        box = tk.Frame(self, bg=CARD, highlightbackground=BORDER,
+                       highlightthickness=1)
+        box.pack(fill='x', padx=28)
+        inner = tk.Frame(box, bg=CARD)
+        inner.pack(fill='x', padx=14, pady=12)
+        return inner
+
+    def _caption(self, parent, text):
+        tk.Label(parent, text=text, bg=CARD, fg=SUBTLE,
+                 font=self.parent.f_body).pack(side='left', padx=(16, 8))
+
+    # ── Reading the data folder ─────────────────────────────────────────────
+
+    def refresh(self):
+        try:
+            self.participants = dataset.load_participants(self.data_dir)
+            self.participants_error = None
+        except ValueError as exc:
+            self.participants = []
+            self.participants_error = str(exc)
+            messagebox.showerror(
+                'participants.json',
+                '{}\n\nFix or restore the file. Saving participants is '
+                'blocked until then.'.format(exc), parent=self)
+        self.samples, problems = dataset.scan_samples(self.data_dir)
+
+        active = [p for p in self.participants if not p.get('excluded')]
+        wanted = len(active) * (len(dataset.DIGITS) + len(dataset.LETTERS)) \
+            * dataset.TARGET_REPS
+        active_ids = {p['participant_id'] for p in active}
+        done = sum(1 for s in self.samples
+                   if s['participant_id'] in active_ids and s['height_mm'] == 0)
+        self.summary.configure(text='Folder: {}/ · {} participants · {} / {} '
+                               'takes at 0 mm'.format(
+                                   dataset.DATA_DIR_NAME, len(active), done,
+                                   wanted))
+        self.problems.configure(text='Not counted: ' + ' · '.join(
+            '{} {}'.format(n, reason) for reason, n in sorted(problems.items()))
+            if problems else '')
+
+        runs = dataset.list_tracking_runs(self.data_dir)[:3]
+        self.tracking_runs.configure(text='\n'.join(
+            '{} · {} · heights {} mm · {} of {} targets'.format(
+                run['run_id'], run['magnet'],
+                ','.join('{:g}'.format(h) for h in run['heights_mm']),
+                run['captured'], run['targets'])
+            for run in runs) or 'No tracking-error runs yet.')
+        self.show_table()
+
+    def show_table(self):
+        for child in self.table.winfo_children():
+            child.destroy()
+        f = self.parent
+        chars = (dataset.DIGITS if self.char_set.get() == 'digits'
+                 else dataset.LETTERS)
+        coverage = dataset.count_coverage(
+            self.samples, chars, int(self.height.get()))
+        registered = [p['participant_id'] for p in self.participants]
+        rows = list(self.participants) + [
+            {'participant_id': pid} for pid in sorted(coverage)
+            if pid not in registered]
+
+        headers = ['ID', 'Hand'] + list(chars) + ['Total']
+        for column, text in enumerate(headers):
+            tk.Label(self.table, text=text, bg=CARD, fg=SUBTLE,
+                     font=f.f_small).grid(row=0, column=column, padx=3,
+                                          pady=(8, 2))
+        if not rows:
+            tk.Label(self.table, bg=CARD, fg=SUBTLE, font=f.f_body,
+                     text='No participants yet. Fill in the form above and '
+                          'press Save.').grid(
+                row=1, column=0, columnspan=len(headers) + 1, pady=12)
+            return
+
+        totals = dict.fromkeys(chars, 0)
+        for row, participant in enumerate(rows, start=1):
+            pid = participant['participant_id']
+            counts = coverage.get(pid, {})
+            known = pid in registered
+            counted = known and not participant.get('excluded')
+            label = tk.Label(self.table, text=pid, bg=CARD,
+                             fg=BLUE if known else SUBTLE, font=f.f_h,
+                             cursor='hand2' if known else '')
+            label.grid(row=row, column=0, padx=(10, 3), pady=2)
+            if known:
+                label.bind('<Button-1>',
+                           lambda _, pid=pid: self.load_participant(pid))
+            hand = participant.get('handedness', '')[:1].upper()
+            tk.Label(self.table, text=hand, bg=CARD, fg=SUBTLE,
+                     font=f.f_body).grid(row=row, column=1, padx=3)
+            for column, char in enumerate(chars, start=2):
+                n = counts.get(char, 0)
+                if counted:
+                    totals[char] += n
+                tk.Label(self.table, text=str(n), width=3,
+                         bg=self._cell_colour(n), fg=TEXT if counted else SUBTLE,
+                         font=f.f_body).grid(row=row, column=column, padx=2,
+                                             pady=2)
+            tk.Label(self.table, text=str(sum(counts.values())), bg=CARD,
+                     fg=TEXT, font=f.f_h).grid(row=row, column=len(chars) + 2,
+                                               padx=(6, 3))
+            if known:
+                Pill(self.table, 'Start',
+                     lambda pid=pid: self.start_recording(pid),
+                     kind='primary', width=64, height=24,
+                     font=f.f_small).grid(row=row, column=len(chars) + 3,
+                                          padx=(6, 10))
+
+        last = len(rows) + 1
+        tk.Label(self.table, text='All', bg=CARD, fg=SUBTLE,
+                 font=f.f_h).grid(row=last, column=0, padx=(10, 3),
+                                  pady=(4, 8))
+        for column, char in enumerate(chars, start=2):
+            tk.Label(self.table, text=str(totals[char]), bg=CARD, fg=SUBTLE,
+                     font=f.f_body).grid(row=last, column=column, pady=(4, 8))
+        tk.Label(self.table, text=str(sum(totals.values())), bg=CARD,
+                 fg=SUBTLE, font=f.f_h).grid(row=last, column=len(chars) + 2,
+                                             pady=(4, 8))
+
+    def _cell_colour(self, n):
+        if n >= dataset.TARGET_REPS:
+            return self.COMPLETE
+        return self.PARTIAL if n else self.EMPTY
+
+    # ── Participant form ────────────────────────────────────────────────────
+
+    def _fill_form(self, record):
+        self.record = dict(record)
+        self.pid.set(record['participant_id'])
+        self.hand.set(record.get('handedness', dataset.HANDS[0]))
+        self.age.set(record.get('age_band', dataset.AGE_BANDS[0]))
+        self.consent.set(bool(record.get('consent')))
+        self.excluded.set(bool(record.get('excluded')))
+        self.notes.set(record.get('notes', ''))
+        for widget in (self._hand, self._age, self._consent, self._excluded):
+            widget._redraw()
+
+    def new_participant(self):
+        # Never reuse an ID that already has recordings on disk.
+        seen = {s['participant_id'] for s in self.samples}
+        characters_dir = os.path.join(self.data_dir, dataset.CHARACTERS_DIR)
+        if os.path.isdir(characters_dir):
+            seen.update(os.listdir(characters_dir))
+        pid = dataset.next_participant_id(self.participants, seen)
+        self._fill_form(dataset.new_participant(pid))
+        self.form_status.configure(
+            text='{} is new and not saved yet. No names here: the name-to-ID '
+                 'list stays on the paper consent form.'.format(pid))
+
+    def load_participant(self, participant_id):
+        for record in self.participants:
+            if record['participant_id'] == participant_id:
+                self._fill_form(record)
+                self.form_status.configure(
+                    text='{} saved on {}.'.format(
+                        participant_id, record.get('created_at', '?')))
+                return
+
+    def save_participant(self):
+        if self.participants_error:
+            messagebox.showerror('participants.json', self.participants_error,
+                                 parent=self)
+            return
+        record = dict(self.record)
+        record.update({
+            'handedness': self.hand.get(),
+            'age_band': self.age.get(),
+            'consent': bool(self.consent.get()),
+            'excluded': bool(self.excluded.get()),
+            'notes': self.notes.get().strip(),
+        })
+        if not record['consent']:
+            record['consent_date'] = None
+        elif not record.get('consent_date'):
+            record['consent_date'] = date.today().isoformat()
+        others = [p for p in self.participants
+                  if p['participant_id'] != record['participant_id']]
+        try:
+            dataset.save_participants(self.data_dir, others + [record])
+        except OSError as exc:
+            messagebox.showerror('Could not save participant', str(exc),
+                                 parent=self)
+            return
+        self.refresh()
+        self.load_participant(record['participant_id'])
+
+    # ── Starting recordings ─────────────────────────────────────────────────
+
+    def start_recording(self, participant_id):
+        record = next(p for p in self.participants
+                      if p['participant_id'] == participant_id)
+        if record.get('excluded'):
+            messagebox.showwarning(
+                'Excluded', '{} is marked as excluded.'.format(participant_id),
+                parent=self)
+            return
+        if not record.get('consent'):
+            messagebox.showwarning(
+                'No consent',
+                'No consent is recorded for {}. Switch on consent in the form '
+                'and press Save first.'.format(participant_id), parent=self)
+            return
+        self.parent.start_character_recording(
+            participant_id, int(self.height.get()))
+
+    def start_tracking(self):
+        self.parent.start_tracking_error(
+            self.magnet.get(), self.magnet_offset.get(),
+            self.tracking_heights.get())
+
+
 # ── The app ──────────────────────────────────────────────────────────────────
 
 class Launcher(tk.Tk):
@@ -992,6 +1466,8 @@ class Launcher(tk.Tk):
         Pill(row, 'Action mapping', self.open_action_mapping, kind='plain',
              width=142, font=self.f_body, parent_bg=BG
              ).pack(side='left')
+        Pill(row, 'Data', self.open_data_panel, kind='plain', width=80,
+             font=self.f_body, parent_bg=BG).pack(side='left', padx=12)
         self.container_light = tk.Label(row, text='●  container', bg=BG,
                                         fg=DOT_OFF, font=self.f_body)
         self.container_light.pack(side='right')
@@ -1055,6 +1531,14 @@ class Launcher(tk.Tk):
             return
         self._action_mapping_editor = ActionMappingEditor(
             self, on_saved=self._action_mapping_saved)
+
+    def open_data_panel(self):
+        existing = getattr(self, '_data_panel', None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            existing.focus_set()
+            return
+        self._data_panel = DataPanel(self)
 
     def _action_mapping_saved(self):
         self._pipeline_notice = (
@@ -1378,32 +1862,124 @@ class Launcher(tk.Tk):
                 'before starting another copy.')
             return
         input_source = self.input_src.get()
-        port = self.sensor_port.get().strip()
+        port = ''
         if input_source == 'magnetometer':
+            port = self._checked_sensor_port('Magnetometer')
             if not port:
-                messagebox.showerror(
-                    'Magnetometer',
-                    'Enter one of the port numbers shown in the Interface log.')
-                return
-            try:
-                port = resolve_serial_port(
-                    port, self._detected_serial_ports)
-            except ValueError as exc:
-                messagebox.showerror('Magnetometer', str(exc))
-                return
-            ok, error = probe_container_serial_port(port)
-            if not ok:
-                messagebox.showerror(
-                    'Magnetometer',
-                    'Docker cannot open serial port "{}".\n\nReconnect the '
-                    'sensor and recreate the container once with:\n'
-                    'COLMAG_SKIP_BUILD=1 bash ros/docker_setup.sh\n\n{}'.format(
-                        serial_port_label(port), error))
                 return
         cmd = build_interface_command(input_source, port)
         started = self._launch_stage('interface', cmd)
         if started:
             self._interface_notice = None
+
+    def _checked_sensor_port(self, title):
+        """Return the Docker path of the port typed in 'port #', or None."""
+        if self.input_src.get() != 'magnetometer':
+            # Switching the Interface card to magnetometer lists the ports in
+            # the log, so the user can type the right number.
+            self.input_src.set('magnetometer')
+            messagebox.showinfo(
+                title,
+                'Enter the sensor board\'s port number from the log in the '
+                '"port #" field of the main window, then press Start again.')
+            return None
+        port = self.sensor_port.get().strip()
+        if not port:
+            messagebox.showerror(
+                title,
+                'Enter one of the port numbers shown in the Interface log.')
+            return None
+        try:
+            port = resolve_serial_port(port, self._detected_serial_ports)
+        except ValueError as exc:
+            messagebox.showerror(title, str(exc))
+            return None
+        ok, error = probe_container_serial_port(port)
+        if not ok:
+            messagebox.showerror(
+                title,
+                'Docker cannot open serial port "{}".\n\nReconnect the '
+                'sensor and recreate the container once with:\n'
+                'COLMAG_SKIP_BUILD=1 bash ros/docker_setup.sh\n\n{}'.format(
+                    serial_port_label(port), error))
+            return None
+        return port
+
+    def _sensor_in_use(self):
+        """Name of the program holding the sensor board, or None."""
+        _, processes = in_container(
+            "pgrep -af '[m]agnetometer_reader.py|[r]ecord_tracking_error.py' "
+            "|| true", timeout=5)
+        if 'record_tracking_error' in processes:
+            return 'The tracking-error recorder'
+        if 'magnetometer_reader' in processes:
+            return 'The interface'
+        return None
+
+    def start_character_recording(self, participant_id, height_mm):
+        """Data window: record digits and letters for one participant."""
+        if not self._pipeline_action_ready() or not self._ensure_container():
+            return
+        busy = self._sensor_in_use()
+        if busy:
+            messagebox.showwarning(
+                'Sensor board busy',
+                '{} is already running. Close it or press Stop all '
+                'first.'.format(busy))
+            return
+        port = self._checked_sensor_port('Data collection')
+        if not port:
+            return
+        session_id = dataset.next_session_id(DATA_DIR, participant_id)
+        # Create the folder from here so it belongs to you, not to root
+        # inside Docker.
+        os.makedirs(os.path.join(
+            REPO_DIR, dataset.session_output_dir(participant_id, session_id)),
+            exist_ok=True)
+        cmd = build_record_command(port, participant_id, session_id, height_mm)
+        if self._launch_stage('interface', cmd):
+            self._interface_notice = None
+
+    def start_tracking_error(self, magnet, magnet_offset_mm, heights_mm):
+        """Data window: run the tracking-error recorder in a terminal."""
+        try:
+            magnet, offset, heights = parse_tracking_settings(
+                magnet, magnet_offset_mm, heights_mm)
+        except ValueError as exc:
+            messagebox.showerror('Tracking error', str(exc))
+            return
+        if not self._pipeline_action_ready() or not self._ensure_container():
+            return
+        busy = self._sensor_in_use()
+        if busy:
+            messagebox.showwarning(
+                'Sensor board busy',
+                '{} is already running. Close it or press Stop all '
+                'first.'.format(busy))
+            return
+        port = self._checked_sensor_port('Tracking error')
+        if not port:
+            return
+        run_id = datetime.now().strftime('run_%Y%m%d_%H%M%S')
+        cmd = build_tracking_command(port, magnet, offset, heights, run_id)
+        terminal = find_terminal()
+        if terminal is None:
+            messagebox.showerror(
+                'No terminal found',
+                'Run this in a terminal instead:\n\ndocker exec -it {} bash '
+                '-lc {}'.format(CONTAINER, shlex.quote(cmd)))
+            return
+        os.makedirs(os.path.join(REPO_DIR, dataset.tracking_output_dir(run_id)),
+                    exist_ok=True)
+        try:
+            subprocess.Popen(build_terminal_argv(terminal, cmd),
+                             start_new_session=True)
+        except OSError as exc:
+            messagebox.showerror('Tracking error', str(exc))
+            return
+        self._replace_log(
+            'Tracking-error run {} opened in a new {} window. Follow the '
+            'prompts there.'.format(run_id, terminal))
 
     def stop_all(self):
         self._begin_pipeline_cleanup('manual')

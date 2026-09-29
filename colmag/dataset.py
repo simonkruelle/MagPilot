@@ -1,0 +1,233 @@
+"""Participants and coverage counts for the MagPilot data collection.
+
+Everything lives in one folder next to the code that git ignores:
+
+    data_collection/
+      participants.json                  who took part (IDs only, no names)
+      characters/P03/S01/...             magnetometer_reader.py --record-data output
+      tracking_error/<run_id>/...        tools/record_tracking_error.py output
+
+The launcher's Data window uses these functions. They only use the standard
+library, so they can be tested without a display or the sensor board.
+"""
+
+import json
+import os
+import re
+import tempfile
+from datetime import date
+
+
+DATA_DIR_NAME = 'data_collection'
+CHARACTERS_DIR = 'characters'
+TRACKING_DIR = 'tracking_error'
+PARTICIPANTS_FILE = 'participants.json'
+SCHEMA_VERSION = 1
+
+DIGITS = tuple('0123456789')
+LETTERS = tuple('ABCDEFGHIJ')
+TARGET_REPS = 10
+HEIGHTS_MM = (0, 10, 50, 100, 150, 200)
+HANDS = ('right', 'left')
+AGE_BANDS = ('not given', '18-24', '25-34', '35-44', '45-54', '55+')
+
+PARTICIPANT_ID = re.compile(r'^P\d{2,}$')
+SESSION_ID = re.compile(r'^S\d{2,}$')
+
+
+# ── Participants ────────────────────────────────────────────────────────────
+
+def load_participants(data_dir):
+    """Return the participant list; an empty list if the file does not exist.
+
+    A damaged file raises ValueError instead of being silently reset, so no
+    participant is ever lost by saving over it.
+    """
+    path = os.path.join(data_dir, PARTICIPANTS_FILE)
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError('{} cannot be read: {}'.format(path, exc))
+    if payload.get('schema_version') != SCHEMA_VERSION:
+        raise ValueError('{} has an unknown schema_version {!r}'.format(
+            path, payload.get('schema_version')))
+    return list(payload.get('participants', []))
+
+
+def save_participants(data_dir, participants):
+    """Write participants.json atomically, sorted by ID."""
+    os.makedirs(data_dir, exist_ok=True)
+    payload = {
+        'schema_version': SCHEMA_VERSION,
+        'participants': sorted(participants, key=lambda p: p['participant_id']),
+    }
+    fd, temporary_path = tempfile.mkstemp(
+        prefix='.participants.', suffix='.tmp', dir=data_dir)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, indent=2)
+            f.write('\n')
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary_path, os.path.join(data_dir, PARTICIPANTS_FILE))
+    except Exception:
+        try:
+            os.unlink(temporary_path)
+        except OSError:
+            pass
+        raise
+
+
+def next_participant_id(participants, seen_ids=()):
+    """Return the next free ID (P01, P02, ...), never reusing one seen before."""
+    numbers = [0]
+    for participant_id in [p['participant_id'] for p in participants] + list(seen_ids):
+        if participant_id and PARTICIPANT_ID.match(participant_id):
+            numbers.append(int(participant_id[1:]))
+    return 'P{:02d}'.format(max(numbers) + 1)
+
+
+def new_participant(participant_id):
+    """Return a fresh participant record with default values."""
+    return {
+        'participant_id': participant_id,
+        'created_at': date.today().isoformat(),
+        'handedness': HANDS[0],
+        'age_band': AGE_BANDS[0],
+        'consent': False,
+        'consent_date': None,
+        'excluded': False,
+        'notes': '',
+    }
+
+
+# ── Recorded characters ─────────────────────────────────────────────────────
+
+def character_of(label):
+    """'digit_3' -> '3', 'letter_A' -> 'A'; None for anything outside the dataset."""
+    kind, _, char = str(label).partition('_')
+    if kind == 'digit' and char in DIGITS:
+        return char
+    if kind == 'letter' and char in LETTERS:
+        return char
+    return None
+
+
+def session_output_dir(participant_id, session_id):
+    """Recorder output folder for one session, relative to the repo root."""
+    return os.path.join(DATA_DIR_NAME, CHARACTERS_DIR, participant_id, session_id)
+
+
+def next_session_id(data_dir, participant_id):
+    """Return the next free session folder name for a participant (S01, S02, ...)."""
+    participant_dir = os.path.join(data_dir, CHARACTERS_DIR, participant_id)
+    numbers = [0]
+    if os.path.isdir(participant_dir):
+        for name in os.listdir(participant_dir):
+            if SESSION_ID.match(name):
+                numbers.append(int(name[1:]))
+    return 'S{:02d}'.format(max(numbers) + 1)
+
+
+def scan_samples(data_dir):
+    """Read every recorded take's JSON file.
+
+    Returns (samples, problems). Each sample is a dict with participant_id,
+    session_id, height_mm and char. problems counts what was skipped, so the
+    Data window can say why a take is missing from the table.
+    """
+    samples = []
+    problems = {}
+    seen_basenames = set()
+
+    def skip(reason):
+        problems[reason] = problems.get(reason, 0) + 1
+
+    root = os.path.join(data_dir, CHARACTERS_DIR)
+    for folder, _, filenames in os.walk(root):
+        if os.path.basename(os.path.dirname(folder)) != 'samples':
+            continue
+        for filename in sorted(filenames):
+            if not filename.endswith('.json'):
+                continue
+            json_path = os.path.join(folder, filename)
+            try:
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    take = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                skip('unreadable')  # also happens while a take is being saved
+                continue
+            char = character_of(take.get('label'))
+            if char is None:
+                skip('other label')
+                continue
+            if take.get('input_source') != 'serial':
+                skip('not from the sensor board')
+                continue
+            if not take.get('sample_count'):
+                skip('empty')
+                continue
+            if not os.path.exists(os.path.splitext(json_path)[0] + '.csv'):
+                skip('no CSV')
+                continue
+            basename = take.get('basename') or filename
+            if basename in seen_basenames:
+                skip('duplicate')
+                continue
+            seen_basenames.add(basename)
+            height_mm = take.get('height_mm')
+            if height_mm is None:
+                skip('no height (counted as 0 mm)')
+                height_mm = 0
+            samples.append({
+                'participant_id': take.get('participant_id') or 'unassigned',
+                'session_id': take.get('session_id'),
+                'height_mm': height_mm,
+                'char': char,
+            })
+    return samples, problems
+
+
+def count_coverage(samples, chars, height_mm):
+    """Return {participant_id: {char: number of takes}} at one height."""
+    coverage = {}
+    for sample in samples:
+        if sample['char'] not in chars or float(sample['height_mm']) != float(height_mm):
+            continue
+        counts = coverage.setdefault(sample['participant_id'], {})
+        counts[sample['char']] = counts.get(sample['char'], 0) + 1
+    return coverage
+
+
+# ── Tracking error runs ─────────────────────────────────────────────────────
+
+def tracking_output_dir(run_id):
+    """Tracking recorder output folder for one run, relative to the repo root."""
+    return os.path.join(DATA_DIR_NAME, TRACKING_DIR, run_id)
+
+
+def list_tracking_runs(data_dir):
+    """Return one summary dict per tracking-error run, newest first."""
+    runs = []
+    root = os.path.join(data_dir, TRACKING_DIR)
+    if not os.path.isdir(root):
+        return runs
+    for name in sorted(os.listdir(root), reverse=True):
+        manifest_path = os.path.join(root, name, 'manifest.json')
+        try:
+            with open(manifest_path, 'r', encoding='utf-8') as f:
+                manifest = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        settings = manifest.get('settings') or {}
+        runs.append({
+            'run_id': manifest.get('run_id') or name,
+            'magnet': settings.get('magnet'),
+            'heights_mm': settings.get('heights_mm') or [],
+            'targets': manifest.get('target_count') or 0,
+            'captured': len(manifest.get('sessions', [])),
+        })
+    return runs
