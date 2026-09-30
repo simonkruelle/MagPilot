@@ -1236,10 +1236,11 @@ def choose_port(ports, prompt):
 def explain_port_error(exc):
     """The error text plus a hint for the usual causes."""
     text, errno = str(exc), getattr(exc, 'errno', None)
+    script = os.path.basename(sys.argv[0]) if sys.argv[0].endswith('.py') else 'probe_board.py'
     if errno == 13 or 'Permission denied' in text:
         text += (' -> add yourself to the dialout group (sudo usermod -aG dialout $USER). It '
-                 'only applies after you log in again; until then start the probe with '
-                 'sg dialout -c "python3 tools/probe_board.py ...", or run inside the container')
+                 'only applies after you log in again; until then start it with '
+                 'sg dialout -c "python3 tools/%s"' % script)
     elif errno == 16 or 'busy' in text.lower():
         text += ' -> the port is busy: close the launcher / magnetometer_reader first'
     elif errno == 2 or 'No such file' in text:

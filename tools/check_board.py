@@ -499,6 +499,30 @@ def write_report(r, folder):
 # Recording (only reads from the port, like the probe)
 # --------------------------------------------------------------------------
 
+def replug_access_problem(device):
+    """Why the port could not be opened after a replug, or None if it can.
+
+    A replugged port is a new device file owned by root and a group (dialout on
+    Ubuntu), so only members of that group can open it: sudo chmod on the old
+    file does not carry over. usermod adds you to the group, but a session that
+    is already running only gets it after a new login, or through sg.
+    """
+    try:
+        import grp
+        gid = os.stat(os.path.realpath(device)).st_gid
+        group = grp.getgrgid(gid).gr_name
+        allowed = os.geteuid() == 0 or gid == os.getegid() or gid in os.getgroups()
+    except (ImportError, AttributeError, OSError, KeyError):
+        return None             # not Linux, or no such file: nothing to check here
+    if allowed:
+        return None
+    return ('this session is not in the %s group that owns %s, so the port cannot be opened '
+            'after a replug (sudo chmod does not survive one). Start the check with\n\n'
+            '    sg %s -c "python3 tools/check_board.py"\n\n'
+            'or log out and in again (after sudo usermod -aG %s $USER) and use plain python3.'
+            % (group, device, group, group))
+
+
 def find_board(device, serial_number, list_ports):
     """The board's port now, or None: by USB serial number if known, else the same path."""
     if serial_number:
@@ -580,6 +604,9 @@ def run_check(args, folder, prompt, open_port, list_ports, sleep):
     info = next((p for p in ports if os.path.basename(p['device']) == real), None)
     serial_number = (info or {}).get('serial_number')
     print('  -> using %s: %s' % (device, pb.board_answer(info)['text']))
+    problem = replug_access_problem(device)
+    if problem:
+        raise SystemExit('\nCannot run the check yet: %s' % problem)
     try:
         os.makedirs(folder)
     except OSError as exc:

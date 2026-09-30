@@ -267,7 +267,9 @@ class Analysis(unittest.TestCase):
 
 
 def run_main(argv, open_port, list_ports, prompt=lambda _: ''):
-    with mock.patch.object(cb, 'STEPS', SHORT_STEPS), redirect_stdout(io.StringIO()) as out:
+    with mock.patch.object(cb, 'STEPS', SHORT_STEPS), \
+            mock.patch.object(cb, 'replug_access_problem', lambda device: None), \
+            redirect_stdout(io.StringIO()) as out:
         code = cb.main(argv, prompt=prompt, open_port=open_port, list_ports=list_ports,
                        sleep=lambda _: None)
     return code, out.getvalue()
@@ -330,6 +332,29 @@ class Recorder(unittest.TestCase):
         port, open_ns = cb.open_after_plug(open_port, '/dev/ttyACM0', 921600, lambda _: None)
         self.assertEqual(len(attempts), 2)
         self.assertIsInstance(open_ns, int)
+
+    def test_port_access_that_a_replug_would_lose(self):
+        stat = mock.Mock(st_gid=20)
+        group = mock.Mock(gr_name='dialout')
+        with mock.patch.object(cb.os, 'stat', return_value=stat), \
+                mock.patch('grp.getgrgid', return_value=group), \
+                mock.patch.object(cb.os, 'geteuid', return_value=1000), \
+                mock.patch.object(cb.os, 'getegid', return_value=1000), \
+                mock.patch.object(cb.os, 'getgroups', return_value=[4, 27, 1000]):
+            problem = cb.replug_access_problem('/dev/ttyACM0')
+            with mock.patch.object(cb.os, 'getgroups', return_value=[4, 20, 1000]):
+                self.assertIsNone(cb.replug_access_problem('/dev/ttyACM0'))
+            with mock.patch.object(cb.os, 'getegid', return_value=20):       # under sg dialout
+                self.assertIsNone(cb.replug_access_problem('/dev/ttyACM0'))
+        self.assertIn('not in the dialout group that owns /dev/ttyACM0', problem)
+        self.assertIn('sg dialout -c "python3 tools/check_board.py"', problem)
+        with tempfile.TemporaryDirectory() as out_dir:
+            with mock.patch.object(cb, 'replug_access_problem', lambda device: problem), \
+                    redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as stop:
+                cb.main(['--output-dir', out_dir], prompt=lambda _: '',
+                        list_ports=FakePorts(board('/dev/ttyACM0')), sleep=lambda _: None)
+            self.assertEqual(os.listdir(out_dir), [])
+        self.assertIn('Cannot run the check yet', str(stop.exception))
 
     def test_replay_of_a_wrong_folder(self):
         with tempfile.TemporaryDirectory() as folder:
