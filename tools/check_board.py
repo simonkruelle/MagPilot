@@ -55,7 +55,7 @@ if _TOOLS not in sys.path:
 
 import probe_board as pb  # noqa: E402  (serial access, packet parsing, saturation checks)
 
-TOOL_VERSION = '1.0'
+TOOL_VERSION = '1.1'
 
 # Step durations in seconds.
 START_S = 60.0                  # noise and drift after a fresh baseline
@@ -79,6 +79,7 @@ ROLL_MIN_FIELD_UT = 100.0       # in-plane field needed at a middle sensor to fo
 PLUG_WAIT_S = 120.0             # how long to wait for the cable to come out or go back in
 PLUG_POLL_S = 0.2
 OPEN_RETRY_S = 5.0              # right after plug-in the port may not open yet
+FIRST_PACKET_S = 10.0           # after a replug the first packet came 2 s after opening
 
 # Board layout: 4x4 sensors 35 mm apart (measured 30 Sep 2026: S1 to S13 is 105 mm),
 # numbered column by column: S1-S4 at x = -52.5 mm from +y to -y, ..., S13-S16 at +52.5.
@@ -341,7 +342,10 @@ def analyze_folder(folder):
 
 def start_up_text(info):
     if info['packets'] == 0:
-        return 'no packets: wrong port, or another program is reading it'
+        if info['text']:
+            return ('no packets: the board stopped during its setup after "%s"'
+                    % info['text'][-1].splitlines()[-1])
+        return 'no packets and no setup text: wrong port, or another program was reading it'
     if not info['fresh']:
         return ('NO: no setup text and no zero packets, so the board did not restart and kept '
                 'its old baseline (unplug the cable fully, then plug it back in)')
@@ -574,12 +578,30 @@ def open_after_plug(open_port, device, baudrate, sleep):
             sleep(0.5)
 
 
-def record_cues(port, name, cues, flush):
-    """Record each cue's seconds back to back on one open port, showing the cue first."""
+def no_packets_yet(data, elapsed_ns):
+    """Why to give up when FIRST_PACKET_S after opening no packet has come, else None."""
+    if elapsed_ns < FIRST_PACKET_S * 1e9 or pb.split_packets(data)['packets']:
+        return None
+    lines = [line.strip() for line in data.decode('utf-8', 'replace').splitlines()
+             if line.strip()]
+    if lines:   # e.g. "*** Mux 0 not detected. Program freezing... Check your Wiring. ***"
+        return ('no packets %g s after opening. The board stopped during its setup; its last '
+                'text was "%s". Unplug it, check its wiring, plug it back in and start the '
+                'check again' % (FIRST_PACKET_S, lines[-1]))
+    return ('no packets and no text %g s after opening: another program may be reading the '
+            'port. Close it, replug the board and start the check again' % FIRST_PACKET_S)
+
+
+def record_cues(port, name, cues, flush, stop_if=None):
+    """Record each cue's seconds back to back on one open port, showing the cue first.
+
+    stop_if (see pb.record_step) applies to the first cue only.
+    """
     parts, segments = [], []
     for i, (seconds, text) in enumerate(cues):
         print('  %s>>> %s' % ('\a' if i else '', text))
-        rec = pb.record_step(port, seconds, name, flush=flush and i == 0)
+        rec = pb.record_step(port, seconds, name, flush=flush and i == 0,
+                             stop_if=stop_if if i == 0 else None)
         parts.append(rec)
         segments.append({'cue': text, 'start_ns': rec['start_ns'], 'end_ns': rec['end_ns']})
         if rec['stopped']:
@@ -632,7 +654,8 @@ def run_check(args, folder, prompt, open_port, list_ports, sleep):
                 meta['openings'].append({'step': name, 'device': device, 'open_ns': open_ns})
             else:
                 prompt('  Press Enter to start > ')
-            rec = record_cues(port, name, cues, flush=action == 'keep')
+            rec = record_cues(port, name, cues, flush=action == 'keep',
+                              stop_if=no_packets_yet if action == 'replug' else None)
             pb.save_step(folder, name, rec)
             packets = len(pb.split_packets(rec['data'])['packets'])
             meta['steps'].append({'name': name, 'label': label, 'start_ns': rec['start_ns'],
@@ -642,12 +665,12 @@ def run_check(args, folder, prompt, open_port, list_ports, sleep):
                                   'stopped': rec['stopped']})
             pb.write_json(os.path.join(folder, 'meta.json'), meta)
             if rec['stopped']:
-                print('  Stopped (%s); keeping what was captured.' % rec['stopped'])
+                print('  Stopped: %s. Keeping what was captured.' % rec['stopped'])
                 break
             if action == 'replug':
                 check = start_up(rec['data'], rec['reads'], open_ns)
-                if not check['fresh']:
-                    print('  Warning: fresh start-up %s.' % start_up_text(check))
+                if not check['fresh'] or not check['packets']:
+                    print('  Warning, start-up: %s.' % start_up_text(check))
     except (KeyboardInterrupt, EOFError) as exc:
         if isinstance(exc, EOFError):
             print('\n  Input closed (no keyboard). Keeping what was captured.')

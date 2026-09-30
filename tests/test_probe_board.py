@@ -198,6 +198,17 @@ class FirmwareText(unittest.TestCase):
         split = pb.split_packets(data)
         self.assertEqual([t for _, t in pb.find_text(data, split['skipped'])], ['MagPilot fw 1.2\r\n'])
 
+    def test_short_text_after_which_the_board_stopped_is_kept(self):
+        # Less than one packet long, with or without packets before it (30 Sep replug)
+        error = b'\n*** Mux 0 not detected. Program freezing... Check your Wiring. ***\r\n'
+        for data in (b'\n*** Setup ongoing ***\r\n' + error, packet() * 2 + error):
+            split = pb.split_packets(data)
+            self.assertEqual(split['leftover_bytes'], 0)
+            texts = [t for _, t in pb.find_text(data, split['skipped'])]
+            self.assertEqual(texts[-1], error.lstrip().decode())
+        split = pb.split_packets(packet() * 2 + packet()[:100])
+        self.assertEqual((split['leftover_bytes'], split['skipped']), (100, []))
+
 
 class Timing(unittest.TestCase):
 

@@ -266,8 +266,8 @@ class Analysis(unittest.TestCase):
         self.assertIn('start, weak, strong, replug', answers['Not recorded'])
 
 
-def run_main(argv, open_port, list_ports, prompt=lambda _: ''):
-    with mock.patch.object(cb, 'STEPS', SHORT_STEPS), \
+def run_main(argv, open_port, list_ports, prompt=lambda _: '', steps=SHORT_STEPS):
+    with mock.patch.object(cb, 'STEPS', steps), \
             mock.patch.object(cb, 'replug_access_problem', lambda device: None), \
             redirect_stdout(io.StringIO()) as out:
         code = cb.main(argv, prompt=prompt, open_port=open_port, list_ports=list_ports,
@@ -319,6 +319,34 @@ class Recorder(unittest.TestCase):
         self.assertIn('The board was not unplugged within', output)
         self.assertIn('run the check on the host', output)
         self.assertIn('Nothing was recorded: The board was not unplugged', output)
+
+    def test_replug_that_brings_no_packets_stops_early(self):
+        # Simon's run of 30 Sep: after the replug the firmware gave up on its multiplexer
+        setup = (b'\n*** Setup ongoing ***\r\n\n*** Initialize I2C Network ***\r\n'
+                 b'\n*** done. ***\r\n\n*** Mux 0 not detected. Program freezing... '
+                 b'Check your Wiring. ***\r\n')
+        label, name, action, text, cues = SHORT_STEPS[0]
+        steps = ((label, name, action, text, ((1.5, cues[0][1]),)),) + SHORT_STEPS[1:]
+        ports = FakePorts(board('/dev/ttyACM0'), [], board('/dev/ttyACM0'))
+        with tempfile.TemporaryDirectory() as out_dir, \
+                mock.patch.object(cb, 'FIRST_PACKET_S', 0.2):
+            code, output = run_main(['--output-dir', out_dir],
+                                    lambda device, baudrate: FakeSerial([setup]), ports,
+                                    steps=steps)
+            run = os.path.join(out_dir, os.listdir(out_dir)[0])
+            meta = json.load(open(os.path.join(run, 'meta.json'), encoding='utf-8'))
+        self.assertEqual([s['name'] for s in meta['steps']], ['start'])
+        self.assertTrue(meta['steps'][0]['stopped'].startswith('no packets'))
+        self.assertLess(meta['steps'][0]['end_ns'] - meta['steps'][0]['start_ns'], 1.4e9)
+        self.assertIn('Stopped: no packets', output)
+        self.assertIn('The board stopped during its setup; its last text was "*** Mux 0 not '
+                      'detected. Program freezing... Check your Wiring. ***"', output)
+        self.assertNotIn('Step 2', output)
+        self.assertIn('fresh start-up at step 1: no packets: the board stopped during its setup '
+                      'after "*** Mux 0 not detected.', output)
+        self.assertIn('another program may be reading',
+                      cb.no_packets_yet(b'', 2 * cb.FIRST_PACKET_S * 1e9))
+        self.assertIsNone(cb.no_packets_yet(setup, 0.5 * cb.FIRST_PACKET_S * 1e9))
 
     def test_port_that_opens_on_the_second_try(self):
         attempts = []

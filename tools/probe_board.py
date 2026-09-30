@@ -267,6 +267,13 @@ def split_packets(data):
             continue
         packets.append((last, PACKET_STRUCT.unpack(bytes(data[pos + 1:last]))))
         pos += PACKET_SIZE
+    # Less than a packet is left. Bytes before the next 0xAA are skipped, as above:
+    # that is how text shows up when the board stops after it (a setup that hangs).
+    header = data.find(bytes([PACKET_HEADER]), pos)
+    end = n if header == -1 else header
+    if end > pos:
+        skip(pos, end)
+        pos = end
     first = packets[0][0] - (PACKET_SIZE - 1) if packets else n
     return {'packets': packets, 'resyncs': resyncs, 'skipped': skipped,
             'skipped_bytes': sum(e - s for s, e in skipped),
@@ -1257,12 +1264,14 @@ def open_serial_port(device, baudrate):
         raise RuntimeError('Could not open %s: %s' % (device, explain_port_error(exc)))
 
 
-def record_step(port, seconds, name, flush=False):
+def record_step(port, seconds, name, flush=False, stop_if=None):
     """Read for `seconds`, keeping (monotonic ns, nbytes) per non-empty read. Never writes.
 
     With flush=True it first drops the bytes that piled up on this computer
     while the prompt waited for Enter: they belong to no step. That is a
     host-side flush, the same one pyserial does on every open; nothing is sent.
+    stop_if(data so far, ns since start) is asked once a second; a text it
+    returns ends the step early and becomes 'stopped'.
     """
     chunks, reads, stopped, stale = [], [], None, None
     start = time.monotonic_ns()
@@ -1284,6 +1293,10 @@ def record_step(port, seconds, name, flush=False):
                 total = sum(n for _, n in reads)
                 sys.stdout.write('\r  %s: %2d s left, %d bytes   ' % (name, left, total))
                 sys.stdout.flush()
+                if stop_if:
+                    stopped = stop_if(b''.join(chunks), time.monotonic_ns() - start)
+                    if stopped:
+                        break
     except KeyboardInterrupt:
         stopped = 'ctrl-c'
     except OSError as exc:  # pyserial's SerialException is an OSError
