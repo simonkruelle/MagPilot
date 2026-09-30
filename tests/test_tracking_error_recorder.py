@@ -27,7 +27,7 @@ def test_grid_is_symmetric_and_serpentine():
 
 def test_default_grid_hits_sensors_and_midpoints():
     axis = rte.grid_axis(rte.DEFAULT_GRID_EXTENT_MM, rte.DEFAULT_GRID_SPACING_MM)
-    assert axis == [-56.25, -37.5, -18.75, 0.0, 18.75, 37.5, 56.25]
+    assert axis == [-52.5, -35.0, -17.5, 0.0, 17.5, 35.0, 52.5]
     targets = rte.build_targets(rte.DEFAULT_GRID_SPACING_MM, rte.DEFAULT_GRID_EXTENT_MM,
                                 (15.0,), ((0.0, 0.0),))
     assert len({t['label'] for t in targets}) == 49
@@ -103,7 +103,7 @@ def test_dry_run_creates_manifest_only():
             manifest = json.load(f)
         # 7x7 half-pitch grid over the outer sensors, times 5 heights.
         assert manifest['target_count'] == 245
-        assert manifest['settings']['sensor_pitch_mm'] == 37.5
+        assert manifest['settings']['sensor_pitch_mm'] == 35.0
         assert manifest['settings']['heights_mm'] == [10.0, 50.0, 100.0, 150.0, 200.0]
         assert manifest['sessions'] == []
         assert manifest['settings']['magnet'] == '12x12mm_stack'

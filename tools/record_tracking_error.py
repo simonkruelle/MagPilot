@@ -55,13 +55,14 @@ PACKET_HEADER = 0xAA
 PACKET_TAIL = 0xBB
 PACKET_STRUCT = struct.Struct('<54f')
 
-# Sensor board: 4x4 magnetometers on a 150 x 150 mm board, assumed evenly
-# spaced with half a pitch of margin (37.5 mm pitch, sensors at +/-18.75 and
-# +/-56.25 mm). The default grid uses half the pitch so it alternates between
-# points above sensors and points between them, out to the outer sensors.
+# Sensor board: 4x4 magnetometers on a 150 x 150 mm board, 35 mm apart
+# (measured 30 Sep 2026: 105 mm between the centres of S1 and S13), so the
+# sensors sit at +/-17.5 and +/-52.5 mm. The default grid uses half the pitch
+# so it alternates between points above sensors and points between them, out
+# to the outer sensors.
 BOARD_SIZE_MM = 150.0
 SENSOR_GRID = 4
-SENSOR_PITCH_MM = BOARD_SIZE_MM / SENSOR_GRID
+SENSOR_PITCH_MM = 35.0
 
 TRACKING_MANIFEST_SCHEMA_VERSION = 1
 TRACKING_TASK = 'magnet_tracking_error'
@@ -650,10 +651,10 @@ def build_parser():
                         help='Defaults to data/tracking_YYYY-MM-DD/')
     parser.add_argument('--run-id', default=None, help='Defaults to run_YYYYmmdd_HHMMSS')
     parser.add_argument('--grid-spacing-mm', type=float, default=DEFAULT_GRID_SPACING_MM,
-                        help='Default: half the sensor pitch (18.75 mm)')
+                        help=f'Default: half the sensor pitch ({DEFAULT_GRID_SPACING_MM:g} mm)')
     parser.add_argument('--grid-extent-mm', type=float, default=DEFAULT_GRID_EXTENT_MM,
                         help='Grid runs from -extent to +extent on x and y; '
-                             'default: the outer sensor row (56.25 mm)')
+                             f'default: the outer sensor row ({DEFAULT_GRID_EXTENT_MM:g} mm)')
     parser.add_argument('--heights-mm', type=parse_float_list,
                         default=DEFAULT_HEIGHTS_MM,
                         help='Comma-separated surface heights above the sensors '
