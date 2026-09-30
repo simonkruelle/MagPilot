@@ -48,6 +48,8 @@ def start_rows(rng):
     return zeros + noise_rows(int(58 * RATE_HZ), rng)
 
 
+
+
 def weak_rows(rng):
     rows = noise_rows(int(70 * RATE_HZ), rng)
     for i, row in enumerate(rows[:int(10 * RATE_HZ)]):
@@ -116,23 +118,30 @@ def write_folder(folder, steps):
     pb.write_json(os.path.join(folder, 'meta.json'), meta)
 
 
-def full_check(folder, replug_prefix=b'*** Setup ongoing ***\r\nEnd of Program Setup\r\n',
-               replug_zeros=1):
+def full_check(folder, already_running=False):
+    """The board starts when the check opens the port; or it was already running (no setup
+    text, no zero packets) and carries a 20 uT offset on S5's Bx from before, in every step."""
     rng = random.Random(1)
-    banner = b'*** Setup ongoing ***\r\nMux 0 detected\r\nEnd of Program Setup\r\n'
-    replug_rows = [[0.0] * 54 for _ in range(replug_zeros)] + noise_rows(int(29 * RATE_HZ), rng)
-    write_folder(folder, [
-        {'name': 'start', 'rows': start_rows(rng), 't0': 2.0, 'open_s': 0.0, 'prefix': banner,
-         'prefix_s': 0.9, 'cues': [('away', 60.0)]},
+    if already_running:
+        start = {'rows': noise_rows(int(60 * RATE_HZ), rng), 't0': 0.01}
+    else:
+        start = {'rows': start_rows(rng), 't0': 2.0, 'prefix_s': 0.9,
+                 'prefix': b'*** Setup ongoing ***\r\nMux 0 detected\r\nEnd of Program Setup\r\n'}
+    start.update(name='start', open_s=0.0, cues=[('away', 60.0)])
+    steps = [
+        start,
         {'name': 'weak', 'rows': weak_rows(rng), 't0': 80.0,
          'cues': [('hold 3 cm', 10.0), ('away', 60.0)]},
         {'name': 'strong', 'rows': strong_rows(rng), 't0': 160.0,
          'cues': [('hold on the cover', 10.0), ('away', 120.0)]},
-        {'name': 'replug', 'rows': replug_rows, 't0': 402.0, 'open_s': 400.0,
-         'prefix': replug_prefix, 'prefix_s': 400.8, 'cues': [('away', 30.0)]},
-        {'name': 'roll', 'rows': roll_rows(), 't0': 450.0,
+        {'name': 'roll', 'rows': roll_rows(), 't0': 300.0,
          'cues': [('hold', 5.0), ('roll', 10.0), ('hold', 5.0)]},
-    ])
+    ]
+    if already_running:
+        for step in steps:
+            for row in step['rows']:
+                row[3 * 4] += 20.0
+    write_folder(folder, steps)
 
 
 class FakeSerial:
@@ -187,8 +196,8 @@ def board(device):
              'serial_number': '18143760', 'by_id': []}]
 
 
-SHORT_STEPS = tuple((label, name, action, text, tuple((0.05, cue) for _, cue in cues))
-                    for label, name, action, text, cues in cb.STEPS)
+SHORT_STEPS = tuple((label, name, text, tuple((0.05, cue) for _, cue in cues))
+                    for label, name, text, cues in cb.STEPS)
 
 
 # --------------------------------------------------------------------------
@@ -225,8 +234,11 @@ class Analysis(unittest.TestCase):
 
     def test_offset_after_a_strong_field_only(self):
         r, answers, report = self.answers()
-        start = answers['Stylus away, fresh baseline']
-        self.assertIn('fresh start-up at step 1: yes (setup text, 2 zero packet(s))', start)
+        start = answers['Stylus away (zero reference)']
+        self.assertIn('the board started when the check opened it (setup text, 2 zero '
+                      'packet(s)), so its baseline is fresh', start)
+        self.assertRegex(start, r'stylus-away readings: largest 0\.\d+ uT \(S\d+\), so they '
+                                r'are at zero')
         self.assertRegex(start, r'noise (0\.9\d|1(\.0\d)?) uT \(X/Y\)')
         weak = answers['After a weak field (3 cm above the cover)']
         self.assertIn('no clear offset (every sensor under 3 uT)', weak)
@@ -237,8 +249,6 @@ class Analysis(unittest.TestCase):
         self.assertRegex(strong, r'fading: S7 2[1-3](\.\d+)? uT 10-30 s after, '
                                  r'(19|20)(\.\d+)? uT in the last 20 s \(-1\d %\)')
         self.assertEqual(r['strong']['reference'], 'weak')
-        replug = answers['Replug (new baseline)']
-        self.assertIn('fresh start-up: yes (setup text, 1 zero packet(s))', replug)
         roll = answers['Magnet direction (roll)']
         self.assertIn('the magnet direction is 80 deg from vertical and turned by 360 deg', roll)
         self.assertIn('middle sensors turned by 360 deg; the stylus position moved 0 mm', roll)
@@ -248,10 +258,14 @@ class Analysis(unittest.TestCase):
         s7 = [line for line in report.splitlines() if line.startswith('| S7 |')][0]
         self.assertIn('| yes |', s7)
 
-    def test_replug_without_a_restart_is_flagged(self):
-        _, answers, _ = self.answers(replug_prefix=b'', replug_zeros=0)
-        self.assertIn('fresh start-up: NO: no setup text and no zero packets',
-                      answers['Replug (new baseline)'])
+    def test_board_that_was_already_running(self):
+        _, answers, _ = self.answers(already_running=True)
+        start = answers['Stylus away (zero reference)']
+        self.assertIn('the board was already running, so its baseline is from when it started',
+                      start)
+        self.assertRegex(start, r'largest (19|20|21)(\.\d)? uT \(S5\), so the board carries an '
+                                r'offset from before')
+        self.assertIn('no clear offset', answers['After a weak field (3 cm above the cover)'])
 
     def test_upright_magnet_points_along_the_stylus(self):
         rows = roll_rows()
@@ -263,126 +277,121 @@ class Analysis(unittest.TestCase):
             answers = dict(cb.analyze_folder(folder)['answers'])
         self.assertIn('3 deg from vertical: it points along the stylus', answers[
             'Magnet direction (roll)'])
-        self.assertIn('start, weak, strong, replug', answers['Not recorded'])
+        self.assertEqual('start, weak, strong', answers['Not recorded'])
 
 
-def run_main(argv, open_port, list_ports, prompt=lambda _: '', steps=SHORT_STEPS):
+def run_main(argv, open_port, list_ports, prompt=lambda _: '', steps=SHORT_STEPS, readers=()):
     with mock.patch.object(cb, 'STEPS', steps), \
-            mock.patch.object(cb, 'replug_access_problem', lambda device: None), \
+            mock.patch.object(cb, 'other_readers', lambda: list(readers)), \
             redirect_stdout(io.StringIO()) as out:
-        code = cb.main(argv, prompt=prompt, open_port=open_port, list_ports=list_ports,
-                       sleep=lambda _: None)
+        code = cb.main(argv, prompt=prompt, open_port=open_port, list_ports=list_ports)
     return code, out.getvalue()
+
+
+# Simon's run of 30 Sep: after a replug the firmware gave up on its multiplexer
+MUX_FAILURE = (b'\n*** Setup ongoing ***\r\n\n*** Initialize I2C Network ***\r\n'
+               b'\n*** done. ***\r\n\n*** Mux 0 not detected. Program freezing... '
+               b'Check your Wiring. ***\r\n')
 
 
 class Recorder(unittest.TestCase):
 
-    def test_full_run_with_two_replugs_never_writes(self):
+    def test_full_run_opens_once_and_never_writes(self):
         rng = random.Random(2)
-        banner = b'*** Setup ongoing ***\r\n'
-        first = [banner] + [packet(row) for row in start_rows(rng)[:40]]
-        second = [banner] + [packet(row) for row in noise_rows(40, rng)]
+        chunks = [b'*** Setup ongoing ***\r\n'] + [packet(row) for row in start_rows(rng)[:40]]
         opened, prompts = [], []
 
         def open_port(device, baudrate):
-            opened.append((device, FakeSerial(first if not opened else second)))
+            opened.append((device, FakeSerial(chunks)))
             return opened[-1][1]
 
-        ports = FakePorts(board('/dev/ttyACM0'), [], board('/dev/ttyACM1'), [],
-                          board('/dev/ttyACM0'))
         with tempfile.TemporaryDirectory() as out_dir:
-            code, output = run_main(['--output-dir', out_dir], open_port, ports,
+            code, output = run_main(['--output-dir', out_dir], open_port,
+                                    FakePorts(board('/dev/ttyACM0')),
                                     prompt=lambda text: prompts.append(text) or '')
             run = os.path.join(out_dir, os.listdir(out_dir)[0])
             meta = json.load(open(os.path.join(run, 'meta.json'), encoding='utf-8'))
             files = sorted(os.listdir(run))
         self.assertEqual(code, 0, output)
-        self.assertEqual([d for d, _ in opened], ['/dev/ttyACM1', '/dev/ttyACM0'])
-        self.assertTrue(all(port.closed for _, port in opened))
-        self.assertEqual([s['name'] for s in meta['steps']],
-                         ['start', 'weak', 'strong', 'replug', 'roll'])
-        self.assertEqual([len(s['segments']) for s in meta['steps']], [1, 2, 2, 1, 3])
-        self.assertIn('Unplug the board', output)
-        self.assertIn('Plugged in as /dev/ttyACM1', prompts[0])
+        self.assertEqual([d for d, _ in opened], ['/dev/ttyACM0'])
+        self.assertTrue(opened[0][1].closed)
+        self.assertEqual([s['name'] for s in meta['steps']], ['start', 'weak', 'strong', 'roll'])
+        self.assertEqual([len(s['segments']) for s in meta['steps']], [1, 2, 2, 3])
+        self.assertEqual(meta['steps'][0]['open_ns'], meta['open_ns'])
+        self.assertIn('Put the stylus at least 1 m away', prompts[0])
+        self.assertEqual(len(prompts), 4)       # before the open, then steps 2-4
+        self.assertNotIn('nplug', output)
         self.assertIn('\a>>> Take the stylus away', output)
         self.assertIn('report.md', files)
         self.assertIn('strong.bin', files)
         self.assertIn('Please zip this folder and send it', output)
 
-    def test_replug_that_never_happens(self):
-        ports = FakePorts(board('/dev/ttyACM0'))
-        with tempfile.TemporaryDirectory() as out_dir, \
-                mock.patch.object(cb, 'PLUG_WAIT_S', 0.01):
-            code, output = run_main(['--output-dir', out_dir],
-                                    lambda device, baudrate: FakeSerial([]), ports)
-        self.assertEqual(code, 1)
-        self.assertIn('The board was not unplugged within', output)
-        self.assertIn('run the check on the host', output)
-        self.assertIn('Nothing was recorded: The board was not unplugged', output)
-
-    def test_replug_that_brings_no_packets_stops_early(self):
-        # Simon's run of 30 Sep: after the replug the firmware gave up on its multiplexer
-        setup = (b'\n*** Setup ongoing ***\r\n\n*** Initialize I2C Network ***\r\n'
-                 b'\n*** done. ***\r\n\n*** Mux 0 not detected. Program freezing... '
-                 b'Check your Wiring. ***\r\n')
-        label, name, action, text, cues = SHORT_STEPS[0]
-        steps = ((label, name, action, text, ((1.5, cues[0][1]),)),) + SHORT_STEPS[1:]
-        ports = FakePorts(board('/dev/ttyACM0'), [], board('/dev/ttyACM0'))
+    def test_board_that_stops_during_its_start_up(self):
+        label, name, text, cues = SHORT_STEPS[0]
+        steps = ((label, name, text, ((1.5, cues[0][1]),)),) + SHORT_STEPS[1:]
         with tempfile.TemporaryDirectory() as out_dir, \
                 mock.patch.object(cb, 'FIRST_PACKET_S', 0.2):
             code, output = run_main(['--output-dir', out_dir],
-                                    lambda device, baudrate: FakeSerial([setup]), ports,
-                                    steps=steps)
+                                    lambda device, baudrate: FakeSerial([MUX_FAILURE]),
+                                    FakePorts(board('/dev/ttyACM0')), steps=steps)
             run = os.path.join(out_dir, os.listdir(out_dir)[0])
             meta = json.load(open(os.path.join(run, 'meta.json'), encoding='utf-8'))
+            answers = dict(cb.analyze_folder(run)['answers'])
+        self.assertEqual(code, 1)
         self.assertEqual([s['name'] for s in meta['steps']], ['start'])
         self.assertTrue(meta['steps'][0]['stopped'].startswith('no packets'))
         self.assertLess(meta['steps'][0]['end_ns'] - meta['steps'][0]['start_ns'], 1.4e9)
-        self.assertIn('Stopped: no packets', output)
-        self.assertIn('The board stopped during its setup; its last text was "*** Mux 0 not '
-                      'detected. Program freezing... Check your Wiring. ***"', output)
+        self.assertIn('Stopped: no packets since the port opened: the board stopped during its '
+                      'start-up; its last text was "*** Mux 0 not detected. Program '
+                      'freezing... Check your Wiring. ***". Unplug the board', output)
         self.assertNotIn('Step 2', output)
-        self.assertIn('fresh start-up at step 1: no packets: the board stopped during its setup '
-                      'after "*** Mux 0 not detected.', output)
-        self.assertIn('another program may be reading',
+        self.assertIn('The board sent no packets, so there is nothing to analyse', output)
+        self.assertIn('no packets: the board stopped during its start-up after "*** Mux 0 not '
+                      'detected.', answers['Stylus away (zero reference)'])
+        self.assertIn('the board is not sending',
                       cb.no_packets_yet(b'', 2 * cb.FIRST_PACKET_S * 1e9))
-        self.assertIsNone(cb.no_packets_yet(setup, 0.5 * cb.FIRST_PACKET_S * 1e9))
+        self.assertIsNone(cb.no_packets_yet(MUX_FAILURE, 0.5 * cb.FIRST_PACKET_S * 1e9))
 
-    def test_port_that_opens_on_the_second_try(self):
-        attempts = []
-
+    def test_launcher_still_reading_stops_before_the_port_opens(self):
         def open_port(device, baudrate):
-            attempts.append(device)
-            if len(attempts) == 1:
-                raise RuntimeError('Could not open %s: Permission denied' % device)
-            return FakeSerial([])
+            raise AssertionError('opened the port')
 
-        port, open_ns = cb.open_after_plug(open_port, '/dev/ttyACM0', 921600, lambda _: None)
-        self.assertEqual(len(attempts), 2)
-        self.assertIsInstance(open_ns, int)
-
-    def test_port_access_that_a_replug_would_lose(self):
-        stat = mock.Mock(st_gid=20)
-        group = mock.Mock(gr_name='dialout')
-        with mock.patch.object(cb.os, 'stat', return_value=stat), \
-                mock.patch('grp.getgrgid', return_value=group), \
-                mock.patch.object(cb.os, 'geteuid', return_value=1000), \
-                mock.patch.object(cb.os, 'getegid', return_value=1000), \
-                mock.patch.object(cb.os, 'getgroups', return_value=[4, 27, 1000]):
-            problem = cb.replug_access_problem('/dev/ttyACM0')
-            with mock.patch.object(cb.os, 'getgroups', return_value=[4, 20, 1000]):
-                self.assertIsNone(cb.replug_access_problem('/dev/ttyACM0'))
-            with mock.patch.object(cb.os, 'getegid', return_value=20):       # under sg dialout
-                self.assertIsNone(cb.replug_access_problem('/dev/ttyACM0'))
-        self.assertIn('not in the dialout group that owns /dev/ttyACM0', problem)
-        self.assertIn('sg dialout -c "python3 tools/check_board.py"', problem)
         with tempfile.TemporaryDirectory() as out_dir:
-            with mock.patch.object(cb, 'replug_access_problem', lambda device: problem), \
-                    redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as stop:
-                cb.main(['--output-dir', out_dir], prompt=lambda _: '',
-                        list_ports=FakePorts(board('/dev/ttyACM0')), sleep=lambda _: None)
+            with self.assertRaises(SystemExit) as stop:
+                run_main(['--output-dir', out_dir], open_port, FakePorts(board('/dev/ttyACM0')),
+                         readers=['magnetometer_reader.py'])
             self.assertEqual(os.listdir(out_dir), [])
-        self.assertIn('Cannot run the check yet', str(stop.exception))
+        self.assertIn('magnetometer_reader.py is running and reads the board', str(stop.exception))
+
+    def test_port_that_cannot_be_opened(self):
+        def open_port(device, baudrate):
+            raise RuntimeError('Could not open %s: Permission denied' % device)
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            with self.assertRaises(SystemExit) as stop:
+                run_main(['--output-dir', out_dir], open_port, FakePorts(board('/dev/ttyACM0')))
+            self.assertEqual(os.listdir(out_dir), [])
+        self.assertIn('Cannot run the check: Could not open /dev/ttyACM0: Permission denied',
+                      str(stop.exception))
+
+    def test_other_readers_are_found_by_their_command_line(self):
+        commands = {'101': b'python3\0magnetometer_reader.py\0--port\0/dev/ttyACM0\0',
+                    '102': b'docker\0exec\0colmag_simon\0bash\0-lc\0cd /colmag && python3 '
+                           b'tools/record_tracking_error.py --port /dev/ttyACM0\0',
+                    '103': b'sg\0dialout\0-c\0python3 tools/check_board.py\0',
+                    '104': b'bash\0-lc\0pgrep -af \'[m]agnetometer_reader.py\'\0',
+                    '105': b'nano\0magnetometer_reader.py\0',
+                    '106': b'python3\0-m\0pytest\0tests/test_magnetometer_reader.py\0',
+                    'self': b'python3\0probe_board.py\0'}
+        with tempfile.TemporaryDirectory() as proc:
+            for pid, command in commands.items():
+                os.makedirs(os.path.join(proc, pid))
+                with open(os.path.join(proc, pid, 'cmdline'), 'wb') as handle:
+                    handle.write(command)
+            os.makedirs(os.path.join(proc, '107'))      # ended: no cmdline left
+            self.assertEqual(cb.other_readers(proc),
+                             ['magnetometer_reader.py', 'record_tracking_error.py'])
+        self.assertEqual(cb.other_readers(os.path.join(proc, 'gone')), [])
 
     def test_replay_of_a_wrong_folder(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -5,37 +5,36 @@ The board probe (tools/probe_board.py, 29 Sep 2026) found that after the stylus
 had been on the cover, the readings kept a steady 5-31 uT offset although the
 stylus was 1 m away. For writing that is tiny, but far above the board the
 stylus field is only a few uT, so it matters for the tracking-error study.
-This check measures it in a controlled way, in about 6 minutes:
+This check measures it in a controlled way, in about 5 minutes:
 
-  1 start   replug the board (fresh baseline), stylus away: 60 s of noise and drift
+  1 start   stylus at least 1 m away for 60 s: noise, drift and the zero reference
   2 weak    stylus 3 cm above the cover for 10 s, then 1 m away for 60 s
   3 strong  stylus on the cover above a middle sensor for 10 s, then away for 120 s
-  4 replug  replug again (new baseline), stylus away: 30 s
-  5 roll    stylus upright on the centre, rolled one full turn about its own axis
+  4 roll    stylus upright on the centre, rolled one full turn about its own axis
 
 It answers: does a weak or a strong field leave an offset, how big, on which
-sensors, does it fade, does a fresh baseline clear it, and does the magnet
-point along the stylus or across it.
+sensors, does it fade, and does the magnet point along the stylus or across it.
 
-READ-ONLY like the probe: nothing is ever written to the board. The board
-takes its baseline once, when the port is first opened after power-up, so the
-check asks you to unplug and replug the USB cable (twice) and notices when you
-do. Run it on the host: inside the container a replug is not visible.
+READ-ONLY like the probe: nothing is ever written to the board, and the board
+stays plugged in. It may already be running (started by the launcher), or it
+starts when the check opens the port and takes its baseline then, so the
+stylus has to be away before you press Enter. Every offset is measured against
+the check's own stylus-away minute, so either way works.
 
 Each run writes one folder named by local time (data_collection/ is gitignored):
 
-    <output_dir>/<YYYYmmdd_HHMMSS>/meta.json         ports, open times, steps, cue times
+    <output_dir>/<YYYYmmdd_HHMMSS>/meta.json         port, open time, steps, cue times
     <output_dir>/<YYYYmmdd_HHMMSS>/<step>.bin        every raw byte received
     <output_dir>/<YYYYmmdd_HHMMSS>/<step>_reads.csv  t_ns,nbytes of each read
     <output_dir>/<YYYYmmdd_HHMMSS>/report.md         answers and a per-sensor table
     <output_dir>/<YYYYmmdd_HHMMSS>/report.json       all numbers
 
-Close the launcher and magnetometer_reader first. Your access to the port must
-survive a replug: the dialout group does (after a new login, or start the check
-with sg dialout -c "python3 tools/check_board.py"); sudo chmod on the port does not.
+Close the launcher's Interface and any recording first: the check needs the
+port for itself (it stops and tells you if one is still running).
 
-Usage on the host:
-  python3 tools/check_board.py
+Usage on the host (sg dialout -c "..." as long as your session is not in the
+dialout group yet; plain python3 after a new login):
+  sg dialout -c "python3 tools/check_board.py"
   python3 tools/check_board.py --replay data_collection/board_check/20260930_120000
 """
 
@@ -55,17 +54,17 @@ if _TOOLS not in sys.path:
 
 import probe_board as pb  # noqa: E402  (serial access, packet parsing, saturation checks)
 
-TOOL_VERSION = '1.1'
+TOOL_VERSION = '1.2'
 
 # Step durations in seconds.
-START_S = 60.0                  # noise and drift after a fresh baseline
+START_S = 60.0                  # stylus away: noise, drift and the zero reference
 HOLD_S = 10.0                   # stylus near the board
 WEAK_AWAY_S = 60.0              # stylus away after the weak field
 STRONG_AWAY_S = 120.0           # ...and after the strong field, long enough to see it fade
-REPLUG_S = 30.0
 
 # Analysis windows and thresholds (the report always shows the numbers).
-SETTLE_AFTER_START_S = 2.0      # skip this much after the first non-zero packet of a start-up
+SETTLE_AFTER_START_S = 2.0      # skip this much after the first non-zero packet (start-up,
+                                # or packets the board queued while nothing read the port)
 REFERENCE_S = 30.0              # the last 30 s of 'start' are the zero reference
 DRIFT_WINDOW_S = 10.0           # drift = last 10 s minus first 10 s of a step
 AWAY_SETTLE_S = 10.0            # time to take the stylus away before an offset is measured
@@ -75,11 +74,10 @@ ROLL_MIN_TILT_DEG = 20.0        # a magnet closer to vertical than this points a
 ROLL_FULL_TURN_DEG = 270.0      # a direction that turned this far followed the roll
 ROLL_MIN_FIELD_UT = 100.0       # in-plane field needed at a middle sensor to follow its turn
 
-# Waiting for the replug.
-PLUG_WAIT_S = 120.0             # how long to wait for the cable to come out or go back in
-PLUG_POLL_S = 0.2
-OPEN_RETRY_S = 5.0              # right after plug-in the port may not open yet
-FIRST_PACKET_S = 10.0           # after a replug the first packet came 2 s after opening
+# Opening the port.
+FIRST_PACKET_S = 10.0           # a running board sends at once, a starting one after about 2 s
+READERS = ('magnetometer_reader.py', 'record_tracking_error.py')   # the launcher's programs
+                                # that read the board; the check needs the port alone
 
 # Board layout: 4x4 sensors 35 mm apart (measured 30 Sep 2026: S1 to S13 is 105 mm),
 # numbered column by column: S1-S4 at x = -52.5 mm from +y to -y, ..., S13-S16 at +52.5.
@@ -91,25 +89,21 @@ MIDDLE_SENSORS = (5, 6, 9, 10)  # S6, S7, S10, S11: the four sensors around the 
 AWAY = 'Take the stylus away, at least 1 m, and leave it there.'
 FOLLOW = 'Hold the stylus at least 1 m from the board. After Enter, do what the >>> lines say.'
 
-# (label, name, port action, instruction, cues). 'replug' waits for the cable to be
-# pulled and put back, then opens the port; 'keep' records on the open port. Each cue
-# (seconds, text) is shown when it starts; the cues of a step are recorded back to back.
+# (label, name, instruction, cues). The port is opened once, just before step 1.
+# Each cue (seconds, text) is shown when it starts; the cues of a step are recorded
+# back to back.
 STEPS = (
-    ('1', 'start', 'replug',
-     'The board restarts and takes a fresh baseline while the stylus is far away.',
+    ('1', 'start', 'The zero reference: the stylus stays far away the whole minute.',
      ((START_S, 'Leave the stylus at least 1 m away.'),)),
-    ('2', 'weak', 'keep', FOLLOW,
+    ('2', 'weak', FOLLOW,
      ((HOLD_S, 'Hold the stylus upright about 3 cm above the centre of the cover '
                '(do not touch it).'),
       (WEAK_AWAY_S, AWAY))),
-    ('3', 'strong', 'keep', FOLLOW,
+    ('3', 'strong', FOLLOW,
      ((HOLD_S, 'Hold the stylus upright on the cover, right above one of the four '
                'middle sensors.'),
       (STRONG_AWAY_S, AWAY))),
-    ('4', 'replug', 'replug',
-     'The board restarts again and takes a new baseline: does that clear the offset?',
-     ((REPLUG_S, 'Leave the stylus at least 1 m away.'),)),
-    ('5', 'roll', 'keep',
+    ('4', 'roll',
      'Stand the stylus upright on the cover over the centre. After Enter, do what the '
      '>>> lines say.',
      ((5.0, 'Hold it still, upright.'),
@@ -199,7 +193,7 @@ def load_step(folder, name):
 
 
 def start_up(data, reads, open_ns):
-    """Did the board restart when the port opened? (setup text or zero packets first)"""
+    """Did the board start when the port opened? (setup text or zero packets first)"""
     info, _ = pb.analyze_step(data, reads, open_ns, True)
     early_text = [t['text'].strip() for t in info['text']
                   if t['after_open_s'] is not None and t['after_open_s'] < pb.RESTART_TEXT_S]
@@ -225,12 +219,13 @@ def largest_channel(vector):
 
 
 def analyze_start(step, data, reads, rows, times):
-    """Fresh start-up, noise and drift with the stylus away; returns the zero reference too."""
+    """Start-up, level, noise and drift with the stylus away; returns the zero reference too."""
     out = {'start_up': start_up(data, reads, step.get('open_ns'))}
     rows, times = settled(rows, times)
     reference = window(rows, times, step['end_ns'] - REFERENCE_S * 1e9, step['end_ns'] + 1)
     out['reference_packets'] = len(reference)
     if reference:
+        out['level_lengths_ut'] = sensor_lengths(pb.column_means(reference))
         stds = [pb.mean_std([row[c] for row in reference])[1] for c in range(N_FIELD)]
         out['noise_xy_ut'] = statistics.median(v for c, v in enumerate(stds) if c % 3 != 2)
         out['noise_z_ut'] = statistics.median(stds[2::3])
@@ -265,20 +260,6 @@ def analyze_exposure(step, rows, times, reference, far):
         out['fade_early_ut'] = sensor_lengths(offsets(early, reference))
         out['fade_late_ut'] = sensor_lengths(offsets(late, reference))
     return out, after
-
-
-def analyze_replug(step, data, reads, rows, times):
-    """After a new baseline: are the readings back at zero, and do they drift?"""
-    out = {'start_up': start_up(data, reads, step.get('open_ns'))}
-    rows, times = settled(rows, times)
-    if rows:
-        level = pb.column_means(rows)
-        out['level_lengths_ut'] = sensor_lengths(level)
-    shift = drift(rows, times)
-    if shift:
-        out['drift_ut'] = shift
-        out['drift_largest'] = largest_channel(shift)
-    return out
 
 
 def analyze_roll(step, rows, times):
@@ -328,8 +309,6 @@ def analyze_folder(folder):
         rows, times = loaded['strong'][2:]
         r['strong'], _ = analyze_exposure(steps['strong'], rows, times, before_strong, far)
         r['strong']['reference'] = 'weak' if before_strong is not reference else 'start'
-    if 'replug' in steps:
-        r['replug'] = analyze_replug(steps['replug'], *loaded['replug'])
     if 'roll' in steps:
         r['roll'] = analyze_roll(steps['roll'], *loaded['roll'][2:])
     r['answers'] = build_answers(r)
@@ -343,18 +322,29 @@ def analyze_folder(folder):
 def start_up_text(info):
     if info['packets'] == 0:
         if info['text']:
-            return ('no packets: the board stopped during its setup after "%s"'
+            return ('no packets: the board stopped during its start-up after "%s"'
                     % info['text'][-1].splitlines()[-1])
-        return 'no packets and no setup text: wrong port, or another program was reading it'
+        return 'no packets and no text: the board was not sending'
     if not info['fresh']:
-        return ('NO: no setup text and no zero packets, so the board did not restart and kept '
-                'its old baseline (unplug the cable fully, then plug it back in)')
+        return 'the board was already running, so its baseline is from when it started'
     signs = []
     if info['text']:
         signs.append('setup text')
     if info['zero_packets']:
         signs.append('%d zero packet(s)' % info['zero_packets'])
-    return 'yes (%s)' % ', '.join(signs)
+    return 'the board started when the check opened it (%s), so its baseline is fresh' % (
+        ', '.join(signs))
+
+
+def level_text(lengths):
+    """Are the stylus-away readings at zero? (the baseline is clean, or an offset is left)"""
+    s = max(range(N_SENSORS), key=lambda i: lengths[i])
+    text = 'stylus-away readings: largest %s uT (S%d)' % (pb.fmt(lengths[s], 2), s + 1)
+    if lengths[s] < OFFSET_MIN_UT:
+        return text + ', so they are at zero'
+    return text + (', so the board carries an offset from before (strong fields since it '
+                   'started, or a magnet near it then); the offsets below are measured against '
+                   'this minute, so they still hold')
 
 
 def offset_text(result, what):
@@ -419,14 +409,16 @@ def build_answers(r):
         answers.append(('Recording failed', meta['error']))
     if 'start' in r:
         s = r['start']
-        text = 'fresh start-up at step 1: %s' % start_up_text(s['start_up'])
+        text = start_up_text(s['start_up'])
+        if 'level_lengths_ut' in s:
+            text += '; ' + level_text(s['level_lengths_ut'])
         if 'noise_xy_ut' in s:
             text += '; noise %s uT (X/Y), %s uT (Z)' % (pb.fmt(s['noise_xy_ut'], 2),
                                                        pb.fmt(s['noise_z_ut'], 2))
         if 'drift_largest' in s:
             name, value = s['drift_largest']
             text += '; drift over the minute: largest %s uT (%s)' % (pb.fmt(value, 2), name)
-        answers.append(('Stylus away, fresh baseline', text))
+        answers.append(('Stylus away (zero reference)', text))
     if 'weak' in r:
         answers.append(('After a weak field (3 cm above the cover)', '%s; %s' % (
             exposure_text(r['weak']), offset_text(r['weak'], '10-60 s after'))))
@@ -434,19 +426,9 @@ def build_answers(r):
         what = '10-120 s after (vs. before the strong field)'
         answers.append(('After a strong field (on the cover)', '%s; %s%s' % (
             exposure_text(r['strong']), offset_text(r['strong'], what), fade_text(r['strong']))))
-    if 'replug' in r:
-        p = r['replug']
-        text = 'fresh start-up: %s' % start_up_text(p['start_up'])
-        if 'level_lengths_ut' in p:
-            text += '; readings after the new baseline: largest %s uT' % top_sensors(
-                p['level_lengths_ut'], 1)
-        if 'drift_largest' in p:
-            name, value = p['drift_largest']
-            text += '; drift over 30 s: largest %s uT (%s)' % (pb.fmt(value, 2), name)
-        answers.append(('Replug (new baseline)', text))
     if 'roll' in r:
         answers.append(('Magnet direction (roll)', roll_text(r['roll'])))
-    missing = [name for _, name, _, _, _ in STEPS if name not in r['recorded']]
+    missing = [name for _, name, _, _ in STEPS if name not in r['recorded']]
     if missing:
         answers.append(('Not recorded', ', '.join(missing)))
     return answers
@@ -503,79 +485,21 @@ def write_report(r, folder):
 # Recording (only reads from the port, like the probe)
 # --------------------------------------------------------------------------
 
-def replug_access_problem(device):
-    """Why the port could not be opened after a replug, or None if it can.
-
-    A replugged port is a new device file owned by root and a group (dialout on
-    Ubuntu), so only members of that group can open it: sudo chmod on the old
-    file does not carry over. usermod adds you to the group, but a session that
-    is already running only gets it after a new login, or through sg.
-    """
-    try:
-        import grp
-        gid = os.stat(os.path.realpath(device)).st_gid
-        group = grp.getgrgid(gid).gr_name
-        allowed = os.geteuid() == 0 or gid == os.getegid() or gid in os.getgroups()
-    except (ImportError, AttributeError, OSError, KeyError):
-        return None             # not Linux, or no such file: nothing to check here
-    if allowed:
-        return None
-    return ('this session is not in the %s group that owns %s, so the port cannot be opened '
-            'after a replug (sudo chmod does not survive one). Start the check with\n\n'
-            '    sg %s -c "python3 tools/check_board.py"\n\n'
-            'or log out and in again (after sudo usermod -aG %s $USER) and use plain python3.'
-            % (group, device, group, group))
-
-
-def find_board(device, serial_number, list_ports):
-    """The board's port now, or None: by USB serial number if known, else the same path."""
-    if serial_number:
-        for p in list_ports():
-            if p.get('serial_number') == serial_number:
-                return p['device']
-        return None
-    return device if os.path.exists(device) else None
-
-
-def wait_for(condition, seconds, sleep):
-    """Poll condition() until it returns something truthy; return that (or a falsy value)."""
-    deadline = time.monotonic() + seconds
-    while True:
-        value = condition()
-        if value or time.monotonic() >= deadline:
-            return value
-        sleep(PLUG_POLL_S)
-
-
-def replug(device, serial_number, list_ports, prompt, sleep):
-    """Wait until the board is unplugged and plugged back in; return its port."""
-    print('  >>> Unplug the board\'s USB cable now.')
-    if not wait_for(lambda: find_board(device, serial_number, list_ports) is None,
-                    PLUG_WAIT_S, sleep):
-        raise RuntimeError('The board was not unplugged within %d s. (Inside the container a '
-                           'replug is not visible: run the check on the host.)' % PLUG_WAIT_S)
-    print('  >>> Unplugged. Put the stylus at least 1 m away (another room is best), '
-          'then plug the board back in.')
-    back = wait_for(lambda: find_board(device, serial_number, list_ports), PLUG_WAIT_S, sleep)
-    if not back:
-        raise RuntimeError('The board did not come back within %d s after unplugging.'
-                           % PLUG_WAIT_S)
-    prompt('  Plugged in as %s. With the stylus at least 1 m away, press Enter: the board '
-           'takes its baseline when the port opens > ' % back)
-    return back
-
-
-def open_after_plug(open_port, device, baudrate, sleep):
-    """Open the port, retrying for OPEN_RETRY_S (just after plug-in it may not be ready)."""
-    deadline = time.monotonic() + OPEN_RETRY_S
-    while True:
-        open_ns = time.monotonic_ns()
+def other_readers(proc='/proc'):
+    """The READERS that python runs on this computer now (the launcher's container included)."""
+    found = set()
+    for pid in os.listdir(proc) if os.path.isdir(proc) else ():
+        if not pid.isdigit():
+            continue
         try:
-            return open_port(device, baudrate), open_ns
-        except RuntimeError:
-            if time.monotonic() >= deadline:
-                raise
-            sleep(0.5)
+            with open(os.path.join(proc, pid, 'cmdline'), 'rb') as handle:
+                words = handle.read().decode('utf-8', 'replace').replace('\0', ' ').split()
+        except OSError:
+            continue            # the process just ended, or it is not ours to read
+        names = [os.path.basename(word) for word in words]
+        if any(name.startswith('python') for name in names):    # not an editor, not a test
+            found.update(name for name in names if name in READERS)
+    return sorted(found)
 
 
 def no_packets_yet(data, elapsed_ns):
@@ -585,11 +509,13 @@ def no_packets_yet(data, elapsed_ns):
     lines = [line.strip() for line in data.decode('utf-8', 'replace').splitlines()
              if line.strip()]
     if lines:   # e.g. "*** Mux 0 not detected. Program freezing... Check your Wiring. ***"
-        return ('no packets %g s after opening. The board stopped during its setup; its last '
-                'text was "%s". Unplug it, check its wiring, plug it back in and start the '
-                'check again' % (FIRST_PACKET_S, lines[-1]))
-    return ('no packets and no text %g s after opening: another program may be reading the '
-            'port. Close it, replug the board and start the check again' % FIRST_PACKET_S)
+        return ('no packets since the port opened: the board stopped during its start-up; its '
+                'last text was "%s". Unplug the board, plug it back in and start the check '
+                'again. If this keeps happening, the board itself fails to start (its '
+                'firmware blames the wiring)' % lines[-1])
+    return ('no packets and no text since the port opened: the board is not sending. Its '
+            'start-up may have stopped earlier: unplug the board, plug it back in and start '
+            'the check again')
 
 
 def record_cues(port, name, cues, flush, stop_if=None):
@@ -613,64 +539,72 @@ def record_cues(port, name, cues, flush, stop_if=None):
             'stale_bytes': parts[0]['stale_bytes'], 'segments': segments}
 
 
-def run_check(args, folder, prompt, open_port, list_ports, sleep):
-    """Identify the port, then record each step. Ctrl-C keeps what was captured."""
+def run_check(args, folder, prompt, open_port, list_ports):
+    """Identify and open the port, then record the steps. Ctrl-C keeps what was captured."""
     print('MagPilot board check: offset after a strong field, and the magnet direction.')
-    print('READ-ONLY: nothing is written to the board. About 6 minutes; you will unplug and '
-          'replug the board twice. Ctrl-C stops at any time and keeps what was recorded.')
+    print('READ-ONLY: nothing is written to the board, and it stays plugged in. About 5 '
+          'minutes; Ctrl-C stops at any time and keeps what was recorded.')
     print('\nStep 0 identify:')
     ports = list_ports()
     pb.print_ports(ports)
     device = args.port or pb.choose_port(ports, prompt)
     real = os.path.basename(os.path.realpath(device))
     info = next((p for p in ports if os.path.basename(p['device']) == real), None)
-    serial_number = (info or {}).get('serial_number')
     print('  -> using %s: %s' % (device, pb.board_answer(info)['text']))
-    problem = replug_access_problem(device)
-    if problem:
-        raise SystemExit('\nCannot run the check yet: %s' % problem)
+    readers = other_readers()
+    if readers:
+        raise SystemExit('\nCannot run the check yet: %s is running and reads the board. '
+                         'Close it (its window, or Stop all in the launcher), then start the '
+                         'check again.' % ' and '.join(readers))
+    prompt('  Put the stylus at least 1 m away (another room is best) and leave it there. '
+           'Then press Enter > ')
+    open_ns = time.monotonic_ns()
+    try:
+        port = open_port(device, args.baudrate)
+    except RuntimeError as exc:
+        raise SystemExit('\nCannot run the check: %s' % exc)
     try:
         os.makedirs(folder)
     except OSError as exc:
+        port.close()
         raise SystemExit('Cannot write %s: %s; pass --output-dir somewhere writable.'
                          % (folder, exc))
     print('  Output: %s' % folder)
     meta = {'tool_version': TOOL_VERSION, 'python': sys.version, 'platform': platform.platform(),
             'argv': sys.argv, 'started_local': datetime.now().astimezone().isoformat(),
             'port': device, 'baudrate': args.baudrate, 'port_info': info, 'ports': ports,
-            'openings': [], 'steps': []}
-    pb.write_json(os.path.join(folder, 'meta.json'), meta)
-    port = None
+            'open_ns': open_ns, 'steps': []}
     try:
-        for label, name, action, instruction, cues in STEPS:
-            print('\nStep %s %s (%d s): %s' % (label, name, sum(s for s, _ in cues), instruction))
-            open_ns = None
-            if action == 'replug':
-                if port is not None:
-                    port.close()
-                    port = None
-                device = replug(device, serial_number, list_ports, prompt, sleep)
-                port, open_ns = open_after_plug(open_port, device, args.baudrate, sleep)
-                meta['openings'].append({'step': name, 'device': device, 'open_ns': open_ns})
-            else:
+        record_steps(port, open_ns, folder, meta, prompt)
+    finally:
+        port.close()
+        pb.write_json(os.path.join(folder, 'meta.json'), meta)
+
+
+def record_steps(port, open_ns, folder, meta, prompt):
+    """Record STEPS on the open port and save each step as it ends."""
+    try:
+        for i, (label, name, instruction, cues) in enumerate(STEPS):
+            print('\nStep %s %s (%d s): %s' % (label, name, sum(s for s, _ in cues),
+                                               instruction))
+            if i:
                 prompt('  Press Enter to start > ')
-            rec = record_cues(port, name, cues, flush=action == 'keep',
-                              stop_if=no_packets_yet if action == 'replug' else None)
+            # Step 1 starts right after the port opened and keeps everything from then on,
+            # start-up text included; it stops early if the board sends no packets.
+            rec = record_cues(port, name, cues, flush=i > 0,
+                              stop_if=None if i else no_packets_yet)
+            if not i and not rec['stopped']:        # (a step 1 shorter than FIRST_PACKET_S)
+                rec['stopped'] = no_packets_yet(rec['data'], float('inf'))
             pb.save_step(folder, name, rec)
-            packets = len(pb.split_packets(rec['data'])['packets'])
             meta['steps'].append({'name': name, 'label': label, 'start_ns': rec['start_ns'],
-                                  'end_ns': rec['end_ns'], 'open_ns': open_ns,
-                                  'opened_here': action == 'replug', 'packets': packets,
+                                  'end_ns': rec['end_ns'], 'open_ns': None if i else open_ns,
+                                  'packets': len(pb.split_packets(rec['data'])['packets']),
                                   'segments': rec['segments'], 'stale_bytes': rec['stale_bytes'],
                                   'stopped': rec['stopped']})
             pb.write_json(os.path.join(folder, 'meta.json'), meta)
             if rec['stopped']:
-                print('  Stopped: %s. Keeping what was captured.' % rec['stopped'])
+                print('  Stopped: %s.' % rec['stopped'])
                 break
-            if action == 'replug':
-                check = start_up(rec['data'], rec['reads'], open_ns)
-                if not check['fresh'] or not check['packets']:
-                    print('  Warning, start-up: %s.' % start_up_text(check))
     except (KeyboardInterrupt, EOFError) as exc:
         if isinstance(exc, EOFError):
             print('\n  Input closed (no keyboard). Keeping what was captured.')
@@ -679,10 +613,6 @@ def run_check(args, folder, prompt, open_port, list_ports, sleep):
     except RuntimeError as exc:
         print('  ' + str(exc))
         meta['error'] = str(exc)
-    finally:
-        if port is not None:
-            port.close()
-        pb.write_json(os.path.join(folder, 'meta.json'), meta)
 
 
 # --------------------------------------------------------------------------
@@ -702,8 +632,7 @@ def build_parser():
     return parser
 
 
-def main(argv=None, prompt=input, open_port=pb.open_serial_port, list_ports=pb.list_port_info,
-         sleep=time.sleep):
+def main(argv=None, prompt=input, open_port=pb.open_serial_port, list_ports=pb.list_port_info):
     args = build_parser().parse_args(argv)
     folder = args.replay
     if folder and not os.path.exists(os.path.join(folder, 'meta.json')):
@@ -713,7 +642,7 @@ def main(argv=None, prompt=input, open_port=pb.open_serial_port, list_ports=pb.l
         while os.path.exists(folder):
             folder += '_2'
         try:
-            run_check(args, folder, prompt, open_port, list_ports, sleep)
+            run_check(args, folder, prompt, open_port, list_ports)
         except (KeyboardInterrupt, EOFError):
             pass
         if not os.path.exists(os.path.join(folder, 'meta.json')):
@@ -722,6 +651,9 @@ def main(argv=None, prompt=input, open_port=pb.open_serial_port, list_ports=pb.l
     meta = pb.read_json(os.path.join(folder, 'meta.json'))
     if not meta.get('steps'):
         print('\nNothing was recorded%s' % (': ' + meta['error'] if meta.get('error') else '.'))
+        return 1
+    if not any(step.get('packets') for step in meta['steps']):
+        print('\nThe board sent no packets, so there is nothing to analyse or send.')
         return 1
     answers = write_report(analyze_folder(folder), folder)
     print('\nAnswers\n%s\n\nReport: %s\nPlease zip this folder and send it: %s' % (
