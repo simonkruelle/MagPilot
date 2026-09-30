@@ -64,7 +64,7 @@ from colmag.control_mapping import (  # noqa: E402
     calibrated_magnet_height,
 )
 
-TOOL_VERSION = '1.1'
+TOOL_VERSION = '1.2'
 
 # Packet layout shared with magnetometer_reader.py.
 PACKET_SIZE = 218
@@ -97,6 +97,9 @@ CLIP_MIN_FRACTION = 0.5         # ...and is at least half the largest value seen
 CLIP_MIN_NOISE = 20.0           # ...and far above the far-step noise
 CLIP_MIN_RANGE = 0.25           # ...while its sensor moved (still magnets are not clipping)
 WRAP_MIN_FRACTION = 0.5         # sign-flip jump larger than half the channel's range
+FLAT_TOL = 0.01                 # a flat top: within 1 % of the channel's largest |value|
+FLAT_MIN_RUN = 4                # ...for this many samples in a row
+FLAT_OTHER_CHANGE = 0.2         # ...while another axis of that sensor changed by 20 % of it
 FULL_SCALE_TOL = 0.02           # within 2 % of a full scale: pinned at the limit
 POSE_MIN_SWEEP_M = 0.03         # sweep x or y range under 3 cm: pose does not follow the stylus
 ZERO_MOMENT = 1e-9              # |m| below this: the moment is not computed
@@ -496,18 +499,44 @@ def longest_run(values, target):
     return best
 
 
+def flat_top_run(cols, c, peak):
+    """Longest run of samples within FLAT_TOL of `peak` while the sensor's other axes moved.
+
+    A real field component can sit at its maximum for a moment, but not while
+    another axis of the same sensor changes by a fifth of that value: then the
+    channel has stopped rising (a limit that is not an exact repeated number).
+    """
+    first = c - c % 3
+    others = [cols[o] for o in range(first, first + 3) if o != c]
+    best, start = 0, None
+    for i, v in enumerate(list(cols[c]) + [None]):
+        near = v is not None and math.isfinite(v) and abs(v) >= (1 - FLAT_TOL) * peak
+        if near and start is None:
+            start = i
+        elif not near and start is not None:
+            if i - start >= FLAT_MIN_RUN:
+                change = max(max(part) - min(part)
+                             for part in (finite(o[start:i]) or [0.0] for o in others))
+                if change >= FLAT_OTHER_CHANGE * peak:
+                    best = max(best, i - start)
+            start = None
+    return best
+
+
 def detect_saturation(magnet_rows, far):
-    """Look for pinned extremes (clipping), sign flips and shared limits.
+    """Look for pinned extremes (clipping), flat tops, sign flips and shared limits.
 
     A channel counts as clipped only if its largest or smallest value repeats
     exactly in a row, is large (vs every channel and vs the far-step noise),
     and its sensor moved a lot in that step (on any of its three axes). So a
     still magnet with quantised readings is not flagged, but a channel pinned
     for the whole step is. A sign flip is a jump between two large values of
-    opposite sign: a fast pass over a sensor, or an int16 wrap.
+    opposite sign: a fast pass over a sensor, or an int16 wrap. A flat top is
+    a channel that stays near its largest value while its sensor keeps
+    changing (see flat_top_run); the X/Y channels of the real board do this.
     """
     out = {'global_max_abs': None, 'max_abs_xy': None, 'max_abs_z': None,
-           'clipped': [], 'wraps': [], 'shared_limits': []}
+           'clipped': [], 'flat_tops': [], 'wraps': [], 'shared_limits': []}
     series = {}
     for step, rows in magnet_rows.items():
         if rows:
@@ -544,6 +573,14 @@ def detect_saturation(magnet_rows, far):
                         and abs(extreme) >= CLIP_MIN_NOISE * noise):
                     out['clipped'].append({'step': step, 'channel': CHANNELS[c],
                                            'value': extreme, 'run': run})
+            axis_top = out['max_abs_z'] if c % 3 == 2 else out['max_abs_xy']
+            flat = flat_top_run(cols, c, chan_max[c])
+            pinned = any(x['step'] == step and x['channel'] == CHANNELS[c] for x in out['clipped'])
+            rose = spans[c] >= CLIP_MIN_FRACTION * chan_max[c]    # not a constant offset
+            if (flat and rose and not pinned and chan_max[c] >= CLIP_MIN_FRACTION * axis_top
+                    and chan_max[c] >= CLIP_MIN_NOISE * noise):
+                out['flat_tops'].append({'step': step, 'channel': CHANNELS[c],
+                                         'value': chan_max[c], 'run': flat})
             for i, (a, b) in enumerate(zip(values, values[1:])):
                 if (a * b < 0 and abs(a - b) > WRAP_MIN_FRACTION * chan_span[c]
                         and min(abs(a), abs(b)) >= WRAP_MIN_FRACTION * chan_max[c]):
@@ -592,26 +629,30 @@ def full_scale_note(sat, units):
 
 
 def settings_full_scale(xy_ut, z_ut, settings):
-    """How much of each matching setting's range the largest readings use."""
-    used, ruled_out, at_limit = [], [], []
+    """How much of each matching setting's nominal range the largest readings use.
+
+    Readings above a nominal range do not rule a setting out: RES 2 and 3 are
+    specified as +/-22000 and +/-11000 counts, but the output can go further.
+    """
+    used, over, at_limit = [], [], []
     for gain, res in settings:
         fs_xy, fs_z = mlx_full_scale_ut(gain, res)
         name = 'GAIN_SEL %d + RES %d (%s / %s uT)' % (gain, res, fmt(fs_xy), fmt(fs_z))
         if (abs(xy_ut - fs_xy) <= FULL_SCALE_TOL * fs_xy
                 or abs(z_ut - fs_z) <= FULL_SCALE_TOL * fs_z):
             at_limit.append(name)
-        elif xy_ut > fs_xy or z_ut > fs_z:
-            ruled_out.append(name)
         else:
-            used.append('GAIN_SEL %d + RES %d: %.0f %% / %.0f %% of %s / %s uT' % (
-                gain, res, 100 * xy_ut / fs_xy, 100 * z_ut / fs_z, fmt(fs_xy), fmt(fs_z)))
+            share = 'GAIN_SEL %d + RES %d: %.0f %% / %.0f %% of %s / %s uT' % (
+                gain, res, 100 * xy_ut / fs_xy, 100 * z_ut / fs_z, fmt(fs_xy), fmt(fs_z))
+            (over if xy_ut > fs_xy or z_ut > fs_z else used).append(share)
     text = ''
     if at_limit:
         text += '; matches the full scale of %s: probably clipped or wrapped' % '; '.join(at_limit)
     if used:
         text += '; range used (XY / Z): ' + '; '.join(used)
-    if ruled_out:
-        text += '; ruled out, because these readings exceed its range: ' + '; '.join(ruled_out)
+    if over:
+        text += ('; above the nominal range of ' + '; '.join(over)
+                 + ' (so with that setting these readings are at or past its limit)')
     if max(xy_ut, z_ut) > HALL_SATURATION_UT:
         text += ('; above the 50 mT Hall-plate saturation onset, so those readings are not '
                  'trustworthy')
@@ -753,9 +794,11 @@ def port_open_effect(far_rows, still_rows, reopen_far_rows, reopen_magnet_rows=N
                 % (100 * magnet_moved))
         if moved >= OPEN_SHIFT_FRACTION:
             if pose_range(far_rows) < POSE_FROZEN_M <= pose_range(reopen_far_rows):
-                text += ('; in reopen_far the firmware still tracked a magnet (its pose moved '
-                         'by %s m; with no magnet in the far step it stayed frozen), so the '
-                         'stylus was probably not far enough away' % fmt(pose_range(reopen_far_rows), 2))
+                text += ('; in reopen_far the firmware still fitted a magnet (its pose moved '
+                         'by %s m; with no magnet in the far step it stayed frozen): either the '
+                         'stylus was not far enough away, or the sensors kept an offset after '
+                         'the strong field (repeat with the stylus in another room to tell)'
+                         % fmt(pose_range(reopen_far_rows), 2))
             else:
                 text += '; reopen_far still differs from far: drift, or the stylus was not fully away'
         out.update(result='none', confidence='measured', text='%s (%s)' % (text, evidence))
@@ -974,12 +1017,20 @@ def rate_answers(r):
 
 
 def saturation_answer(sat):
-    """(text, confidence): only pinned values say 'yes'; sign flips are shown as unclear."""
+    """(text, confidence): pinned values say 'yes', flat tops 'probably'; sign flips are unclear."""
     clipped = ['%s pinned at %s for %d samples in %s' % (c['channel'], fmt(c['value']), c['run'],
                                                         c['step'])
                for c in sat['clipped'][:4]]
-    if clipped:
-        text = 'yes: ' + '; '.join(clipped)
+    flat = ['%s stays within %d %% of %s for %d samples in %s' % (
+                f['channel'], round(100 * FLAT_TOL), fmt(f['value']), f['run'], f['step'])
+            for f in sat['flat_tops'][:4]]
+    parts = ['yes: ' + '; '.join(clipped)] if clipped else []
+    if flat:
+        parts.append(('' if clipped else 'probably: ') + '; '.join(flat) + (
+            ' while another axis of the same sensor changed by over %d %% of that value, so '
+            'the channel stopped rising there' % round(100 * FLAT_OTHER_CHANGE)))
+    if parts:
+        text = '; '.join(parts)
     elif sat['wraps']:
         text = 'no clipped channels found'
     else:
@@ -993,7 +1044,7 @@ def saturation_answer(sat):
         text += '; %d channels share the same largest |value| %s (a common full-scale limit?)' % (
             len(group['channels']), fmt(group['magnitude']))
     text += '; ' + sat['full_scale']
-    if clipped or 'probably clipped' in sat['full_scale']:
+    if clipped or flat or 'probably clipped' in sat['full_scale']:
         return text, 'likely'
     return text, 'unclear' if sat['wraps'] else 'measured'
 
@@ -1058,21 +1109,9 @@ def build_answers(r):
     return answers
 
 
-def settings_in_range(units, sat):
-    """The matching MLX90393 settings whose range holds the largest readings (all if unknown)."""
-    settings = units.get('settings') or []
-    if not settings or sat.get('max_abs_xy') is None:
-        return settings
-    xy_ut, z_ut = sat['max_abs_xy'] * units['to_ut'], sat['max_abs_z'] * units['to_ut']
-    fits = [(gain, res) for gain, res in settings
-            if xy_ut <= mlx_full_scale_ut(gain, res)[0] * (1 + FULL_SCALE_TOL)
-            and z_ut <= mlx_full_scale_ut(gain, res)[1] * (1 + FULL_SCALE_TOL)]
-    return fits or settings
-
-
 def firmware_questions(r):
     """Only what the probe could not answer (not what a skipped step would answer)."""
-    settings = settings_in_range(r['units'], r['saturation'])
+    settings = r['units'].get('settings')
     questions = [('Which of %s the firmware uses, and its OSR and DIG_FILT settings.'
                   % settings_names(settings)) if settings else
                  'Which MLX90393 settings (GAIN_SEL, RES, OSR, DIG_FILT, HALLCONF) and which '

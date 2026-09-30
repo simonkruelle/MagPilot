@@ -376,10 +376,38 @@ class Saturation(unittest.TestCase):
         note = pb.full_scale_note(sat, units)
         self.assertIn('GAIN_SEL 1 + RES 1: 37 % / 35 % of 39387 / 63439 uT', note)
         self.assertIn('GAIN_SEL 4 + RES 2: 56 % / 52 %', note)
-        self.assertIn('ruled out, because these readings exceed its range: GAIN_SEL 7 + RES 3',
-                      note)
+        self.assertIn('above the nominal range of GAIN_SEL 7 + RES 3: 111 % / 104 % of '
+                      '13200 / 21296 uT', note)
         self.assertNotIn('probably clipped', note)
-        self.assertEqual(pb.settings_in_range(units, sat), [(1, 1), (4, 2)])
+
+    def pass_over_sensor1(self, ceiling=None):
+        """Sensor 1 as the stylus passes over it: Bx peaks at 14 mT while Bz swings."""
+        rng = random.Random(6)
+        rows = []
+        for i in range(100):
+            d = (i - 50) / 8.0
+            bx = 14000.0 * math.exp(-d * d)
+            if ceiling:
+                bx = min(bx, ceiling) + rng.uniform(-10, 10)      # not an exact repeat
+            rows.append([-bx, 500.0, 9000.0 * d * math.exp(-d * d)] + list(EARTH_UT) * 15)
+        return rows
+
+    def test_flat_top_is_found(self):
+        sat = pb.detect_saturation({'sweep': self.pass_over_sensor1(ceiling=12000.0)}, self.far)
+        self.assertEqual(sat['clipped'], [])
+        self.assertEqual([(f['channel'], f['run']) for f in sat['flat_tops']],
+                         [('Sensor1_Bx', 7)])
+        sat['full_scale'] = pb.full_scale_note(sat, {'unit': 'uT', 'to_ut': 1.0})
+        text, confidence = pb.saturation_answer(sat)
+        self.assertEqual(confidence, 'likely')
+        self.assertRegex(text, r'^probably: Sensor1_Bx stays within 1 % of 120\d\d for 7 '
+                               r'samples in sweep while another axis')
+
+    def test_smooth_peak_and_still_magnet_are_not_flat_tops(self):
+        sat = pb.detect_saturation({'sweep': self.pass_over_sensor1()}, self.far)
+        self.assertEqual(sat['flat_tops'], [])
+        still = [[-14000.0 + (i % 3), 500.0, 3000.0] + list(EARTH_UT) * 15 for i in range(100)]
+        self.assertEqual(pb.detect_saturation({'still': still}, self.far)['flat_tops'], [])
 
 
 class PoseAndMoment(unittest.TestCase):
@@ -445,9 +473,10 @@ class PortOpen(unittest.TestCase):
         tracked = [row[:48] + [0.001 * i] + row[49:] for i, row in enumerate(near)]
         effect = pb.port_open_effect(far, reopen_magnet, tracked, reopen_magnet)
         self.assertEqual(effect['result'], 'none')
-        self.assertIn('the firmware still tracked a magnet (its pose moved by 0.099 m',
+        self.assertIn('the firmware still fitted a magnet (its pose moved by 0.099 m',
                       effect['text'])
-        self.assertIn('stylus was probably not far enough away', effect['text'])
+        self.assertIn('either the stylus was not far enough away, or the sensors kept an offset',
+                      effect['text'])
 
     def test_baseline_recaptured(self):
         far = earth_rows(100, noise=0.3, seed=1)
