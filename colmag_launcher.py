@@ -9,18 +9,21 @@ Run on the HOST (not inside Docker):
 Buttons start each pipeline stage inside the `colmag_simon` Docker container via
 `docker exec`, so you never need more than this window plus the GUIs that the
 stages open themselves (Gazebo, the trackpad interface).
+The Data window also starts an independent host MuJoCo Teleoperation Pipeline.
+Its trackpad input works without Docker; board input uses the container bridge.
 
     1. Robot     — Gazebo FR3 (sim) or franka_control (real, needs robot IP)
     2. Arm nodes — teleop draw node + gesture robot node (one launch)
     3. Interface — trackpad UI or real magnetometer reader
 
-Status lights poll the container every 2 s. STOP ALL kills the pipeline
-processes inside the container; "Restart container" is the bulletproof reset.
+Status lights poll the container every 2 s. STOP ALL stops the owned host
+simulation and the pipeline processes inside the container.
 Logs of each stage are written inside the container to /tmp/colmag_gui_*.log
 and tailed in the bottom pane.
 """
 
 import json
+import math
 import os
 import re
 import shlex
@@ -314,7 +317,7 @@ def _legacy_process_signals(signal, groups=('interface', 'nodes', 'robot')):
     # command line. The old "pkill -f roslaunch" did, aborting Stop All early.
     by_group = {
         'interface': ('[m]agnetometer_reader.py', '[r]ecord_tracking_error.py',
-                      '[t]arget_reaching_pilot.py'),
+                      '[t]arget_reaching_pilot.py', '[t]eleoperation_serial_stream.py'),
         'nodes': (
             '[c]olmag_arm_nodes[.]launch',
             '[c]olmag_draw_node.py',
@@ -354,6 +357,7 @@ def build_pipeline_probe_command():
     patterns = (
         '[m]agnetometer_reader.py',
         '[t]arget_reaching_pilot.py',
+        '[t]eleoperation_serial_stream.py',
         '[c]olmag_arm_nodes[.]launch',
         '[c]olmag_draw_node.py',
         '[c]olmag_robot_node.py',
@@ -580,6 +584,93 @@ def build_record_command(serial_port, participant_id, session_id, height_mm,
         # because it would blank the saved picture above 5 cm.
         args.extend(['--writing-max-z', '0.05'])
     return 'cd /colmag && {}'.format(' '.join(shlex.quote(arg) for arg in args))
+
+
+def parse_teleoperation_settings(seed, trials, tolerance_mm, dwell_seconds,
+                                 magnet_count=None):
+    """Validate the separate MuJoCo collection form before creating a run."""
+    try:
+        seed, trials = int(seed), int(trials)
+        tolerance_mm, dwell_seconds = float(tolerance_mm), float(dwell_seconds)
+        count = None if magnet_count in (None, '', 'Not specified') else int(magnet_count)
+    except (TypeError, ValueError):
+        raise ValueError('Seed and trials must be integers; tolerance and dwell must be numbers.')
+    if trials < 1 or trials > 1000:
+        raise ValueError('Choose between 1 and 1000 trials.')
+    if not math.isfinite(tolerance_mm) or not 0 < tolerance_mm < 120:
+        raise ValueError('Tolerance must be greater than 0 and less than 120 mm.')
+    if not math.isfinite(dwell_seconds) or not 0 < dwell_seconds < 60:
+        raise ValueError('Dwell must be greater than 0 and less than 60 seconds.')
+    if count not in (None, 1, 2, 3):
+        raise ValueError('Choose 1, 2 or 3 magnets, or leave the count unspecified.')
+    from colmag.teleoperation_task import TeleoperationSettings, random_targets
+    protocol = TeleoperationSettings(tolerance_m=tolerance_mm / 1000,
+                                    dwell_s=dwell_seconds)
+    # The tolerance sphere and required navigation distance must both fit in
+    # the same workspace that the simulator samples, before opening a window.
+    random_targets(1, seed, protocol)
+    return dict(seed=seed, trials=trials, tolerance_mm=tolerance_mm,
+                dwell_seconds=dwell_seconds, magnet_count=count)
+
+
+def teleoperation_python():
+    """Use the dedicated host environment rather than the ROS container."""
+    override = os.environ.get('COLMAG_TELEOP_PYTHON', '').strip()
+    if override:
+        return os.path.abspath(os.path.expanduser(override)) if os.path.sep in override else (shutil.which(override) or override)
+    return os.path.join(REPO_DIR, '.venv', 'teleoperation', 'bin', 'python')
+
+
+def probe_teleoperation_runtime(python):
+    if not os.path.isfile(python):
+        return False, 'Python environment not found: {}'.format(python)
+    try:
+        result = subprocess.run(
+            [python, '-c', 'import mujoco, numpy, PIL, tkinter; print(mujoco.__version__)'],
+            cwd=REPO_DIR, capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)
+    return result.returncode == 0, (result.stdout + result.stderr).strip()
+
+
+def next_teleoperation_session(data_dir, participant_id):
+    if not dataset.PARTICIPANT_ID.fullmatch(participant_id or ''):
+        raise ValueError('Participant IDs look like P01.')
+    folder = os.path.join(data_dir, 'teleoperation', participant_id)
+    numbers = [0]
+    if os.path.isdir(folder):
+        numbers.extend(int(name[1:]) for name in os.listdir(folder)
+                       if dataset.SESSION_ID.fullmatch(name))
+    return 'S{:02d}'.format(max(numbers) + 1)
+
+
+def build_teleoperation_argv(python, participant_id, session_id, input_source='trackpad',
+                             serial_port='', participant_name='', experiment_name='',
+                             seed=0, trials=10, tolerance_mm=25, dwell_seconds=2,
+                             magnet_count=None, baudrate=921600):
+    """Structured host argv: names remain literal values, without a shell."""
+    if not dataset.PARTICIPANT_ID.fullmatch(participant_id or ''):
+        raise ValueError('Participant IDs look like P01.')
+    if not dataset.SESSION_ID.fullmatch(session_id or ''):
+        raise ValueError('Session IDs look like S01.')
+    if input_source not in ('trackpad', 'serial'):
+        raise ValueError('Teleoperation input must be trackpad or serial.')
+    if input_source == 'serial' and not serial_port:
+        raise ValueError('A serial port is required for sensor-board teleoperation.')
+    settings = parse_teleoperation_settings(seed, trials, tolerance_mm, dwell_seconds, magnet_count)
+    output = os.path.join(dataset.DATA_DIR_NAME, 'teleoperation', participant_id, session_id)
+    args = [python, os.path.join(REPO_DIR, 'tools', 'teleoperation_demo.py'),
+            '--input-source', input_source, '--output-dir', output,
+            '--participant-id', participant_id, '--session-id', session_id,
+            '--participant-name', participant_name, '--experiment-name', experiment_name,
+            '--seed', str(settings['seed']), '--trials', str(settings['trials']),
+            '--tolerance-mm', '{:g}'.format(settings['tolerance_mm']),
+            '--dwell-seconds', '{:g}'.format(settings['dwell_seconds'])]
+    if input_source == 'serial':
+        args.extend(['--port', serial_port, '--baudrate', str(baudrate)])
+    if settings['magnet_count'] is not None:
+        args.extend(['--magnet-count', str(settings['magnet_count'])])
+    return args
 
 
 def parse_tracking_settings(magnet, magnet_offset_mm, heights_mm):
@@ -1134,6 +1225,13 @@ class DataPanel(tk.Toplevel):
         self.consent = tk.BooleanVar(value=False)
         self.excluded = tk.BooleanVar(value=False)
         self.notes = tk.StringVar()
+        self.pipeline = tk.StringVar(value='characters')
+        self.teleop_source = tk.StringVar(value='trackpad')
+        self.teleop_seed = tk.StringVar(value='0')
+        self.teleop_trials = tk.StringVar(value='10')
+        self.teleop_tolerance = tk.StringVar(value='25')
+        self.teleop_dwell = tk.StringVar(value='2')
+        self.teleop_magnets = tk.StringVar(value='Not specified')
         # Table switches
         self.source = tk.StringVar(value='serial')
         self.char_set = tk.StringVar(value='digits')
@@ -1184,15 +1282,11 @@ class DataPanel(tk.Toplevel):
         self.summary.pack(anchor='w', pady=(3, 0))
         row = tk.Frame(heading, bg=BG)
         row.pack(fill='x', pady=(10, 0))
-        tk.Label(row, text='Character source', bg=BG, fg=SUBTLE,
-                 font=f.f_body).pack(side='left', padx=(0, 12))
-        Segmented(row, self.source,
-                  [('serial', 'Sensor board'), ('touchpad', 'Demo (mouse)')],
-                  command=self.refresh, width=310, height=30, font=f.f_body,
-                  parent_bg=BG).pack(side='left')
-        self.source_notice = tk.Label(heading, bg=BG, fg=SUBTLE, font=f.f_small,
-                                      anchor='w', justify='left')
-        self.source_notice.pack(anchor='w', pady=(6, 0))
+        self._pipeline_selector = Segmented(row, self.pipeline,
+                  [('characters', 'Character Pipeline'), ('teleoperation', 'Teleoperation Pipeline')],
+                  command=self._pipeline_changed, width=490, height=34, font=f.f_body,
+                  parent_bg=BG)
+        self._pipeline_selector.pack(side='left')
 
         experiment = self._box('Experiment')
         row = tk.Frame(experiment, bg=CARD)
@@ -1203,7 +1297,7 @@ class DataPanel(tk.Toplevel):
                    font=f.f_body, parent_bg=CARD).pack(side='left')
         Pill(row, 'Save', self._save_experiment, kind='primary', width=80,
              font=f.f_btn).pack(side='right')
-        tk.Label(experiment, text='Included in every character recording.',
+        tk.Label(experiment, text='Included in character and teleoperation sessions.',
                  bg=CARD, fg=SUBTLE, font=f.f_small).pack(anchor='w', pady=(8, 0))
 
         # Participant form
@@ -1249,8 +1343,24 @@ class DataPanel(tk.Toplevel):
             text='Names are shown here; recording folders keep the participant ID.')
         self.form_status.pack(anchor='w', pady=(8, 0))
 
+        self.pipeline_body = tk.Frame(self, bg=BG)
+        self.pipeline_body.pack(fill='x')
+        self.character_panel = tk.Frame(self.pipeline_body, bg=BG)
+        self.character_panel.pack(fill='x')
+        row = tk.Frame(self.character_panel, bg=BG)
+        row.pack(fill='x', padx=28, pady=(14, 0))
+        tk.Label(row, text='Character source', bg=BG, fg=SUBTLE,
+                 font=f.f_body).pack(side='left', padx=(0, 12))
+        Segmented(row, self.source,
+                  [('serial', 'Sensor board'), ('touchpad', 'Demo (mouse)')],
+                  command=self.refresh, width=310, height=30, font=f.f_body,
+                  parent_bg=BG).pack(side='left')
+        self.source_notice = tk.Label(self.character_panel, bg=BG, fg=SUBTLE,
+                                      font=f.f_small, anchor='w', justify='left')
+        self.source_notice.pack(anchor='w', padx=28, pady=(6, 0))
+
         # Which part of the dataset the table shows
-        switches = tk.Frame(self, bg=BG)
+        switches = tk.Frame(self.character_panel, bg=BG)
         switches.pack(fill='x', padx=28, pady=(14, 8))
         Segmented(
             switches, self.char_set,
@@ -1267,7 +1377,7 @@ class DataPanel(tk.Toplevel):
 
         # Coverage table: one row per participant, one column per character.
         # It sits in a canvas so it can scroll when there are many people.
-        holder = tk.Frame(self, bg=CARD, highlightbackground=BORDER,
+        holder = tk.Frame(self.character_panel, bg=CARD, highlightbackground=BORDER,
                           highlightthickness=1)
         holder.pack(fill='x', padx=28)
         self.table_view = tk.Canvas(holder, bg=CARD, highlightthickness=0,
@@ -1281,12 +1391,12 @@ class DataPanel(tk.Toplevel):
         for event, step in (('<Button-4>', -1), ('<Button-5>', 1)):
             self.bind(event, lambda _, step=step: self.table_view.yview_scroll(
                 step, 'units'))
-        self.problems = tk.Label(self, bg=BG, fg=SUBTLE, font=f.f_small,
+        self.problems = tk.Label(self.character_panel, bg=BG, fg=SUBTLE, font=f.f_small,
                                  justify='left')
         self.problems.pack(anchor='w', padx=28, pady=(4, 0))
 
         # Tracking error
-        tracking = self._box('Tracking error (sensor board)')
+        tracking = self._box('Tracking error (sensor board)', parent=self.character_panel)
         row = tk.Frame(tracking, bg=CARD)
         row.pack(fill='x')
         tk.Label(row, text='magnet', bg=CARD, fg=SUBTLE, font=f.f_body).pack(
@@ -1305,6 +1415,45 @@ class DataPanel(tk.Toplevel):
                                       font=f.f_small, justify='left')
         self.tracking_runs.pack(anchor='w', pady=(8, 0))
 
+        self.teleoperation_panel = tk.Frame(self.pipeline_body, bg=BG)
+        task = self._box('MuJoCo · reach and hold', parent=self.teleoperation_panel)
+        row = tk.Frame(task, bg=CARD)
+        row.pack(fill='x')
+        tk.Label(row, text='input', bg=CARD, fg=SUBTLE, font=f.f_body).pack(side='left', padx=(0, 12))
+        Segmented(row, self.teleop_source,
+                  [('trackpad', 'Trackpad / mouse'), ('serial', 'Sensor board')],
+                  command=self._update_teleop_summary, width=330, height=30,
+                  font=f.f_body, parent_bg=CARD).pack(side='left')
+        self._caption(row, 'magnets')
+        Selector(row, self.teleop_magnets, ['Not specified', '1', '2', '3'],
+                 width=135, height=30, font=f.f_body).pack(side='left')
+        row = tk.Frame(task, bg=CARD)
+        row.pack(fill='x', pady=(12, 0))
+        for caption, variable, width in (
+                ('seed', self.teleop_seed, 65), ('trials', self.teleop_trials, 65),
+                ('margin mm', self.teleop_tolerance, 65), ('hold seconds', self.teleop_dwell, 65)):
+            self._caption(row, caption)
+            RoundEntry(row, variable, width=width, height=30, font=f.f_body,
+                       parent_bg=CARD).pack(side='left')
+        tk.Label(task, text='Enter starts each trial. Reach the blue target and hold for the selected duration.\n'
+                 'The circle fills while the measured flange stays inside the margin; completion saves automatically.',
+                 bg=CARD, fg=SUBTLE, font=f.f_small, justify='left', wraplength=690).pack(anchor='w', pady=(12, 0))
+        people = self._box('Choose a participant', parent=self.teleoperation_panel)
+        list_holder = tk.Frame(people, bg=CARD)
+        list_holder.pack(fill='x')
+        self.teleop_view = tk.Canvas(list_holder, bg=CARD, highlightthickness=0,
+                                    width=WIDTH - 100, height=100)
+        self.teleop_scroll = tk.Scrollbar(list_holder, orient='vertical', command=self.teleop_view.yview)
+        self.teleop_view.configure(yscrollcommand=self.teleop_scroll.set)
+        self.teleop_view.pack(side='left', fill='both', expand=True)
+        self.teleop_participants = tk.Frame(self.teleop_view, bg=CARD)
+        self.teleop_view.create_window(0, 0, window=self.teleop_participants, anchor='nw', width=WIDTH - 100)
+        Pill(people, 'Stop', self.parent.stop_teleoperation,
+             kind='plain', width=80, height=28, font=f.f_body).pack(anchor='e', pady=(8, 0))
+        self.teleop_status = tk.Label(people, bg=CARD, fg=SUBTLE, font=f.f_small,
+                                     justify='left', wraplength=690)
+        self.teleop_status.pack(anchor='w', pady=(10, 0))
+
         footer = tk.Frame(self, bg=BG)
         footer.pack(fill='x', padx=28, pady=(12, 22))
         self.recording_help = tk.Label(
@@ -1314,15 +1463,63 @@ class DataPanel(tk.Toplevel):
         Pill(footer, 'Close', self.destroy, kind='plain', width=80,
              font=f.f_body, parent_bg=BG).pack(side='right')
 
-    def _box(self, title):
-        tk.Label(self, text=title, bg=BG, fg=TEXT, font=self.parent.f_h).pack(
+    def _box(self, title, parent=None):
+        parent = self if parent is None else parent
+        tk.Label(parent, text=title, bg=BG, fg=TEXT, font=self.parent.f_h).pack(
             anchor='w', padx=28, pady=(12, 4))
-        box = tk.Frame(self, bg=CARD, highlightbackground=BORDER,
+        box = tk.Frame(parent, bg=CARD, highlightbackground=BORDER,
                        highlightthickness=1)
         box.pack(fill='x', padx=28)
         inner = tk.Frame(box, bg=CARD)
         inner.pack(fill='x', padx=14, pady=12)
         return inner
+
+    def _pipeline_changed(self):
+        self._pipeline_selector._redraw()
+        if self.pipeline.get() == 'teleoperation':
+            self.character_panel.pack_forget()
+            self.teleoperation_panel.pack(fill='x')
+            self._update_teleop_summary()
+        else:
+            self.teleoperation_panel.pack_forget()
+            self.character_panel.pack(fill='x')
+            self.refresh()
+        self.update_idletasks()
+
+    def _update_teleop_summary(self):
+        self.summary.configure(text='MuJoCo FR3 · random positions · measured end-effector feedback')
+        self.recording_help.configure(text='Start opens the simulation. Enter begins a trial; hold inside the target to save.\n'
+                                      'Trackpad / mouse runs without Docker. Sensor board uses the main window\'s port #.')
+        status = self.parent.__dict__.get('_teleoperation_process')
+        running = status is not None and status.poll() is None
+        self.teleop_status.configure(text='Simulation running. Close its window or use Stop to finish the session.'
+                                    if running else 'Saved trials: data_collection/teleoperation/<participant>/<session>/')
+
+    def _show_teleop_participants(self):
+        for child in self.teleop_participants.winfo_children():
+            child.destroy()
+        if not self.participants:
+            tk.Label(self.teleop_participants, text='Add a name in the participant form and press Save.',
+                     bg=CARD, fg=SUBTLE, font=self.parent.f_body).pack(anchor='w')
+        for participant in self.participants:
+            row = tk.Frame(self.teleop_participants, bg=CARD)
+            row.pack(fill='x', pady=3)
+            label = tk.Label(row, text=dataset.participant_label(participant),
+                             bg=CARD, fg=BLUE, font=self.parent.f_body, cursor='hand2')
+            label.pack(side='left')
+            pid = participant['participant_id']
+            label.bind('<Button-1>', lambda _, pid=pid: self.load_participant(pid))
+            Pill(row, 'Start', lambda pid=pid: self.start_teleoperation(pid),
+                 kind='primary', width=80, height=28, font=self.parent.f_body).pack(side='right')
+        self.teleop_participants.update_idletasks()
+        height = self.teleop_participants.winfo_reqheight()
+        visible = min(height, self.TABLE_ROWS * 34)
+        self.teleop_view.configure(height=visible,
+            scrollregion=(0, 0, WIDTH - 100, height))
+        if height > visible:
+            self.teleop_scroll.pack(side='right', fill='y')
+        else:
+            self.teleop_scroll.pack_forget()
 
     def _caption(self, parent, text):
         tk.Label(parent, text=text, bg=CARD, fg=SUBTLE,
@@ -1380,6 +1577,9 @@ class DataPanel(tk.Toplevel):
                 run['captured'], run['targets'])
             for run in runs) or 'No tracking-error runs yet.')
         self.show_table()
+        self._show_teleop_participants()
+        if self.pipeline.get() == 'teleoperation':
+            self._update_teleop_summary()
 
     def show_table(self):
         for child in self.table.winfo_children():
@@ -1483,6 +1683,8 @@ class DataPanel(tk.Toplevel):
             collection_dir, input_source=self.source.get())
         if samples != self.samples:
             self.refresh()
+        elif self.pipeline.get() == 'teleoperation':
+            self._update_teleop_summary()
         self.after(self.RESCAN_MS, self._rescan)
 
     def _cell_colour(self, n):
@@ -1513,6 +1715,9 @@ class DataPanel(tk.Toplevel):
                 dataset.CHARACTERS_DIR)
             if os.path.isdir(characters_dir):
                 seen.update(os.listdir(characters_dir))
+        teleoperation_dir = os.path.join(self.data_dir, 'teleoperation')
+        if os.path.isdir(teleoperation_dir):
+            seen.update(os.listdir(teleoperation_dir))
         pid = dataset.next_participant_id(self.participants, seen)
         self._fill_form(dataset.new_participant(pid))
         self.form_status.configure(
@@ -1600,6 +1805,31 @@ class DataPanel(tk.Toplevel):
             self.magnet.get(), self.magnet_offset.get(),
             self.tracking_heights.get())
 
+    def start_teleoperation(self, participant_id):
+        participant = next(p for p in self.participants if p['participant_id'] == participant_id)
+        if participant.get('excluded'):
+            messagebox.showwarning('Excluded', '{} is marked as excluded.'.format(
+                dataset.participant_label(participant)), parent=self)
+            return
+        source = self.teleop_source.get()
+        if source == 'serial' and not participant.get('consent'):
+            messagebox.showwarning('No consent', 'Save consent for {} before collecting with the sensor board.'.format(
+                dataset.participant_label(participant)), parent=self)
+            return
+        try:
+            settings = parse_teleoperation_settings(
+                self.teleop_seed.get(), self.teleop_trials.get(), self.teleop_tolerance.get(),
+                self.teleop_dwell.get(), self.teleop_magnets.get())
+        except ValueError as exc:
+            messagebox.showerror('Teleoperation Pipeline', str(exc), parent=self)
+            return
+        if not self._save_experiment():
+            return
+        self.parent.start_teleoperation(
+            participant_id, input_source=source, participant_name=participant.get('name', ''),
+            experiment_name=self.experiment_name.get(), **settings)
+        self._update_teleop_summary()
+
 
 # ── The app ──────────────────────────────────────────────────────────────────
 
@@ -1614,6 +1844,9 @@ class Launcher(tk.Tk):
         self._recovering = False
         self._closing = False
         self._close_after_stop = False
+        self._teleoperation_process = None
+        self._teleoperation_log_path = None
+        self._teleoperation_log_file = None
         self._fonts()
         self._build_ui()
         self._poll_running = True
@@ -2216,10 +2449,12 @@ class Launcher(tk.Tk):
         return port
 
     def _sensor_in_use(self):
-        """'tracking', 'interface' (magnetometer_reader) or None."""
+        """Report each process that can own the board's serial stream."""
         _, processes = in_container(
-            "pgrep -af '[m]agnetometer_reader.py|[r]ecord_tracking_error.py' "
+            "pgrep -af '[m]agnetometer_reader.py|[r]ecord_tracking_error.py|[t]eleoperation_serial_stream.py' "
             "|| true", timeout=5)
+        if 'teleoperation_serial_stream' in processes:
+            return 'teleoperation'
         if 'record_tracking_error' in processes:
             return 'tracking'
         if 'magnetometer_reader' in processes:
@@ -2227,7 +2462,10 @@ class Launcher(tk.Tk):
         return None
 
     def _warn_sensor_busy(self, busy):
-        if busy == 'tracking':
+        if busy == 'teleoperation':
+            text = ('The Teleoperation Pipeline is using the sensor board. '
+                    'Close its simulation window or press Stop in Data first.')
+        elif busy == 'tracking':
             text = ('The tracking-error recorder is still open in its '
                     'terminal. Type q and Enter there, or press Stop all.')
         else:
@@ -2235,6 +2473,119 @@ class Launcher(tk.Tk):
                     '(magnetometer_reader.py) is running. Close its window '
                     'or press Stop all first.')
         messagebox.showwarning('Sensor board busy', text)
+
+    def start_teleoperation(self, participant_id, input_source='trackpad', participant_name='',
+                            experiment_name='', seed=0, trials=10, tolerance_mm=25,
+                            dwell_seconds=2, magnet_count=None):
+        """Data window: launch an isolated host MuJoCo collection process."""
+        if not self._pipeline_action_ready():
+            return False
+        process = self.__dict__.get('_teleoperation_process')
+        if process is not None and process.poll() is None:
+            messagebox.showwarning('Teleoperation Pipeline', 'The simulation is already running. Close its window or press Stop first.')
+            return False
+        port = ''
+        if input_source == 'serial':
+            if not self._ensure_container():
+                return False
+            busy = self._sensor_in_use()
+            if busy:
+                self._warn_sensor_busy(busy)
+                return False
+            port = self._checked_sensor_port('Teleoperation Pipeline')
+            if not port:
+                return False
+        python = teleoperation_python()
+        ready, detail = probe_teleoperation_runtime(python)
+        if not ready:
+            messagebox.showerror('Teleoperation environment',
+                '{}\n\nCreate the host simulation environment:\n'
+                'python3 tools/setup_teleoperation.py\n\n'
+                'Alternatively set COLMAG_TELEOP_PYTHON to an existing compatible Python.'.format(detail))
+            return False
+        try:
+            session_id = next_teleoperation_session(DATA_DIR, participant_id)
+            args = build_teleoperation_argv(python, participant_id, session_id, input_source,
+                    serial_port=port, participant_name=participant_name, experiment_name=experiment_name,
+                    seed=seed, trials=trials, tolerance_mm=tolerance_mm,
+                    dwell_seconds=dwell_seconds, magnet_count=magnet_count)
+            folder = os.path.join(DATA_DIR, 'teleoperation', participant_id)
+            os.makedirs(folder, exist_ok=True)
+            log_path = os.path.join(folder, '{}_launcher.log'.format(session_id))
+            log_file = open(log_path, 'a', encoding='utf-8')
+            try:
+                process = subprocess.Popen(args, cwd=REPO_DIR, stdout=log_file,
+                    stderr=subprocess.STDOUT, start_new_session=True)
+            except BaseException:
+                log_file.close()
+                raise
+        except (OSError, ValueError) as exc:
+            messagebox.showerror('Teleoperation Pipeline', str(exc))
+            return False
+        previous_log = self.__dict__.get('_teleoperation_log_file')
+        if previous_log is not None:
+            previous_log.close()
+        self._teleoperation_process = process
+        self._teleoperation_stop_requested = False
+        self._teleoperation_finalized_process = None
+        self._teleoperation_log_path = log_path
+        self._teleoperation_log_file = log_file
+        self._pipeline_notice = 'Teleoperation {} / {} opened in MuJoCo. Enter starts each trial.'.format(participant_id, session_id)
+        self._replace_log(self._pipeline_notice)
+        if 'log_choice' in self.__dict__:
+            self.log_choice.set('interface')
+            self._log_selector._redraw()
+        self.after(3500, self._clear_pipeline_notice, self._pipeline_notice)
+        self.after(1500, self._watch_teleoperation, process)
+        return True
+
+    def _watch_teleoperation(self, process):
+        if process is not self.__dict__.get('_teleoperation_process'):
+            return
+        if process is self.__dict__.get('_teleoperation_finalized_process'):
+            return
+        if process.poll() is None:
+            if not self._closing:
+                self.after(1500, self._watch_teleoperation, process)
+            return
+        self._teleoperation_finalized_process = process
+        log_file = self.__dict__.get('_teleoperation_log_file')
+        if log_file is not None:
+            log_file.close()
+            self._teleoperation_log_file = None
+        if (process.returncode and not self._closing and not self._stopping
+                and not self.__dict__.get('_teleoperation_stop_requested', False)):
+            path = self.__dict__.get('_teleoperation_log_path')
+            try:
+                with open(path, encoding='utf-8') as stream:
+                    detail = stream.read()[-6000:]
+            except (OSError, TypeError):
+                detail = 'Read the session launcher log for details.'
+            messagebox.showerror('Teleoperation Pipeline stopped', detail)
+
+    def _stop_teleoperation_worker(self):
+        self._teleoperation_stop_requested = True
+        process = self.__dict__.get('_teleoperation_process')
+        log_file = self.__dict__.get('_teleoperation_log_file')
+        if process is not None and process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=4)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait(timeout=2)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+            except OSError:
+                pass
+        if log_file is not None:
+            log_file.close()
+            if log_file is self.__dict__.get('_teleoperation_log_file'):
+                self._teleoperation_log_file = None
+
+    def stop_teleoperation(self):
+        threading.Thread(target=self._stop_teleoperation_worker, daemon=True).start()
 
     def start_character_recording(self, participant_id, height_mm,
                                   experiment_name='', demo=False):
@@ -2362,6 +2713,7 @@ class Launcher(tk.Tk):
             target=self._stop_all_worker, args=(reason,), daemon=True).start()
 
     def _stop_all_worker(self, reason):
+        self._stop_teleoperation_worker()
         # Simple, forceful, best-effort cleanup that NEVER blocks the UI.
         # 1) Stop the legacy host-network container: its ROS nodes register on
         #    the shared localhost:11311 master but cannot be pkilled from
@@ -2446,6 +2798,14 @@ class Launcher(tk.Tk):
             _, tail = in_container(
                 'tail -n 60 /tmp/colmag_gui_%s.log 2>/dev/null || true'
                 % self.log_choice.get(), timeout=5)
+        process = self.__dict__.get('_teleoperation_process')
+        log_path = self.__dict__.get('_teleoperation_log_path')
+        if process is not None and log_path and self.log_choice.get() == 'interface':
+            try:
+                with open(log_path, encoding='utf-8') as stream:
+                    tail = stream.read()[-6000:] or 'MuJoCo Teleoperation Pipeline is open.'
+            except OSError:
+                pass
         if self._pipeline_notice is not None:
             tail = self._pipeline_notice
         elif (self.log_choice.get() == 'interface'

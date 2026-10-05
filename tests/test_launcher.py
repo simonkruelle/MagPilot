@@ -23,6 +23,7 @@ from colmag_launcher import (
     build_record_command,
     build_terminal_argv,
     build_tracking_command,
+    build_teleoperation_argv,
     build_local_stage_status_command,
     build_live_ros_nodes_command,
     build_pipeline_probe_command,
@@ -38,6 +39,9 @@ from colmag_launcher import (
     parse_local_stage_status,
     parse_franka_robot_mode,
     parse_tracking_settings,
+    parse_teleoperation_settings,
+    next_teleoperation_session,
+    teleoperation_python,
     probe_container_project_mount,
     resolve_serial_port,
     serial_port_label,
@@ -586,6 +590,173 @@ class DataCollectionRoutingTests(unittest.TestCase):
         panel.parent.start_character_recording.assert_not_called()
         panel._save_experiment.assert_not_called()
         warn.assert_called_once()
+
+
+class TeleoperationCollectionTests(unittest.TestCase):
+    def test_host_argv_preserves_literal_names_and_separate_output(self):
+        experiment = "Simon's $(touch /tmp/never) `echo nope`; study"
+        args = build_teleoperation_argv('/tmp/env/python', 'P02', 'S03',
+                    participant_name='Ada Lovelace', experiment_name=experiment)
+        self.assertEqual(args[0], '/tmp/env/python')
+        self.assertTrue(args[1].endswith('/tools/teleoperation_demo.py'))
+        self.assertEqual(args[args.index('--experiment-name') + 1], experiment)
+        self.assertEqual(args[args.index('--participant-name') + 1], 'Ada Lovelace')
+        self.assertEqual(args[args.index('--output-dir') + 1], 'data_collection/teleoperation/P02/S03')
+        self.assertEqual(args[args.index('--input-source') + 1], 'trackpad')
+        self.assertEqual(args[args.index('--dwell-seconds') + 1], '2')
+        self.assertNotIn('--port', args)
+        self.assertNotIn('--ros', args)
+
+    def test_board_argv_keeps_docker_port_and_magnet_count(self):
+        args = build_teleoperation_argv('/tmp/env/python', 'P01', 'S01', 'serial',
+                    serial_port='/host/dev/ttyUSB0', magnet_count=3)
+        self.assertEqual(args[args.index('--port') + 1], '/host/dev/ttyUSB0')
+        self.assertEqual(args[args.index('--baudrate') + 1], '921600')
+        self.assertEqual(args[args.index('--magnet-count') + 1], '3')
+        with self.assertRaisesRegex(ValueError, 'serial port'):
+            build_teleoperation_argv('python', 'P01', 'S01', 'serial')
+
+    def test_invalid_settings_and_unsafe_ids_are_rejected(self):
+        settings = parse_teleoperation_settings('0', '10', '25', '2', 'Not specified')
+        self.assertEqual(settings['magnet_count'], None)
+        self.assertEqual(parse_teleoperation_settings('0', '10', '50', '2')['tolerance_mm'], 50)
+        for values in [('x', '10', '25', '2', '1'), ('0', '0', '25', '2', '1'),
+                       ('0', '10', 'nan', '2', '1'), ('0', '10', '25', 'inf', '1'),
+                       ('0', '10', '120', '2', '1'), ('0', '10', '100', '2', '1'),
+                       ('0', '10', '25', '2', '4')]:
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                parse_teleoperation_settings(*values)
+        for participant, session in [('../P01', 'S01'), ('P01', '../S01')]:
+            with self.assertRaises(ValueError):
+                build_teleoperation_argv('python', participant, session)
+
+    def test_teleoperation_session_numbering_is_independent_of_characters(self):
+        with tempfile.TemporaryDirectory() as folder:
+            _os.makedirs(_os.path.join(folder, 'characters', 'P01', 'S99'))
+            self.assertEqual(next_teleoperation_session(folder, 'P01'), 'S01')
+            _os.makedirs(_os.path.join(folder, 'teleoperation', 'P01', 'S03'))
+            _os.makedirs(_os.path.join(folder, 'teleoperation', 'P01', 'scratch'))
+            self.assertEqual(next_teleoperation_session(folder, 'P01'), 'S04')
+
+    @mock.patch.dict('colmag_launcher.os.environ', {'COLMAG_TELEOP_PYTHON': '/tmp/custom env/python'})
+    def test_host_interpreter_override_is_literal(self):
+        self.assertEqual(teleoperation_python(), '/tmp/custom env/python')
+
+    @mock.patch('colmag_launcher.probe_teleoperation_runtime', return_value=(True, '3.3.7'))
+    @mock.patch('colmag_launcher.subprocess.Popen')
+    def test_trackpad_start_needs_no_container_and_does_not_precreate_session(self, popen, _probe):
+        with tempfile.TemporaryDirectory() as folder, mock.patch('colmag_launcher.DATA_DIR', folder):
+            launcher = Launcher.__new__(Launcher)
+            launcher._pipeline_action_ready = mock.Mock(return_value=True)
+            launcher._ensure_container = mock.Mock()
+            launcher._sensor_in_use = mock.Mock()
+            launcher._checked_sensor_port = mock.Mock()
+            launcher._replace_log = mock.Mock()
+            launcher.after = mock.Mock()
+            self.assertTrue(launcher.start_teleoperation('P01', participant_name='Ada'))
+            launcher._ensure_container.assert_not_called()
+            launcher._sensor_in_use.assert_not_called()
+            launcher._checked_sensor_port.assert_not_called()
+            self.assertFalse(_os.path.exists(_os.path.join(folder, 'teleoperation', 'P01', 'S01')))
+            self.assertFalse(popen.call_args.kwargs.get('shell', False))
+            self.assertTrue(popen.call_args.kwargs['start_new_session'])
+            launcher._teleoperation_log_file.close()
+
+    @mock.patch('colmag_launcher.probe_teleoperation_runtime')
+    def test_board_start_is_blocked_before_runtime_when_sensor_busy(self, probe):
+        launcher = Launcher.__new__(Launcher)
+        launcher._pipeline_action_ready = mock.Mock(return_value=True)
+        launcher._ensure_container = mock.Mock(return_value=True)
+        launcher._sensor_in_use = mock.Mock(return_value='interface')
+        launcher._checked_sensor_port = mock.Mock()
+        launcher._warn_sensor_busy = mock.Mock()
+        self.assertFalse(launcher.start_teleoperation('P01', input_source='serial'))
+        launcher._warn_sensor_busy.assert_called_once_with('interface')
+        launcher._checked_sensor_port.assert_not_called()
+        probe.assert_not_called()
+
+    @mock.patch('colmag_launcher.in_container', return_value=(True, '321 python3 /colmag/tools/teleoperation_serial_stream.py'))
+    def test_board_bridge_is_detected_and_included_in_cleanup(self, run):
+        launcher = Launcher.__new__(Launcher)
+        self.assertEqual(launcher._sensor_in_use(), 'teleoperation')
+        self.assertIn('[t]eleoperation_serial_stream.py', run.call_args.args[0])
+        self.assertIn('[t]eleoperation_serial_stream.py', build_stop_all_command())
+
+    @mock.patch('colmag_launcher.os.killpg')
+    def test_stop_targets_only_the_owned_host_process_group(self, kill):
+        launcher = Launcher.__new__(Launcher)
+        process = mock.Mock(pid=1234)
+        process.poll.return_value = None
+        launcher._teleoperation_process = process
+        launcher._stop_teleoperation_worker()
+        self.assertEqual(kill.call_args.args[0], 1234)
+        process.wait.assert_called_once_with(timeout=4)
+
+    @mock.patch('colmag_launcher.messagebox.showwarning')
+    def test_second_start_cannot_replace_running_simulation(self, warn):
+        launcher = Launcher.__new__(Launcher)
+        launcher._pipeline_action_ready = mock.Mock(return_value=True)
+        launcher._ensure_container = mock.Mock()
+        process = mock.Mock()
+        process.poll.return_value = None
+        launcher._teleoperation_process = process
+        self.assertFalse(launcher.start_teleoperation('P01'))
+        launcher._ensure_container.assert_not_called()
+        warn.assert_called_once()
+
+    @mock.patch('colmag_launcher.messagebox.showerror')
+    def test_old_watch_callback_cannot_watch_a_new_process_or_repeat_errors(self, error):
+        launcher = Launcher.__new__(Launcher)
+        launcher._closing = False
+        launcher._stopping = False
+        launcher.after = mock.Mock()
+        old = mock.Mock()
+        current = mock.Mock(returncode=1)
+        current.poll.return_value = 1
+        launcher._teleoperation_process = current
+        launcher._watch_teleoperation(old)
+        old.poll.assert_not_called()
+        launcher.after.assert_not_called()
+        error.assert_not_called()
+        launcher._watch_teleoperation(current)
+        launcher._watch_teleoperation(current)
+        error.assert_called_once()
+
+
+@unittest.skipUnless(_os.environ.get('COLMAG_TEST_LAUNCHER_GUI') == '1',
+                     'set COLMAG_TEST_LAUNCHER_GUI=1 under a display for the Data panel rehearsal')
+class TeleoperationPanelGuiTests(unittest.TestCase):
+    def test_named_participant_start_routes_selected_settings_from_new_tab(self):
+        from colmag import dataset
+        import tkinter as tk
+        with tempfile.TemporaryDirectory() as folder:
+            dataset.save_participants(folder, [dict(dataset.new_participant('P01'), name='Ada', consent=True)])
+            parent = tk.Tk()
+            for name, font in [('f_title', ('Arial', 20)), ('f_h', ('Arial', 12)),
+                               ('f_body', ('Arial', 11)), ('f_small', ('Arial', 9)), ('f_btn', ('Arial', 11))]:
+                setattr(parent, name, font)
+            parent.start_teleoperation = mock.Mock()
+            parent.stop_teleoperation = mock.Mock()
+            panel = DataPanel(parent, data_dir=folder)
+            try:
+                panel.pipeline.set('teleoperation')
+                panel._pipeline_changed()
+                panel.experiment_name.set('Week 1 pilot')
+                panel.teleop_magnets.set('2')
+                panel.start_teleoperation('P01')
+                parent.update()
+                self.assertTrue(panel.teleoperation_panel.winfo_ismapped())
+                self.assertFalse(panel.character_panel.winfo_ismapped())
+                parent.start_teleoperation.assert_called_once_with('P01',
+                    input_source='trackpad', participant_name='Ada', experiment_name='Week 1 pilot',
+                    seed=0, trials=10, tolerance_mm=25.0, dwell_seconds=2.0, magnet_count=2)
+                panel.pipeline.set('characters')
+                panel._pipeline_changed()
+                parent.update()
+                self.assertTrue(panel.character_panel.winfo_ismapped())
+            finally:
+                panel.destroy()
+                parent.destroy()
 
 
 if __name__ == '__main__':

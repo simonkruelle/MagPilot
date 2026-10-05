@@ -1,5 +1,10 @@
 # Week 1 — virtual target-reaching pilot
 
+For the integrated **Data → Teleoperation Pipeline** demo with random targets,
+a loading ring and a two-second hold, use the
+[MuJoCo collection instructions](TELEOPERATION_COLLECTION.md).
+The instructions below describe the separate Gazebo observer.
+
 Start the difficult robot task early: pilot the existing simulated FR3 to a
 known Cartesian position, then record how long it takes and the remaining
 end-effector position error. This is software and protocol scaffolding;

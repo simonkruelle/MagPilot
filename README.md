@@ -288,6 +288,17 @@ active with Gazebo closed. Select any stage to view and copy its live log. The
 **Action mapping** button opens the task vocabulary used by classified
 characters.
 
+**Data → Teleoperation Pipeline** opens the FR3 in **MuJoCo**. Press **Enter**
+to reveal a random target, move with the trackpad or magnet board, and hold
+inside the blue sphere for **2 seconds**. The loading ring fills; the measured
+trajectory and completion time save automatically. No held button is needed.
+
+<p align="center">
+  <img src="docs/teleoperation.png" width="880" alt="MuJoCo teleoperation collection: robot, random target sphere and continuous hold progress">
+  <br>
+  <sub><a href="docs/TELEOPERATION_COLLECTION.md">Setup, controls and saved data</a> · Trackpad demo works without the sensor board</sub>
+</p>
+
 For hardware, choose **magnetometer**, select the numbered serial port shown in
 the log, and enter the robot IP when needed. Startup clears stale ROS processes,
 and closing the app shuts the pipeline down in order.
