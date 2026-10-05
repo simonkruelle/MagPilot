@@ -27,7 +27,8 @@ class InputMappingTests(unittest.TestCase):
         self.assertAlmostEqual(raised[2], .52)
 
     def test_invalid_or_lifted_board_input_cannot_drive_the_robot(self):
-        for pose in ((0, 0, .161, 0, 0, 1), (0, 0, math.nan, 0, 0, 1), (0, 0, .02)):
+        for pose in ((0, 0, .161, 0, 0, 1), (0, 0, math.nan, 0, 0, 1), (0, 0, .02),
+                     (.116, .191, -.118, 0, 0, 1), (.05001, 0, .02, 0, 0, 1)):
             with self.assertRaises(ValueError):
                 magnet_position(pose)
         with self.assertRaises(ValueError):
@@ -175,7 +176,7 @@ class GuiCollectionTests(unittest.TestCase):
             finally:
                 app.close()
 
-    def test_board_snapshots_are_logged_and_stale_input_cancels_the_hold(self):
+    def test_lifted_and_stale_board_estimates_pause_then_resume_a_full_hold(self):
         import tkinter as tk
         from tools.teleoperation_demo import parser, TeleoperationWindow
 
@@ -213,19 +214,84 @@ class GuiCollectionTests(unittest.TestCase):
                     root.update()
                     time.sleep(.01)
                 self.assertGreaterEqual(app.trial.progress, .2)
+                valid_pose = board.pose
+                board.pose = [0, 0, .3, 0, 0, 1]
+                deadline = time.monotonic() + 2
+                while app.trial.rows[-1]['input_valid'] and time.monotonic() < deadline:
+                    root.update()
+                    time.sleep(.01)
+                self.assertEqual(app.trial.status, 'running')
+                self.assertEqual(app.trial.progress, 0)
+                self.assertFalse(app.trial.rows[-1]['input_valid'])
+                self.assertIn('15 cm', app.trial.rows[-1]['input_sample_json'])
+                self.assertEqual(app.index, 0)
+                self.assertEqual(app.run.completed, [])
+                board.pose = valid_pose
                 board.stale = True
+                deadline = time.monotonic() + 2
+                while 'fresh magnet-board packets' not in app.feedback.cget('text') and time.monotonic() < deadline:
+                    root.update()
+                    time.sleep(.01)
+                self.assertEqual(app.trial.status, 'running')
+                self.assertEqual(app.run.completed, [])
+                self.assertEqual(app.ring.itemcget(app.percent, 'text'), '0%')
+                self.assertIn('magnetic_fields', app.trial.rows[-1]['input_sample_json'])
+                board.stale = False
+                recovered = time.monotonic()
+                deadline = recovered + 8
+                while not app.run.completed and time.monotonic() < deadline:
+                    root.update()
+                    time.sleep(.01)
+                result = app.run.completed[0]
+                self.assertEqual(result['status'], 'completed')
+                self.assertGreaterEqual(result['finished_wall_monotonic_s'] - recovered, 2)
+                self.assertGreaterEqual(result['held_duration_s'], 2)
+                self.assertTrue(app.trial.rows[-1]['input_valid'])
+                self.assertEqual(app.run.manifest['magnet_count'], 2)
+            finally:
+                app.close()
+            self.assertTrue(board.closed)
+
+    def test_invalid_board_cannot_start_and_connection_failure_retains_the_reason(self):
+        import tkinter as tk
+        from tools.teleoperation_demo import parser, TeleoperationWindow
+
+        class Board:
+            error = ''
+            pose = [.116, .191, -.118, 0, 0, 1]
+
+            def latest(self):
+                return dict(pose=self.pose, magnetic_fields=[1] * 48,
+                            received_monotonic_s=time.monotonic())
+
+            def close(self):
+                pass
+
+        board = Board()
+        with tempfile.TemporaryDirectory() as folder:
+            args = parser().parse_args(['--input-source', 'serial', '--output-dir',
+                                       str(Path(folder) / 'session')])
+            root = tk.Tk()
+            with mock.patch('colmag.teleoperation_input.SerialInput', return_value=board):
+                app = TeleoperationWindow(root, args)
+            try:
+                root.update()
+                app.start_trial()
+                self.assertIsNone(app.trial)
+                self.assertIn('input area', app.feedback.cget('text'))
+                board.pose = [0, 0, .05, 0, 0, 1]
+                app._show_board_readiness(time.monotonic())
+                self.assertIn('Board ready', app.feedback.cget('text'))
+                app.start_trial()
+                board.error = 'serial port disconnected'
                 deadline = time.monotonic() + 2
                 while not app.run.completed and time.monotonic() < deadline:
                     root.update()
                     time.sleep(.01)
                 self.assertEqual(app.run.completed[0]['status'], 'feedback_lost')
-                self.assertEqual(app.run.completed[0]['completion_time_s'], '')
-                self.assertEqual(app.ring.itemcget(app.percent, 'text'), '0%')
-                self.assertIn('magnetic_fields', app.trial.rows[-1]['input_sample_json'])
-                self.assertEqual(app.run.manifest['magnet_count'], 2)
+                self.assertIn('serial port disconnected', app.feedback.cget('text'))
             finally:
                 app.close()
-            self.assertTrue(board.closed)
 
     def test_enter_pointer_hold_save_cancel_and_close(self):
         import tkinter as tk

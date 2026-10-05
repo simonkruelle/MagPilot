@@ -79,6 +79,37 @@ class TeleoperationTrialTests(unittest.TestCase):
         self.assertEqual(self.sample(trial, 3.5)['status'], 'completed')
         self.assertAlmostEqual(trial.result['held_duration_s'], 2)
 
+    def test_invalid_control_input_resets_dwell_even_when_measured_pose_stays_inside(self):
+        trial = self.trial()
+        for index in range(1, 5):
+            self.sample(trial, index * .25)
+        self.assertGreater(trial.progress, 0)
+        sample = dict(tracking_valid=False, tracking_error='Magnet lifted', pose=[0, 0, .3, 0, 0, 1])
+        self.assertIsNone(trial.update(11.25, 101.25, self.target['position_m'],
+                                      input_sample=sample, input_valid=False))
+        self.assertEqual(trial.progress, 0)
+        self.assertIsNone(trial.inside_since)
+        self.assertFalse(trial.rows[-1]['input_valid'])
+        self.assertTrue(trial.rows[-1]['inside_tolerance'])
+        self.assertEqual(json.loads(trial.rows[-1]['input_sample_json']), sample)
+        for index in range(6, 14):
+            self.assertIsNone(self.sample(trial, index * .25))
+        result = self.sample(trial, 3.5)
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(result['held_duration_s'], 2)
+
+    def test_persistent_invalid_input_times_out_and_cannot_count_as_completion(self):
+        trial = self.trial(TeleoperationSettings(timeout_s=3))
+        for index in range(1, 12):
+            result = trial.update(10 + index * .25, 100 + index * .25,
+                                  self.target['position_m'], input_valid=False)
+            self.assertIsNone(result)
+            self.assertEqual(trial.progress, 0)
+        result = trial.update(13, 103, self.target['position_m'], input_valid=False)
+        self.assertEqual(result['status'], 'timed_out')
+        self.assertEqual(result['completion_time_s'], '')
+        self.assertEqual(result['held_duration_s'], 0)
+
     def test_tolerance_is_spherical_and_boundary_is_inside(self):
         trial = self.trial()
         self.sample(trial, 0.25, (0.5, 0, 0.425))

@@ -97,7 +97,7 @@ TRAJECTORY_FIELDS = [
     'wall_monotonic_s', 'simulation_time_s', 'wall_elapsed_s', 'sim_elapsed_s',
     'actual_x_m', 'actual_y_m', 'actual_z_m',
     'commanded_x_m', 'commanded_y_m', 'commanded_z_m',
-    'input_sample_json',
+    'input_sample_json', 'input_valid',
     'target_x_m', 'target_y_m', 'target_z_m', 'target_error_m',
     'inside_tolerance', 'dwell_progress',
 ]
@@ -165,7 +165,7 @@ class TeleoperationTrial:
         return min(1.0, max(0.0, (self.last_wall_s - self.inside_since) /
                             self.settings.dwell_s))
 
-    def _append_row(self, wall_s, sim_s, point, command, input_sample_json=''):
+    def _append_row(self, wall_s, sim_s, point, command, input_sample_json='', input_valid=True):
         target = self.target['position_m']
         command = command or ('', '', '')
         self.rows.append(dict(
@@ -175,6 +175,7 @@ class TeleoperationTrial:
             actual_x_m=point[0], actual_y_m=point[1], actual_z_m=point[2],
             commanded_x_m=command[0], commanded_y_m=command[1], commanded_z_m=command[2],
             input_sample_json=input_sample_json,
+            input_valid=input_valid,
             target_x_m=target[0], target_y_m=target[1], target_z_m=target[2],
             target_error_m=distance(point, target),
             inside_tolerance=distance(point, target) <= self.settings.tolerance_m + 1e-12,
@@ -182,7 +183,7 @@ class TeleoperationTrial:
         ))
 
     def update(self, wall_s, sim_s, actual_position, commanded_position=None,
-               input_sample=None):
+               input_sample=None, input_valid=True):
         if self.status != 'running':
             return None
         wall_s, sim_s = float(wall_s), float(sim_s)
@@ -190,6 +191,8 @@ class TeleoperationTrial:
         command = None if commanded_position is None else position(commanded_position)
         raw_input = ('' if input_sample is None else
                      json.dumps(input_sample, sort_keys=True, allow_nan=False))
+        if not isinstance(input_valid, bool):
+            raise ValueError('input_valid must be a boolean.')
         if not all(math.isfinite(value) for value in (wall_s, sim_s)):
             raise ValueError('Sample times must be finite.')
         if wall_s <= self.last_wall_s:
@@ -201,14 +204,14 @@ class TeleoperationTrial:
         self.path_length_m += distance(self.last_position, point)
         self.last_wall_s, self.last_sim_s, self.last_position = wall_s, sim_s, point
         self.last_commanded_position = command
-        if advanced and not clock_reset and self.error_m <= self.settings.tolerance_m + 1e-12:
+        if input_valid and advanced and not clock_reset and self.error_m <= self.settings.tolerance_m + 1e-12:
             if self.inside_since is None:
                 self.inside_since = wall_s
             if self.first_entry_wall_s is None:
                 self.first_entry_wall_s = wall_s
         else:
             self.inside_since = None
-        self._append_row(wall_s, sim_s, point, command, raw_input)
+        self._append_row(wall_s, sim_s, point, command, raw_input, input_valid)
         if clock_reset:
             return self.finish('clock_reset', wall_s, sim_s)
         # The deadline wins over a dwell that completes on the same sample.

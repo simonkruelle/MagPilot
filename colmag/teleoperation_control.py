@@ -33,11 +33,16 @@ def pointer_position(u, v, height_m):
 
 
 def magnet_position(pose, input_extent_m=0.05):
-    """Reuse board axes and calibrated nonlinear height within the task cube."""
+    """Reuse board axes and height; reject estimates outside the input area."""
     if len(pose) != 6 or not all(math.isfinite(float(value)) for value in pose):
         raise ValueError('A finite six-value board pose is required.')
     if not math.isfinite(input_extent_m) or input_extent_m <= 0:
         raise ValueError('Board input extent must be positive.')
+    # An outlying estimate must not silently command a workspace corner. Allow
+    # one micrometre for float32 values at the declared board-area boundary.
+    if any(abs(float(value)) > input_extent_m + 1e-6 for value in pose[:2]):
+        raise ValueError('Board estimate outside the ±{:g} mm input area.'.format(
+            input_extent_m * 1000))
     height = calibrated_magnet_height(pose[2])
     if height > MAGNET_HEIGHT_MAX_M:
         raise ValueError('Magnet lifted above the 15 cm control range.')

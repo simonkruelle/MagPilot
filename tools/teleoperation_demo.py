@@ -18,6 +18,14 @@ from colmag.teleoperation_task import (
 )
 
 
+class BoardTrackingUnavailable(ValueError):
+    """A recoverable tracking gap, retaining the estimate for the trial log."""
+
+    def __init__(self, reason, sample=None):
+        super().__init__(reason)
+        self.sample = dict(sample or {}, tracking_valid=False, tracking_error=reason)
+
+
 def parser():
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument('--input-source', choices=('trackpad', 'serial'), default='trackpad')
@@ -99,6 +107,8 @@ class TeleoperationWindow:
                               wheel_step_m=0.001, height_slider_resolution_m=0.001,
                               board_input_extent_m=0.05, board_z_bias_m=0.010,
                               board_height_range_m=[0.007, 0.150], board_height_gain=2.0,
+                              board_tracking_policy='outside input area, lifted or stale: hold, reset dwell, resume; elapsed time continues',
+                              board_connection_error_policy='stop trial and save feedback_lost',
                               purpose='pilot; no robot hardware commands'))
         except Exception:
             if self.source:
@@ -106,6 +116,7 @@ class TeleoperationWindow:
             self.robot.close()
             raise
         self.trial = None
+        self.failure_reason = ''
         self.pending_save = None
         self.index = 0
         self.u = self.v = 0.0
@@ -176,7 +187,7 @@ class TeleoperationWindow:
         if self.source is None:
             instructions = 'Point into the visible cube\nAdjust Z to the target height\nScroll anywhere / slider · no click'
         else:
-            instructions = 'Board X / Y → robot plane\nRaise / lower → robot height\nLift above 15 cm to stop'
+            instructions = 'Board X / Y → robot plane · ±50 mm\nRaise / lower → robot height\nLift / tracking gap → pause'
         self._label(sidebar, instructions, 10, justify='left').pack(padx=10, pady=(8, 0))
         self.height_label = self._label(sidebar, 'Measured Z 40.0 cm', 13, True)
         self.height_label.pack(pady=(12, 0))
@@ -305,11 +316,25 @@ class TeleoperationWindow:
                                  mapping='scene_height_plane_v1')
         sample = self.source.latest()
         if self.source.error:
-            raise ValueError(self.source.error)
+            raise RuntimeError('Sensor-board connection failed: {}'.format(self.source.error))
         if (not sample or now - sample['received_monotonic_s'] + sample.get('source_age_s', 0.0)
                 > self.settings.max_feedback_gap_s):
-            raise ValueError('Waiting for fresh magnet-board packets.')
-        return magnet_position(sample['pose']), sample
+            raise BoardTrackingUnavailable('Waiting for fresh magnet-board packets.', sample)
+        try:
+            command = magnet_position(sample['pose'])
+        except ValueError as exc:
+            raise BoardTrackingUnavailable(str(exc), sample) from exc
+        return command, sample
+
+    def _show_board_readiness(self, now):
+        """Expose board readiness before Enter instead of starting blind."""
+        try:
+            unused, sample = self.input_sample(now)
+            x, y, z = sample['pose'][:3]
+            self.feedback.configure(text='Board ready\nEstimate X {:.0f}  Y {:.0f}  Z {:.0f} mm'.format(
+                x * 1000, y * 1000, z * 1000), fg=self.GREEN)
+        except (BoardTrackingUnavailable, RuntimeError) as exc:
+            self.feedback.configure(text=str(exc), fg='#c74736')
 
     def start_trial(self):
         if self.pending_save:
@@ -331,6 +356,7 @@ class TeleoperationWindow:
             self.trial = TeleoperationTrial(
                 self.targets[self.index], self.settings, time.monotonic(),
                 self.robot.sim_time, self.robot.position)
+            self.failure_reason = ''
             self.last_tick = self.trial.start_wall_s
             self.status.configure(text='Trial {} / {} · navigate to the blue sphere'.format(
                 self.index + 1, len(self.targets)))
@@ -366,7 +392,8 @@ class TeleoperationWindow:
         self.feedback.configure(
             text=('Saved · {:.2f} s\nEndpoint error {:.1f} mm'.format(
                 row['completion_time_s'], row['endpoint_error_m'] * 1000)
-                  if completed else 'Saved · {}\n{}'.format(row['status'].replace('_', ' '),
+                  if completed else 'Saved · {}\n{}{}'.format(row['status'].replace('_', ' '),
+                      self.failure_reason + '\n' if self.failure_reason else '',
                       'Enter retries this target' if row['status'] != 'timed_out' else 'Enter starts the next target')),
             fg=self.GREEN if completed else '#c74736')
         finished = self.index >= len(self.targets)
@@ -439,15 +466,34 @@ class TeleoperationWindow:
         now = time.monotonic()
         dt, self.last_tick = min(0.1, max(0.001, now - self.last_tick)), now
         active = self.trial and self.trial.status == 'running'
+        tracking_paused = False
+        if self.source is not None and self.trial is None:
+            self._show_board_readiness(now)
         if active:
             try:
-                command, sample = self.input_sample(now)
-                self.robot.command_cartesian(command)
-                self.robot.step(dt)
-                self.trial.update(time.monotonic(), self.robot.sim_time,
-                                  self.robot.position, self.robot.command_position,
-                                  input_sample=sample)
+                try:
+                    command, sample = self.input_sample(now)
+                except BoardTrackingUnavailable as exc:
+                    # A pen lift, a noisy estimate or a temporary packet gap
+                    # holds position without consuming a failed trial. Keep
+                    # wall time and invalid samples so the comparison records
+                    # the interruption, and never let held position earn dwell.
+                    tracking_paused = True
+                    self.robot.hold()
+                    self.robot.step(dt)
+                    self.trial.update(time.monotonic(), self.robot.sim_time,
+                                      self.robot.position, input_sample=exc.sample,
+                                      input_valid=False)
+                    self.feedback.configure(text='Tracking paused\n{}'.format(exc), fg='#c74736')
+                else:
+                    self.robot.command_cartesian(command)
+                    self.robot.step(dt)
+                    self.trial.update(time.monotonic(), self.robot.sim_time,
+                                      self.robot.position, self.robot.command_position,
+                                      input_sample=sample)
+                    self.feedback.configure(text='')
             except Exception as exc:
+                self.failure_reason = str(exc)
                 self.trial.finish('feedback_lost', time.monotonic(), self.robot.sim_time)
                 self.feedback.configure(text=str(exc), fg='#c74736')
                 print('Feedback stopped: {}'.format(exc), flush=True)
@@ -459,7 +505,7 @@ class TeleoperationWindow:
         self.ring.itemconfigure(self.arc, extent=-max(0.01, 359.99 * progress))
         self.ring.itemconfigure(self.percent, text='{:d}%'.format(round(progress * 100)))
         self.progress_text.configure(text=('Target held · saving' if self.pending_save else 'Target held · saved') if progress >= 1 else
-                                     ('Hold steady…' if progress > 0 else 'Move to target' if active else 'Waiting for Enter'))
+                                     ('Tracking paused' if tracking_paused else 'Hold steady…' if progress > 0 else 'Move to target' if active else 'Waiting for Enter'))
         if self.trial:
             self.metrics.configure(text='Distance  {:.1f} mm\nElapsed    {:.2f} s'.format(
                 self.trial.error_m * 1000,
