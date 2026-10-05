@@ -275,6 +275,51 @@ For hardware, choose **magnetometer**, select the numbered serial port shown in
 the log, and enter the robot IP when needed. Startup clears stale ROS processes,
 and closing the app shuts the pipeline down in order.
 
+The **Data** window collects digits **0–9** and uppercase letters **A–J**, with
+ten takes per character. Enter an **experiment name** (for example, `Pen v2
+pilot`), add participant names, and press Save. The coverage table shows names
+alongside stable participant IDs. Experiment names are stored in recording
+metadata; each Start opens a new numbered participant session.
+
+In the recording window, select a character with **0–9** or **A–J**, position
+the pen, then press **Enter** to start. Draw one character and press **Enter**
+again to stop and save **before lifting or repositioning the pen**. An operator
+can press the key for the participant. **Escape** cancels an unfinished take;
+after a successful save, Enter starts another take of the selected character.
+Stopping freezes the samples before CSV, image and metadata generation. The
+collection view hides the gesture buttons and the launcher disables OCR.
+Recordings live in the gitignored `data_collection/` folder.
+
+To demonstrate the pipeline without the sensor board, select **Demo (mouse)**
+in Data, save a participant and experiment name, then press the participant's
+**Start** button. Select a character, position the cursor, press **Enter**, then
+move the mouse to draw. Press **Enter** again to stop the ink and save. The
+experimenter can select the character and press Enter while the participant
+only draws; no held key or mouse button is required. The recording window shows
+the capture state, character preview and progress. Movement outside a capture
+does not add ink, and a take with no drawing samples is discarded rather than
+counted. Optional blank/still controls remain available separately.
+Demo recordings and coverage live separately in `data_collection/demo/`.
+Docker must be running; neither a sensor board nor robot is needed.
+
+The selected character supplies the ground-truth label for scoring. A protected
+test set will hold out complete participants, including all their sessions and
+takes; labels and label-bearing filenames must stay out of model inputs. Fit
+learned preprocessing on training data, tune on validation data, and evaluate
+the test set after freezing the pipeline. Participant splits are a planned
+collection milestone. See the [evaluation plan](docs/LAB_MEETING_PLAN.md#held-out-evaluation).
+
+The [project plan](docs/LAB_MEETING_PLAN.md) tracks the meeting decisions and
+next milestones. The repaired board and three smaller magnets enable comparisons
+with one, two or three magnets. Virtual robot-arm target-reaching development
+and its pilot now start in **Week 1**; see the
+[pilot instructions](docs/VIRTUAL_TASK_PILOT.md).
+
+[Weekly lab updates](docs/reports/README.md) provide a GitHub review index.
+The **Week 1** update includes a [short written report](docs/reports/MagPilot_Lab_Update_2026-10-05.md),
+[two-page PDF](docs/reports/MagPilot_Lab_Update_2026-10-05.pdf) and
+[editable Word document](docs/reports/MagPilot_Lab_Update_2026-10-05.docx).
+
 > **Pitch deck.** A keynote-style presentation of the project lives in
 > [`presentation/`](presentation/) (`MagPilot_Keynote.pptx`, an eight-part
 > remote-controlled pitch with speaker notes) - see
@@ -347,6 +392,7 @@ mode (runs `fr3_real.launch robot_ip:=…`) and keep the E-stop reachable.
 |---|---|
 | Robot dot is **amber** | Sim runs but the Gazebo window is closed - press Start to reopen it. |
 | Stage dot stays gray | Check that stage's log in the app's log pane. |
+| Collection options are rejected, or Docker points to another checkout | From this project's root, run `COLMAG_SKIP_BUILD=1 bash ros/docker_setup.sh`, then reopen the launcher. This reconnects `/colmag` to this checkout using the existing image. |
 | Sensor port is listed but will not open | Reconnect it, then run `COLMAG_SKIP_BUILD=1 bash ros/docker_setup.sh` once. |
 | `gazebo_ros` / `franka_control` is missing | The container was built in sensor/UI-only mode. Rebuild once without `COLMAG_SKIP_BUILD`: `INSTALL_GAZEBO=1 bash ros/docker_setup.sh`. |
 | Simulation and real robot both active | **Stop all** shuts down named ROS nodes across host-network containers; any survivor stays visible in the log without disabling the controls. |
