@@ -293,8 +293,8 @@ to reveal a random target, move with the trackpad or magnet board, and hold
 with the centre between the gripper fingertips inside the blue sphere for
 **2 seconds**. The loading ring fills; the measured
 trajectory and completion time save automatically. No held button is needed.
-Pointer movement over the scene controls X/Y; scrolling anywhere in the window
-or the height slider controls Z. The green point marks the measured finger centre.
+Point into the visible workspace and adjust Z with scrolling or the height slider.
+The green point marks the measured finger centre; the top view reveals depth.
 The **Gazebo pilot** is in the same Data tab, with shared experiment and
 participant details; it records the arm controlled by the running Interface.
 

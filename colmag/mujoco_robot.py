@@ -344,6 +344,49 @@ class MuJoCoRobot:
         return (((projected_x - centre_x) / half_width + 1) * width * .5,
                 (top - projected_y) / (top - bottom) * height)
 
+    def pixel_to_workspace(self, pixel_xy, height_m, width=None, height=None):
+        """Intersect a displayed camera pixel with the selected horizontal plane.
+
+        The caller supplies pixel coordinates relative to the rendered image,
+        rather than the containing GUI canvas. The returned world point is not
+        clamped, so input handlers can apply the collection workspace bounds.
+        Pixels whose camera rays miss the plane in front of the camera return
+        ``None``. This uses the same mono camera as :meth:`project_world`.
+        """
+        pixel = np.asarray(pixel_xy, dtype=float)
+        plane_height = float(height_m)
+        if pixel.shape != (2,) or not np.all(np.isfinite(pixel)) or not math.isfinite(plane_height):
+            raise ValueError('pixel and height must contain finite coordinates')
+        if self._renderer is None:
+            return None
+        width, height = self._render_size if width is None or height is None else (float(width), float(height))
+        if not all(math.isfinite(value) and value > 0 for value in (width, height)):
+            raise ValueError('image dimensions must be finite and positive')
+        camera = self._mono_camera()
+        origin = np.asarray(camera.pos, dtype=float).copy()
+        forward, up = np.asarray(camera.forward, dtype=float), np.asarray(camera.up, dtype=float)
+        right = np.cross(forward, up)
+        right /= np.linalg.norm(right)
+        top, bottom = float(camera.frustum_top), float(camera.frustum_bottom)
+        half_width = (top - bottom) * .5 * width / height
+        horizontal = float(camera.frustum_center) + (2 * pixel[0] / width - 1) * half_width
+        vertical = top - pixel[1] / height * (top - bottom)
+        image_offset = right * horizontal + up * vertical
+        if camera.orthographic:
+            origin += image_offset
+            direction = forward
+        else:
+            direction = forward * float(camera.frustum_near) + image_offset
+        if abs(direction[2]) < 1e-12:
+            return None
+        distance = (plane_height - origin[2]) / direction[2]
+        if distance <= 0:
+            return None
+        point = origin + distance * direction
+        # Keep the selected input height exact despite floating-point ray math.
+        point[2] = plane_height
+        return point
+
     def projected_radius(self, position, radius_m, width=None, height=None):
         """Pixel radius in the camera's image plane for a physical margin."""
         if self._renderer is None:

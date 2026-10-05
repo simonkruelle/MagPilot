@@ -5,7 +5,9 @@ from itertools import product
 import os
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -106,6 +108,65 @@ class MuJoCoRobotTests(unittest.TestCase):
             self.robot.command_cartesian((float('nan'), 0, 0))
         with self.assertRaises(ValueError):
             self.robot.step(-1)
+
+    def test_pixel_to_workspace_validates_input_and_rejects_missing_rays(self):
+        self.assertIsNone(self.robot.pixel_to_workspace((320, 240), .4))
+        for pixel, height in (((float('nan'), 10), .4), ((10, 20, 30), .4), ((10, 20), float('inf'))):
+            with self.subTest(pixel=pixel, height=height):
+                with self.assertRaises(ValueError):
+                    self.robot.pixel_to_workspace(pixel, height)
+        camera = SimpleNamespace(pos=np.array((0., 0., 1.)),
+                                 forward=np.array((0., 0., -1.)),
+                                 up=np.array((0., 1., 0.)),
+                                 frustum_top=.1, frustum_bottom=-.1,
+                                 frustum_center=.03, frustum_near=.1,
+                                 orthographic=False)
+        with mock.patch.object(self.robot, '_renderer', object()), mock.patch.object(self.robot, '_mono_camera', return_value=camera):
+            for dimensions in ((0, 480), (640, float('nan'))):
+                with self.assertRaises(ValueError):
+                    self.robot.pixel_to_workspace((320, 240), .4, *dimensions)
+            self.assertIsNone(self.robot.pixel_to_workspace((320, 240), 2, 640, 480))
+            camera.forward = np.array((1., 0., 0.))
+            camera.up = np.array((0., 0., 1.))
+            self.assertIsNone(self.robot.pixel_to_workspace((320, 240), .4, 640, 480))
+
+    def test_off_axis_camera_pixel_inverse_for_perspective_and_orthographic(self):
+        camera = SimpleNamespace(pos=np.array((0., 0., 1.)),
+                                 forward=np.array((0., 0., -1.)),
+                                 up=np.array((0., 1., 0.)),
+                                 frustum_top=.1, frustum_bottom=-.1,
+                                 frustum_center=.03, frustum_near=.1,
+                                 orthographic=False)
+        with mock.patch.object(self.robot, '_renderer', object()), mock.patch.object(self.robot, '_mono_camera', return_value=camera):
+            for orthographic in (False, True):
+                camera.orthographic = orthographic
+                for point in ((.45, -.12, .28), (.33, .12, .52), (.57, .10, .37)):
+                    with self.subTest(orthographic=orthographic, point=point):
+                        pixel = self.robot.project_world(point, 640, 480)
+                        recovered = self.robot.pixel_to_workspace(pixel, point[2], 640, 480)
+                        np.testing.assert_allclose(recovered, point, atol=1e-12)
+            # Workspace clamping belongs to the input handler, not camera math.
+            outside = (1.5, -1., .4)
+            pixel = self.robot.project_world(outside, 640, 480)
+            np.testing.assert_allclose(self.robot.pixel_to_workspace(pixel, .4, 640, 480), outside, atol=1e-12)
+
+    @unittest.skipUnless(os.environ.get('COLMAG_TEST_MUJOCO_RENDER') == '1', 'set COLMAG_TEST_MUJOCO_RENDER=1 for the renderer check')
+    def test_scene_pixels_recover_all_corners_and_dense_height_planes(self):
+        goals = [(x, y, z) for z in (.28, .37, .40, .52)
+                 for x, y in product(np.linspace(.33, .57, 5), np.linspace(-.12, .12, 5))]
+        goals.extend((x, y, z) for x, y, z in product((.33, .57), (-.12, .12), (.28, .52)))
+        for width, height in ((640, 426), (960, 640), (640, 480)):
+            self.robot.render(width, height)
+            for goal in goals:
+                with self.subTest(size=(width, height), goal=goal):
+                    pixel = self.robot.project_world(goal)
+                    recovered = self.robot.pixel_to_workspace(pixel, goal[2])
+                    np.testing.assert_allclose(recovered, goal, atol=1e-7)
+                    np.testing.assert_allclose(self.robot.project_world(recovered), pixel, atol=1e-5)
+                    # The same inverse must work after the GUI scales the image.
+                    scaled_pixel = np.asarray(pixel) * 1.5
+                    np.testing.assert_allclose(self.robot.pixel_to_workspace(scaled_pixel, goal[2], width * 1.5, height * 1.5),
+                                               goal, atol=1e-7)
 
     @unittest.skipUnless(os.environ.get('COLMAG_TEST_MUJOCO_RENDER') == '1', 'set COLMAG_TEST_MUJOCO_RENDER=1 for the renderer check')
     def test_faint_target_volume_renders_in_actual_scene(self):

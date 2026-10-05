@@ -11,7 +11,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from colmag.robot_targets import DIGIT_CUBE_CENTER_M
+from colmag.robot_targets import DIGIT_CUBE_CENTER_M, DIGIT_CUBE_EDGE_M
 from colmag.teleoperation_control import magnet_position, pointer_position, wheel_height_delta
 from colmag.teleoperation_task import (
     TeleoperationRun, TeleoperationSettings, TeleoperationTrial, random_targets,
@@ -43,6 +43,7 @@ class TeleoperationWindow:
     BLUE = '#0a84ff'
     GREEN = '#24ad64'
     TEXT = '#202631'
+    RENDER_SIZE = (640, 426)
 
     def __init__(self, root, args):
         import tkinter as tk
@@ -87,7 +88,13 @@ class TeleoperationWindow:
                               gripper_opening_m=self.robot.gripper_opening_m,
                               flange_to_gripper_offset_m=list(self.robot.flange_to_gripper_offset_m),
                               flange_to_gripper_offset_frame=self.robot.flange_to_gripper_offset_frame,
-                              pointer_mapping='up=-X, right=+Y, scroll=Z; absolute cube mapping',
+                              pointer_mapping='scene_height_plane_v1; camera ray onto selected-Z plane, clamped to cube',
+                              pointer_height_behavior='keep the last scene ray while changing Z',
+                              pointer_sample_coordinates='image_uv: normalized scene pixels; u/v: normalized robot Y/-X',
+                              camera=dict(azimuth=self.robot.camera.azimuth,
+                                          elevation=self.robot.camera.elevation,
+                                          distance=self.robot.camera.distance,
+                                          lookat=list(self.robot.camera.lookat)),
                               height_controls='window-wide wheel or sidebar slider',
                               wheel_step_m=0.001, height_slider_resolution_m=0.001,
                               board_input_extent_m=0.05, board_z_bias_m=0.010,
@@ -102,6 +109,9 @@ class TeleoperationWindow:
         self.pending_save = None
         self.index = 0
         self.u = self.v = 0.0
+        self.pointer_image_uv = None
+        self.scene_image_size = None
+        self.reference_bounds = None
         self.height = DIGIT_CUBE_CENTER_M[2]
         self.height_control = 'common_start'
         self.updating_height_slider = False
@@ -164,7 +174,7 @@ class TeleoperationWindow:
         self.coordinates.pack(pady=(0, 6))
         self._label(sidebar, 'Blue: target · Green: finger centre', 9).pack()
         if self.source is None:
-            instructions = 'Pointer over scene · no click\n↑ toward base · → right\nScroll anywhere / slider: Z'
+            instructions = 'Point into the visible cube\nAdjust Z to the target height\nScroll anywhere / slider · no click'
         else:
             instructions = 'Board X / Y → robot plane\nRaise / lower → robot height\nLift above 15 cm to stop'
         self._label(sidebar, instructions, 10, justify='left').pack(padx=10, pady=(8, 0))
@@ -178,7 +188,7 @@ class TeleoperationWindow:
                                       highlightthickness=0, troughcolor='#e7edf5',
                                       font=(self.font_family, 9), state='disabled',
                                       command=self._set_height_cm)
-        self.height_slider.set(self.height * 100)
+        self._sync_height_slider()
         self.height_slider.pack(padx=12)
         # Consume wheel events here before the Scale class can move it twice.
         for sequence in ('<MouseWheel>', '<Button-4>', '<Button-5>'):
@@ -195,6 +205,7 @@ class TeleoperationWindow:
                                                  style='arc', outline=self.GREEN, width=4, state='hidden')
         self.gripper_dot = self.canvas.create_oval(0, 0, 0, 0, fill=self.GREEN,
                                                  outline='white', width=1)
+        self.reference_items = []
         self.canvas.bind('<Motion>', self._motion)
         footer = tk.Frame(self.root, bg=self.BG)
         footer.pack(fill='x', padx=24, pady=10)
@@ -225,8 +236,28 @@ class TeleoperationWindow:
 
     def _motion(self, event):
         if self.source is None and self.trial and self.trial.status == 'running':
-            self.u = 2 * event.x / max(1, self.canvas.winfo_width()) - 1
-            self.v = 1 - 2 * event.y / max(1, self.canvas.winfo_height())
+            if not self.scene_image_size:
+                return
+            width, height = self.scene_image_size
+            if not (0 <= event.x <= width and 0 <= event.y <= height):
+                return  # The image's letterbox is not a control surface.
+            if self.reference_bounds:
+                left, top, right, bottom = self.reference_bounds
+                if left <= event.x <= right and top <= event.y <= bottom:
+                    return  # The position inset is a readout, not a control pad.
+            self.pointer_image_uv = (event.x / width, event.y / height)
+            self._apply_scene_pointer()
+
+    def _apply_scene_pointer(self):
+        if self.pointer_image_uv is None:
+            return
+        width, height = self.RENDER_SIZE
+        point = self.robot.pixel_to_workspace(
+            (self.pointer_image_uv[0] * width, self.pointer_image_uv[1] * height), self.height)
+        if point is not None:
+            half = DIGIT_CUBE_EDGE_M / 2
+            self.u = max(-1, min(1, (point[1] - DIGIT_CUBE_CENTER_M[1]) / half))
+            self.v = max(-1, min(1, (DIGIT_CUBE_CENTER_M[0] - point[0]) / half))
 
     def _scroll(self, event):
         delta = wheel_height_delta(getattr(event, 'delta', 0),
@@ -240,6 +271,7 @@ class TeleoperationWindow:
         if self.source is None and self.trial and self.trial.status == 'running':
             self.height = max(0.28, min(0.52, self.height + delta))
             self.height_control = 'wheel'
+            self._apply_scene_pointer()
             self._sync_height_slider()
 
     def _set_height_cm(self, value):
@@ -247,6 +279,7 @@ class TeleoperationWindow:
                 self.trial and self.trial.status == 'running'):
             self.height = max(0.28, min(0.52, float(value) / 100))
             self.height_control = 'slider'
+            self._apply_scene_pointer()
 
     def _sync_height_slider(self):
         self.updating_height_slider = True
@@ -254,9 +287,12 @@ class TeleoperationWindow:
             # Setting a Tk Scale can schedule its command callback. Temporarily
             # detach that callback so synchronization cannot replace wheel input.
             callback = self.height_slider.cget('command')
-            self.height_slider.configure(command='')
+            state = self.height_slider.cget('state')
+            # Tk ignores Scale.set() while disabled. Synchronize its actual
+            # value before restoring the disabled/active interaction state.
+            self.height_slider.configure(command='', state='normal')
             self.height_slider.set(self.height * 100)
-            self.height_slider.configure(command=callback)
+            self.height_slider.configure(command=callback, state=state)
         finally:
             self.updating_height_slider = False
 
@@ -264,7 +300,9 @@ class TeleoperationWindow:
         if self.source is None:
             command = pointer_position(self.u, self.v, self.height)
             return command, dict(u=self.u, v=self.v, height_m=self.height,
-                                 height_control=self.height_control)
+                                 height_control=self.height_control,
+                                 pointer_image_uv=self.pointer_image_uv,
+                                 mapping='scene_height_plane_v1')
         sample = self.source.latest()
         if self.source.error:
             raise ValueError(self.source.error)
@@ -286,6 +324,7 @@ class TeleoperationWindow:
             # Establish the same actual starting pose before the timing clock.
             self.robot.reset()
             self.u = self.v = 0.0
+            self.pointer_image_uv = None
             self.height = DIGIT_CUBE_CENTER_M[2]
             self.height_control = 'common_start'
             self._sync_height_slider()
@@ -337,6 +376,63 @@ class TeleoperationWindow:
                                     text='Session complete' if finished else 'Next trial  ↵')
         print('Saved trial {}: {}'.format(row['trial'], row['status']), flush=True)
 
+    def _draw_position_reference(self, target):
+        """Top view and Z readout expose depth hidden by the main camera."""
+        for item in self.reference_items:
+            self.canvas.delete(item)
+        items = self.reference_items = []
+        bottom = self.canvas.winfo_height() - 14
+        left, top, right = 14, bottom - 184, 254
+        self.reference_bounds = (left, top, right, bottom)
+        items.append(self.canvas.create_rectangle(left, top, right, bottom,
+                     fill='#f8fafd', outline='#d6deea'))
+        items.append(self.canvas.create_text(left + 12, top + 14, anchor='w',
+                     text='Top view · 24 cm workspace', fill=self.TEXT,
+                     font=(self.font_family, 10, 'bold')))
+        plot_left, plot_top, side = left + 16, top + 34, 116
+        items.append(self.canvas.create_rectangle(plot_left, plot_top, plot_left + side,
+                     plot_top + side, outline='#a7b6cb'))
+        centre, half = self.settings.workspace_center_m, self.settings.workspace_edge_m / 2
+        def xy_pixel(point):
+            return (plot_left + side * (point[1] - centre[1] + half) / (2 * half),
+                    plot_top + side * (point[0] - centre[0] + half) / (2 * half))
+        z_x = left + 180
+        def z_pixel(point):
+            return plot_top + side * (centre[2] + half - point[2]) / (2 * half)
+        items.append(self.canvas.create_line(z_x, plot_top, z_x, plot_top + side,
+                     fill='#a7b6cb', width=2))
+        for text, y in (('52', plot_top), ('28', plot_top + side)):
+            items.append(self.canvas.create_text(z_x + 18, y, text=text,
+                         fill='#647187', font=(self.font_family, 8)))
+        actual = self.robot.position
+        if target is not None:
+            x, y = xy_pixel(target)
+            radius = side * self.settings.tolerance_m / (2 * half)
+            items.append(self.canvas.create_oval(x - radius, y - radius, x + radius,
+                         y + radius, outline=self.BLUE, width=2))
+            z, z_radius = z_pixel(target), radius
+            items.append(self.canvas.create_rectangle(z_x - 9, z - z_radius, z_x + 9,
+                         z + z_radius, fill='#e0efff', outline=self.BLUE))
+            delta = (target[2] - actual[2]) * 100
+            direction = 'Lower' if delta < -.05 else 'Raise' if delta > .05 else 'Height aligned'
+            height_hint = '{} {:.1f} cm'.format(direction, abs(delta)) if direction != 'Height aligned' else direction
+        else:
+            height_hint = 'Target revealed on Enter'
+        x, y = xy_pixel(actual)
+        items.append(self.canvas.create_oval(x - 4, y - 4, x + 4, y + 4,
+                     fill=self.GREEN, outline='white'))
+        z = z_pixel(actual)
+        items.append(self.canvas.create_oval(z_x - 4, z - 4, z_x + 4, z + 4,
+                     fill=self.GREEN, outline='white'))
+        items.append(self.canvas.create_text(plot_left + side / 2, top + 160,
+                     text='X / Y', fill='#647187', font=(self.font_family, 8)))
+        items.append(self.canvas.create_text(z_x, top + 160,
+                     text='Z · cm', fill='#647187', font=(self.font_family, 8)))
+        items.append(self.canvas.create_text(left + 12, bottom - 10, anchor='w',
+                     text=height_hint, fill=self.TEXT, font=(self.font_family, 9)))
+        for item in items:
+            self.canvas.tag_raise(item)
+
     def tick(self):
         if self.closed:
             return
@@ -373,30 +469,33 @@ class TeleoperationWindow:
         if now - self.last_render >= 1 / 25:
             try:
                 target = self.trial.target['position_m'] if self.trial else None
-                pixels = self.robot.render(width=640, height=426, target=target, tolerance=self.settings.tolerance_m,
+                pixels = self.robot.render(width=self.RENDER_SIZE[0], height=self.RENDER_SIZE[1], target=target, tolerance=self.settings.tolerance_m,
                                            dwell_progress=progress)
                 image = self.Image.fromarray(pixels)
                 scale = min(max(1, self.canvas.winfo_width()) / image.width,
                             max(1, self.canvas.winfo_height()) / image.height)
                 image = image.resize((max(1, round(image.width * scale)),
                                       max(1, round(image.height * scale))))
+                self.scene_image_size = (image.width, image.height)
+                scale_xy = (image.width / self.RENDER_SIZE[0], image.height / self.RENDER_SIZE[1])
                 self._photo = self.ImageTk.PhotoImage(image)
                 self.canvas.itemconfigure(self.scene_image, image=self._photo)
                 actual_pixel = self.robot.project_world(self.robot.position)
                 if actual_pixel:
-                    x, y = [coordinate * scale for coordinate in actual_pixel]
+                    x, y = [coordinate * factor for coordinate, factor in zip(actual_pixel, scale_xy)]
                     self.canvas.coords(self.gripper_dot, x - 5, y - 5, x + 5, y + 5)
                 if target is not None:
                     centre = self.robot.project_world(target)
                     projected_radius = self.robot.projected_radius(target, self.settings.tolerance_m)
                     if centre and projected_radius is not None:
-                        x, y = [coordinate * scale for coordinate in centre]
+                        x, y = [coordinate * factor for coordinate, factor in zip(centre, scale_xy)]
                         radius = max(8, scale * projected_radius)
                         for item in (self.target_rim, self.target_arc):
                             self.canvas.coords(item, x - radius, y - radius, x + radius, y + radius)
                             self.canvas.itemconfigure(item, state='normal')
                         self.canvas.itemconfigure(self.target_arc, extent=-max(.01, 359.99 * progress))
                 self.canvas.tag_raise(self.gripper_dot)
+                self._draw_position_reference(target)
                 self.last_render = now
             except Exception as exc:
                 print('Renderer error: {}'.format(exc), flush=True)

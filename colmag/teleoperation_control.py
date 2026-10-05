@@ -21,7 +21,7 @@ def wheel_height_delta(delta=0, button=None, window_system='x11'):
 
 
 def pointer_position(u, v, height_m):
-    """Horizontal flight-deck axes: up -> -X, right -> +Y; scroll -> Z."""
+    """Map normalized robot-plane coordinates into the cube with bounded Z."""
     values = [float(u), float(v), float(height_m)]
     if not all(math.isfinite(value) for value in values):
         raise ValueError('Input coordinates must be finite.')

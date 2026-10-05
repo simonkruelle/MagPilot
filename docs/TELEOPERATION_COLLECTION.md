@@ -6,9 +6,11 @@ Open **Data → Teleoperation Pipeline** and choose **MuJoCo demo** or
 For the random-target demo, select **MuJoCo demo → Start**.
 
 - Shared experiment name and participant names from the collection registry.
-- **Trackpad:** move the pointer over the scene for X/Y; no click or held button needed.
+- **Trackpad:** point at the visible target, then adjust height; no click or held button needed.
 - **Height:** scroll anywhere in the task window, including the sidebar, in **1 mm steps**;
   alternatively use the sidebar slider (**28–52 cm**).
+- **Position inset:** top view shows X/Y; the Z bar shows height. Blue is the target;
+  green is the measured fingertip midpoint. The inset is a readout, not a control pad.
 - **Magnet board:** board X/Y and calibrated magnet height control X/Y/Z.
 - **Enter:** reveal a random target and start timing from the common pose.
 - **Hold:** keep the green fingertip midpoint inside the single blue target sphere for **2 seconds**.
@@ -21,7 +23,15 @@ For the random-target demo, select **MuJoCo demo → Start**.
 
 The visible two-finger gripper makes the measured endpoint clear: the green
 marker sits between its fingertips. The sidebar shows **commanded** and
-**measured** height separately. Moving over the sidebar leaves X/Y unchanged.
+**measured** height separately. Pointer movement over the sidebar, position inset
+or empty image margins does not control the robot.
+
+The scene pointer intersects the camera ray with the selected-height plane;
+the resulting X/Y command is bounded by the workspace. Height changes keep the
+last scene ray, so within the cube the tool remains under that scene point while
+moving along the ray: X/Y can change together with Z. Before the first scene
+movement, height controls retain the common start's X/Y. The inset exposes depth differences
+that can be hidden when the two markers overlap in the main view.
 
 ## Setup
 
@@ -53,15 +63,17 @@ Standalone trackpad demo:
 | Continuous hold / timeout | 2 / 60 seconds |
 | Orientation | Fixed; position-only task |
 
-The cube constrains both target generation and controls in this demo. Board
-axes and nonlinear height follow the existing flight deck mapping, scaled to
+The cube constrains both target generation and controls in this demo; scene
+pointing does not enlarge it. Board axes and nonlinear height follow the
+existing flight deck mapping, scaled to
 this cube. Pick-and-place objects provide fixed visual landmarks.
 
 ## Saved data
 
 Each Start creates `data_collection/teleoperation/Pxx/Sxx/` (gitignored).
 
-- **manifest.json:** participant, experiment, input, magnet count, seed, settings and endpoint reference.
+- **manifest.json:** participant, experiment, input, magnet count, seed, settings,
+  endpoint reference and control mapping.
 - **summary.csv:** completion time, first entry, endpoint error, path length and status.
 - **trial_NNN_trajectory.csv:** measured and commanded XYZ, both clocks, target error and input snapshots.
 - **trial_NNN_result.json:** frozen trial result and protocol settings.
@@ -77,9 +89,14 @@ New sessions use **protocol v2**, measuring `gripper_center` at the fingertip
 midpoint. Historical **v1** files retain their flange reference. Keep v1 and v2
 endpoint measurements separate in comparisons.
 
-Practice first. Keep seed, targets, tolerance, hold and control mapping identical
-when comparing trackpad and magnet conditions; plan condition order and repetitions
-before collecting participant comparisons.
+The scene mapping is recorded as **`scene_height_plane_v1`**, with normalized
+image-pointer coordinates in the trace. Earlier trackpad sessions retain their
+original full-canvas mapping; do not pool their speed measurements with scene
+pointing trials without accounting for the changed controls.
+
+Practice first. Keep seed, targets, tolerance and hold identical across input
+conditions, and keep each condition's control mapping fixed. Plan condition
+order and repetitions before collecting participant comparisons.
 
 ## Gazebo pilot in the same panel
 

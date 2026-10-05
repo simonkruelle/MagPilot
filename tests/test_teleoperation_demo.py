@@ -15,7 +15,7 @@ from colmag.teleoperation_control import magnet_position, pointer_position, whee
 
 
 class InputMappingTests(unittest.TestCase):
-    def test_pointer_and_board_share_axes_and_cube_limits(self):
+    def test_robot_plane_normalization_and_board_cube_limits(self):
         self.assertEqual(pointer_position(0, 0, .4), (.45, 0, .4))
         self.assertAlmostEqual(pointer_position(1, 1, .8)[0], .33)
         self.assertEqual(pointer_position(1, 1, .8)[1:], (.12, .52))
@@ -49,6 +49,86 @@ class InputMappingTests(unittest.TestCase):
 @unittest.skipUnless(os.environ.get('DISPLAY') and importlib.util.find_spec('mujoco'),
                      'GUI rehearsal needs MuJoCo and a display (use xvfb-run).')
 class GuiCollectionTests(unittest.TestCase):
+    def render_ready(self, root, app):
+        deadline = time.monotonic() + 3
+        while app.scene_image_size is None and time.monotonic() < deadline:
+            root.update()
+            time.sleep(.01)
+        self.assertIsNotNone(app.scene_image_size)
+
+    def point_at(self, root, app, position):
+        self.render_ready(root, app)
+        x, y = app.robot.project_world(position)
+        width, height = app.scene_image_size
+        app.canvas.event_generate('<Motion>', x=round(x * width / app.RENDER_SIZE[0]),
+                                  y=round(y * height / app.RENDER_SIZE[1]))
+        root.update()
+
+    def test_visible_cube_corners_are_reachable_through_real_pointer_events(self):
+        from itertools import product
+        import tkinter as tk
+        from tools.teleoperation_demo import parser, TeleoperationWindow
+
+        with tempfile.TemporaryDirectory() as folder:
+            args = parser().parse_args(['--output-dir', str(Path(folder) / 'session')])
+            root = tk.Tk()
+            app = TeleoperationWindow(root, args)
+            try:
+                app.start_trial()
+                self.render_ready(root, app)
+                self.assertEqual(app.height_slider.get(), 40)
+                for x, y, z in product((.33, .57), (-.12, .12), (.28, .52)):
+                    app.height_slider.set(z * 100)
+                    root.update()
+                    self.point_at(root, app, (x, y, z))
+                    command, sample = app.input_sample(time.monotonic())
+                    self.assertLess(math.dist(command, (x, y, z)), .0015,
+                                    'goal {}, command {}, selected height {}'.format((x, y, z), command, app.height))
+                    self.assertEqual(sample['mapping'], 'scene_height_plane_v1')
+                    deadline = time.monotonic() + 4
+                    while math.dist(app.robot.position, (x, y, z)) > .002 and time.monotonic() < deadline:
+                        root.update()
+                        time.sleep(.01)
+                    self.assertLess(math.dist(app.robot.position, (x, y, z)), .002)
+                # Letterboxing and the reference view must leave XY unchanged.
+                previous = (app.u, app.v)
+                app._motion(SimpleNamespace(x=app.scene_image_size[0] + 5, y=50))
+                left, top, right, bottom = app.reference_bounds
+                app._motion(SimpleNamespace(x=(left + right) / 2, y=(top + bottom) / 2))
+                self.assertEqual((app.u, app.v), previous)
+                self.assertEqual(app.trial.status, 'running')
+            finally:
+                app.close()
+
+    def test_height_changes_keep_the_pointer_ray_and_resize_preserves_commands(self):
+        import tkinter as tk
+        from tools.teleoperation_demo import parser, TeleoperationWindow
+
+        with tempfile.TemporaryDirectory() as folder:
+            args = parser().parse_args(['--output-dir', str(Path(folder) / 'session')])
+            root = tk.Tk()
+            app = TeleoperationWindow(root, args)
+            try:
+                app.start_trial()
+                self.point_at(root, app, (.45, 0, .4))
+                app._height_change(.01)
+                command, unused = app.input_sample(time.monotonic())
+                projected = app.robot.project_world(command)
+                source_pixel = tuple(fraction * size for fraction, size in
+                                     zip(app.pointer_image_uv, app.RENDER_SIZE))
+                self.assertLess(math.dist(projected, source_pixel), .01)
+                before = (app.u, app.v)
+                width, height = app.scene_image_size
+                app._motion(SimpleNamespace(x=app.pointer_image_uv[0] * width,
+                                            y=app.pointer_image_uv[1] * height))
+                self.assertEqual((app.u, app.v), before)
+                root.geometry('1000x740')
+                root.update()
+                app._apply_scene_pointer()
+                self.assertEqual((app.u, app.v), before)
+            finally:
+                app.close()
+
     def test_sidebar_wheel_and_slider_reach_exact_heights_with_measured_feedback(self):
         import tkinter as tk
         from tools.teleoperation_demo import parser, TeleoperationWindow
@@ -168,10 +248,9 @@ class GuiCollectionTests(unittest.TestCase):
                 self.assertIs(app.trial, first_trial)
                 app.enter_down = False
                 target = app.trial.target['position_m']
-                u, v = target[1] / .12, (.45 - target[0]) / .12
-                app._motion(SimpleNamespace(
-                    x=(u + 1) / 2 * app.canvas.winfo_width(),
-                    y=(1 - v) / 2 * app.canvas.winfo_height()))
+                # Point at the actual rendered target, not a precomputed
+                # position on an invisible full-window control pad.
+                self.point_at(root, app, target)
                 # Same height increment used by wheel callbacks, without a held button.
                 steps = round((target[2] - .4) / .001)
                 for unused in range(abs(steps)):
@@ -191,6 +270,8 @@ class GuiCollectionTests(unittest.TestCase):
                 self.assertTrue(any(abs(float(row['actual_x_m']) - float(row['commanded_x_m'])) > .001
                                     for row in rows if row['commanded_x_m']))
                 self.assertIn('height_m', rows[-1]['input_sample_json'])
+                self.assertIn('scene_height_plane_v1', rows[-1]['input_sample_json'])
+                self.assertIn('pointer_image_uv', rows[-1]['input_sample_json'])
                 app.start_trial()
                 self.assertEqual(app.trial.status, 'running')
                 self.assertLess(math.dist(app.robot.position, (.45, 0, .4)), .001)
