@@ -688,6 +688,14 @@ class MagnetometerReader:
             'z_close_mode': self.z_close_mode,
             'z_near': self.z_near,
             'z_far': self.z_far,
+            'stroke_strength_mode': (
+                'uniform_capture'
+                if self.record_data and self.input_source == 'serial'
+                and self.z_near is None and self.z_far is None
+                else 'calibrated_z' if self.z_near is not None and self.z_far is not None
+                else 'synthetic_fixed' if self.input_source == 'touchpad'
+                else 'relative_z'
+            ),
             'classifier_labels': ''.join(display_labels_for(self.classifier_labels)),
             'classifier_mode': self.classifier_mode,
             'classifier_interval': self.classifier_interval,
@@ -2193,6 +2201,16 @@ class MagnetometerReader:
     def z_to_closeness(self, z_values):
         """Map Z values to 0..1 closeness, where 1 creates the darkest stroke."""
         z_values = np.asarray(z_values, dtype=float)
+
+        if (self.record_data and self.input_source == 'serial'
+                and self.z_near is None and self.z_far is None):
+            # Each character has explicit start/stop boundaries. A changing
+            # Z estimate is not pen pressure: normalizing the complete take
+            # on every frame would lighten earlier strokes whenever a new
+            # height extreme arrives. Use constant ink for accepted samples;
+            # writing_sample_mask still applies the separate pen-up Z gate.
+            # The original sensor values remain unchanged in every CSV.
+            return np.ones_like(z_values)
 
         if self.input_source == 'touchpad' and self.z_near is None and self.z_far is None:
             return np.full_like(z_values, np.clip(self.touchpad_ink_strength, 0.0, 1.0))
@@ -3700,7 +3718,7 @@ class MagnetometerReader:
             interpolation='bilinear',
             extent=(-self.projection_extent, self.projection_extent, -self.projection_extent, self.projection_extent),
             origin='upper',
-            alpha=0.58,
+            alpha=1.0 if self.record_data else 0.58,
             zorder=1,
         )
         ax5.set_title('Writing Surface', fontweight='bold', fontsize=13,
@@ -3788,11 +3806,6 @@ class MagnetometerReader:
                 ax5.add_patch(puff)
                 teleop_decor.append(puff)
 
-        z_range = (
-            f"calibrated {self.z_near:.4f}->{self.z_far:.4f}"
-            if self.z_near is not None and self.z_far is not None
-            else "relative trail range"
-        )
         if self.record_data:
             source = 'DEMO' if self.input_source == 'touchpad' else 'Sensor board'
             fig.canvas.manager.set_window_title(f'MagPilot collection · {source}')
@@ -3844,7 +3857,9 @@ class MagnetometerReader:
         ax6.text(
             0.0,
             -0.28,
-            f"X/Y projection, {self.image_size}px, trail {self.trail_length}, Z mode {self.z_close_mode}",
+            (f"X/Y projection, {self.image_size}px · full take"
+             if self.record_data else
+             f"X/Y projection, {self.image_size}px, trail {self.trail_length}, Z mode {self.z_close_mode}"),
             transform=ax6.transAxes,
             va='top',
             fontsize=7,
@@ -4103,13 +4118,6 @@ class MagnetometerReader:
                     self.update_sim_magnet_teleop()
                 self._update_gyro()
             ink_count = int(np.count_nonzero(ocr_mask))
-            digit_image = self.live_pose_to_digit_image(
-                pose_rows,
-                pose_x,
-                pose_y,
-                pose_z,
-                ocr_mask,
-            )
             if self.record_data:
                 with self.data_lock:
                     capture_rows = (tuple(tuple(row) for row in self.session_data)
@@ -4117,6 +4125,14 @@ class MagnetometerReader:
                 # The displayed character uses exactly the same interval as
                 # its saved image; between-take movement only moves the cursor.
                 digit_image = self.rows_to_digit_image(capture_rows, trail_length=0)
+            else:
+                digit_image = self.live_pose_to_digit_image(
+                    pose_rows,
+                    pose_x,
+                    pose_y,
+                    pose_z,
+                    ocr_mask,
+                )
             image_artist.set_data(digit_image)
             clear_canvas_requested = False
             now = time.monotonic()
@@ -4946,7 +4962,10 @@ def main():
     ):
         args.writing_min_velocity = 0.06
     if args.input_source == 'serial' and not writing_min_velocity_was_explicit:
-        args.writing_min_velocity = 0.035
+        # Collection uses Enter to exclude all movement to menu buttons. Slow
+        # deliberate strokes and pauses therefore belong to the take too;
+        # retain the navigation speed gate only for the live playground.
+        args.writing_min_velocity = 0.0 if args.record_data else 0.035
     display_window_was_explicit = any(
         arg == '--display-window' or arg.startswith('--display-window=')
         for arg in sys.argv[1:]
@@ -5020,6 +5039,8 @@ def main():
     print(f"Projection Extent: +/-{args.projection_extent}, Z close mode: {args.z_close_mode}")
     if args.z_near is not None:
         print(f"Z Calibration: near={args.z_near}, far={args.z_far}")
+    elif args.record_data and args.input_source == 'serial':
+        print("Stroke strength: uniform during the take; separate height gate still applies")
     else:
         print("Z Calibration: relative per trail")
     print(

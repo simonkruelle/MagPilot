@@ -328,6 +328,88 @@ def test_height_is_stored_in_manifest_and_sidecar():
             assert json.load(f)['height_mm'] == 50.0
 
 
+def test_board_capture_ink_stays_dark_when_height_estimate_changes():
+    import numpy as np
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        reader = MagnetometerReader(
+            enable_classifier=False, record_data=True, input_source='serial',
+            writing_min_velocity=0, writing_max_z=0.05, clean_view=True,
+            output_dir=tmpdir, run_id='stable_board_ink',
+        )
+        start = datetime(2026, 10, 5, 12, 0, 0)
+        rows = [make_row(start + timedelta(seconds=i * 0.1),
+                         -0.02 + i * 0.001, 0.0, 0.025)
+                for i in range(31)]
+        before = reader.rows_to_digit_image(rows[:25], trail_length=0)
+        # A new height extreme must not renormalize previously drawn strokes.
+        # Raw Z remains within the separate calibrated 50 mm pen-up gate.
+        rows[-1][-4] = 0.055
+        original = [row[:] for row in rows]
+        after = reader.rows_to_digit_image(rows, trail_length=0)
+        assert after.min() < 0.2  # sub-pixel brush centre lies between image rows
+        assert np.all(after <= before)
+        assert rows == original
+        assert reader.manifest_settings()['stroke_strength_mode'] == 'uniform_capture'
+
+        # Lifting beyond the height gate does not draw another segment.
+        lifted = make_row(start + timedelta(seconds=3.1), 0.025, 0.015, 0.09)
+        assert np.array_equal(
+            reader.rows_to_digit_image(rows + [lifted], trail_length=0), after)
+        reader.prepare_recording_layout(raw_csv_enabled=False)
+        reader.start_session('digit_1')
+        reader.session_data = rows
+        assert reader.stop_session()
+        entry = load_manifest(tmpdir)['sessions'][0]
+        with open(os.path.join(tmpdir, entry['paths']['csv']), newline='') as f:
+            saved_rows = list(csv.reader(f))[1:]
+        assert [float(row[-4]) for row in saved_rows] == [row[-4] for row in original]
+        assert_saved_preview_matches(reader, tmpdir, after)
+        # Exercise the actual animation branch with serial-shaped rows. The
+        # collection view must display the frozen full take at full opacity.
+        import matplotlib.pyplot as plt
+        reader.data_buffer.extend(rows)
+        with patch.object(plt, 'show'):
+            reader.plot_data()
+        try:
+            reader._figure.canvas.draw()
+            reader._animation.event_source.stop()
+            reader._animation._func(0)
+            image_artist = reader._teleop_ui['ax5'].images[0]
+            assert image_artist.get_alpha() == 1
+            assert np.array_equal(np.asarray(image_artist.get_array()), after)
+        finally:
+            plt.close(reader._figure)
+
+
+def test_board_capture_keeps_explicit_height_calibration_and_live_defaults():
+    import numpy as np
+    import sys
+    import magnetometer_reader as reader_module
+
+    calibrated = MagnetometerReader(enable_classifier=False, record_data=True,
+                                   z_near=0.007, z_far=0.05)
+    assert np.array_equal(calibrated.z_to_closeness([0.007, 0.05]), [1, 0])
+    assert calibrated.manifest_settings()['stroke_strength_mode'] == 'calibrated_z'
+    live = MagnetometerReader(enable_classifier=False)
+    assert np.array_equal(live.z_to_closeness([0.01, 0.03]), [0, 1])
+    assert live.manifest_settings()['stroke_strength_mode'] == 'relative_z'
+
+    for record, explicit, expected in ((True, False, 0), (False, False, 0.035),
+                                       (True, True, 0.002)):
+        args = ['magnetometer_reader.py', '--no-classifier', '--input-source', 'serial']
+        if record:
+            args += ['--record-data']
+        if explicit:
+            args += ['--writing-min-velocity', '0.002']
+        settings = []
+        with patch.object(sys, 'argv', args), \
+                patch.object(MagnetometerReader, 'run',
+                             lambda self, **kwargs: settings.append(self.writing_min_velocity)):
+            reader_module.main()
+        assert settings == [expected]
+
+
 def test_explicit_character_boundaries_and_protocol_metadata():
     with tempfile.TemporaryDirectory() as tmpdir:
         reader = MagnetometerReader(
@@ -778,6 +860,8 @@ def main():
     test_participant_and_session_ids()
     test_without_ids_keeps_legacy_names()
     test_height_is_stored_in_manifest_and_sidecar()
+    test_board_capture_ink_stays_dark_when_height_estimate_changes()
+    test_board_capture_keeps_explicit_height_calibration_and_live_defaults()
     test_explicit_character_boundaries_and_protocol_metadata()
     test_save_uses_frozen_rows_while_producer_continues()
     test_empty_and_failed_takes_do_not_count_and_failed_save_can_retry()
