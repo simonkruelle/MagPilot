@@ -22,6 +22,7 @@ and tailed in the bottom pane.
 
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -34,6 +35,8 @@ from datetime import date, datetime
 from tkinter import messagebox, ttk
 
 from colmag import dataset
+from colmag.pilot_launcher import PilotPanel
+from colmag.target_reaching import TrialSettings, default_targets
 from colmag.action_mapping import (
     ACTION_CATALOG,
     DEFAULT_ACTION_MAP_PATH,
@@ -68,7 +71,7 @@ TRACK = '#dcebf7'
 DOT_OFF = '#c6d6e3'
 
 STAGES = ('robot', 'nodes', 'interface')
-DETACHED_TAGS = STAGES + ('window',)
+DETACHED_TAGS = STAGES + ('window', 'pilot')
 SIMULATION_ROS_PACKAGES = (
     'gazebo_ros',
     'franka_description',
@@ -292,6 +295,7 @@ def build_stage_probe_command(tag):
         'interface': (
             "pgrep -f '[m]agnetometer_reader.py' >/dev/null"),
         'window': 'pgrep -x gzclient >/dev/null',
+        'pilot': "pgrep -f '[t]arget_reaching_pilot.py' >/dev/null",
     }[tag]
     return (
         'managed=false; '
@@ -309,7 +313,8 @@ def _legacy_process_signals(signal, groups=('interface', 'nodes', 'robot')):
     # Bracketed patterns deliberately cannot match this cleanup shell's own
     # command line. The old "pkill -f roslaunch" did, aborting Stop All early.
     by_group = {
-        'interface': ('[m]agnetometer_reader.py', '[r]ecord_tracking_error.py'),
+        'interface': ('[m]agnetometer_reader.py', '[r]ecord_tracking_error.py',
+                      '[t]arget_reaching_pilot.py'),
         'nodes': (
             '[c]olmag_arm_nodes[.]launch',
             '[c]olmag_draw_node.py',
@@ -348,6 +353,7 @@ def _legacy_process_signals(signal, groups=('interface', 'nodes', 'robot')):
 def build_pipeline_probe_command():
     patterns = (
         '[m]agnetometer_reader.py',
+        '[t]arget_reaching_pilot.py',
         '[c]olmag_arm_nodes[.]launch',
         '[c]olmag_draw_node.py',
         '[c]olmag_robot_node.py',
@@ -410,8 +416,9 @@ def build_ros_pipeline_shutdown_command():
 
 def build_stop_all_command():
     """Stop local managed jobs plus processes from older launcher versions."""
-    stop_order = ('interface', 'nodes', 'window', 'robot')
-    commands = [_managed_stage_signal('interface', 'TERM')]
+    stop_order = ('pilot', 'interface', 'nodes', 'window', 'robot')
+    commands = [_managed_stage_signal('pilot', 'TERM'),
+                _managed_stage_signal('interface', 'TERM')]
     commands.extend(_legacy_process_signals('TERM', ('interface',)))
     commands.append(_managed_stage_signal('nodes', 'TERM'))
     commands.extend(_legacy_process_signals('TERM', ('nodes',)))
@@ -609,6 +616,62 @@ def build_tracking_command(serial_port, magnet, magnet_offset_mm, heights_mm,
         '--output-dir', dataset.tracking_output_dir(run_id),
     ]
     return 'cd /colmag && {}'.format(' '.join(shlex.quote(arg) for arg in args))
+
+
+def build_virtual_task_command(run_id, participant_id, condition, input_source,
+                               tolerance_mm=20.0, dwell_s=0.5, repetitions=1,
+                               magnet_count=None, notes=''):
+    """Observe Gazebo TF in a separate window while the existing UI controls it."""
+    TrialSettings(tolerance_m=tolerance_mm / 1000, dwell_s=dwell_s)
+    default_targets(repetitions)
+    if not participant_id.strip() or not condition.strip():
+        raise ValueError('Enter a participant ID and condition label.')
+    if magnet_count not in (None, 1, 2, 3):
+        raise ValueError('The magnet stack must contain 1, 2, or 3 magnets.')
+    args = ['python3', 'tools/target_reaching_pilot.py', '--run-id', run_id,
+            '--participant-id', participant_id, '--condition', condition,
+            '--input-source', 'trackpad' if input_source == 'trackpad' else 'serial',
+            '--tolerance-mm', str(tolerance_mm), '--dwell-s', str(dwell_s),
+            '--repetitions', str(repetitions), '--notes', notes]
+    if magnet_count is not None:
+        args.extend(['--magnet-count', str(magnet_count)])
+    return 'cd /colmag && {}'.format(' '.join(shlex.quote(arg) for arg in args))
+
+
+def active_teleop_input_source(process_output):
+    """Identify the actual reader process; selector changes do not restart it."""
+    readers = []
+    for line in process_output.splitlines():
+        try:
+            tokens = shlex.split(line)
+        except ValueError:
+            continue
+        # pgrep joins argv with spaces: a bash -lc wrapper may therefore have
+        # an unquoted reader name later in its text. Only accept a Python
+        # executable whose script argument is the reader itself.
+        if (len(tokens) < 3 or not tokens[0].isdigit()
+                or re.fullmatch(r'python(?:\d+(?:\.\d+)*)?', os.path.basename(tokens[1])) is None):
+            continue
+        index = 2
+        while index < len(tokens) and tokens[index] in ('-u', '-B', '-O', '-OO', '-E', '-s', '-S', '-I', '-q'):
+            index += 1
+        if index >= len(tokens) or os.path.basename(tokens[index]) != 'magnetometer_reader.py':
+            continue
+        args = tokens[index + 1:]
+        if '--record-data' in args or '--ros' not in args:
+            raise ValueError('The active reader is a collection window. Start the teleop Interface first.')
+        source = 'serial'
+        for i, token in enumerate(args):
+            if token == '--input-source' and i + 1 < len(args):
+                source = args[i + 1]
+            elif token.startswith('--input-source='):
+                source = token.split('=', 1)[1]
+        if source not in ('serial', 'trackpad', 'touchpad'):
+            raise ValueError('Could not verify the active Interface input source.')
+        readers.append('serial' if source == 'serial' else 'trackpad')
+    if len(readers) != 1:
+        raise ValueError('Start exactly one teleop Interface before opening the virtual task.')
+    return readers[0]
 
 
 # Host terminals that can run an interactive command, with the flag that
@@ -1663,6 +1726,13 @@ class Launcher(tk.Tk):
                                         fg=DOT_OFF, font=self.f_body)
         self.container_light.pack(side='right')
 
+        pilot_row = tk.Frame(self, bg=BG)
+        pilot_row.pack(fill='x', padx=26, pady=(4, 0))
+        Pill(pilot_row, 'Virtual task', self.open_virtual_task, kind='plain',
+             width=110, font=self.f_body, parent_bg=BG).pack(side='left')
+        tk.Label(pilot_row, text='Target-reaching time + end-effector error · simulation',
+                 bg=BG, fg=SUBTLE, font=self.f_small).pack(side='left', padx=12)
+
         # Log card
         log_card = Card(self, height=196)
         log_card.pack(padx=26, pady=(10, 20))
@@ -1672,7 +1742,7 @@ class Launcher(tk.Tk):
                  font=self.f_small).pack(side='left')
         self.log_choice = tk.StringVar(value='interface')
         self._log_selector = Selector(
-            top, self.log_choice, STAGES, width=118, height=26,
+            top, self.log_choice, STAGES + ('pilot',), width=118, height=26,
             font=self.f_small)
         self._log_selector.pack(side='right')
         Pill(top, 'Copy', self.copy_log, kind='plain', width=64, height=26,
@@ -1731,6 +1801,39 @@ class Launcher(tk.Tk):
             existing.focus_set()
             return
         self._data_panel = DataPanel(self)
+
+    def open_virtual_task(self):
+        existing = getattr(self, '_pilot_panel', None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            return
+        self._pilot_panel = PilotPanel(self)
+
+    def start_virtual_task(self, participant_id, condition, magnet_count,
+                           tolerance_mm, dwell_s, repetitions, notes=''):
+        if self.mode.get() != 'sim':
+            messagebox.showerror('Virtual task', 'Select Simulation mode for the virtual task.')
+            return
+        if not self._pipeline_action_ready() or not self._ensure_container():
+            return
+        if detect_robot_backend(self._running_ros_nodes()) != 'sim':
+            messagebox.showerror('Virtual task', 'Start Robot in Simulation mode first, '
+                                 'then Arm nodes and Interface.')
+            return
+        run_id = datetime.now().strftime('pilot_%Y%m%d_%H%M%S_%f')
+        try:
+            ok, processes = in_container(
+                "pgrep -af '[m]agnetometer_reader.py' || true", timeout=5)
+            if not ok:
+                raise ValueError('Could not inspect the active Interface input source.')
+            source = active_teleop_input_source(processes)
+            command = build_virtual_task_command(
+                run_id, participant_id, condition, source,
+                tolerance_mm, dwell_s, repetitions, magnet_count, notes)
+        except (TypeError, ValueError) as exc:
+            messagebox.showerror('Virtual task', str(exc))
+            return
+        self._launch_stage('pilot', command)
 
     def _action_mapping_saved(self):
         self._pipeline_notice = (
