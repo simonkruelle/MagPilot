@@ -52,6 +52,17 @@ documented arrangements. Record dimensions/shape, material/grade, magnetization
 direction, stack spacing/orientation and part identifiers where available.
 Confirm what the existing 11 mm measurement refers to before comparing geometries.
 
+The new disks measure approximately **Ø9.5–10 mm × 5 mm**. The launcher now offers
+**Data → Sensor Evaluation**: three complete runs for each 1/2/3-magnet stack,
+at nominal **0 mm above ~5 mm cardboard**. A printed guide fixes placement;
+raw fields, timing and pose error/jitter feed the comparison report.
+[Protocol and operator steps](MAGNET_EVALUATION.md).
+
+A later pen can use a cartridge for **1–5 disks** with repeatable stops. Measure
+actual disk clearance and include housing walls in the outside diameter. Record
+the active stack centre for each configuration; select a writing baseline from
+the 1–3 comparison, then test greater heights before assigning teleoperation stacks.
+
 At equal remanence/material grade, the idealized magnetic moment is `m = Br × V / μ0`: less magnetic volume gives a lower dipole moment. In the far field, a weaker moment reduces the signal at a fixed distance; bringing the magnet closer can compensate, but near the magnet its shape matters. This is the reason to compare the complete pen, cover gap and intended working range. [K&J Magnetics: magnetic dipole moment](https://www.kjmagnetics.com/blog/magnetic-dipole-moment).
 
 Treat calculations as screening estimates. Field geometry depends on magnetization and the measurement position; K&J's calculator assumes axial magnetization for discs/cylinders/rings and recommends measurement in the actual configuration. [K&J Magnetics: field calculator and assumptions](https://www.kjmagnetics.com/magnetic-field-calculator.asp).

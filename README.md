@@ -36,8 +36,10 @@ and fly the arm in real time.
 
 <sub>Week 1 · 5 October 2026 · <a href="docs/reports/MagPilot_Lab_Update_2026-10-05.md">Read update</a> · <a href="docs/reports/MagPilot_Lab_Update_2026-10-05.pdf">PDF slides</a></sub>
 
-Board repaired. Three smaller magnets available. **Virtual task development
-starts in Week 1.**
+Board repaired. Three **Ø≈9.5–10 × 5 mm** disk magnets available.
+**Virtual task development starts in Week 1.**
+The [magnet baseline comparison](docs/MAGNET_EVALUATION.md) is ready in **Data → Sensor Evaluation**:
+1, 2 and 3 magnets, three runs each, at nominal 0 mm above the cardboard cover.
 
 <p align="center">
   <img src="docs/reports/assets/project_timeline.png" width="880" alt="Proposed ten-week project plan: virtual task and pilot start in Week 1">
@@ -272,7 +274,7 @@ Existing actions can be rearranged without code.
 For a new workflow, implement and validate the task once, then add it to the
 same menu. The controller and safety pipeline stay unchanged.
 
-## One window. Zero terminals.
+## One control center. Every pipeline.
 
 <div align="center">
 <img alt="MagPilot Control Center" src="docs/launcher.png" width="100%">
@@ -299,6 +301,8 @@ The **Gazebo pilot** is in the same Data tab, with shared experiment and
 participant details; it records the arm controlled by the running Interface.
 Participant rows show **saved / planned targets**, a progress bar and session count
 for the selected experiment. **History** revisits earlier experiments; counts update automatically.
+Board tracking interruptions hold the simulated arm and reset the loading ring;
+fresh valid tracking resumes the same timed trial. Connection failures remain visible.
 
 <p align="center">
   <img src="docs/teleoperation.png" width="880" alt="MuJoCo teleoperation collection: Franka two-finger gripper, single target ring, height slider and continuous hold progress">
@@ -323,6 +327,14 @@ can press the key for the participant. **Escape** cancels an unfinished take;
 after a successful save, Enter starts another take of the selected character.
 Stopping freezes the samples before CSV, image and metadata generation. The
 collection view hides the gesture buttons and the launcher disables OCR.
+Board captures keep stable, dark ink and include slow movements; raw sensor values remain intact.
+
+**Data → Sensor Evaluation** compares **1 / 2 / 3 magnets × 3 runs**. Start opens
+the guided placements; **q** pauses and **Resume** keeps completed captures.
+The nominal **0 mm** condition is above the approximately **5 mm cardboard**;
+the magnet-centre offset is recorded separately. Progress bars and a comparison
+report show tracking error, jitter, raw field response and delivery timing.
+See the [test procedure and placement guide](docs/MAGNET_EVALUATION.md).
 Recordings live in the gitignored `data_collection/` folder.
 
 To demonstrate the pipeline without the sensor board, select **Demo (mouse)**

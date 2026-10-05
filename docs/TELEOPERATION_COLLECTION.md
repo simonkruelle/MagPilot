@@ -12,6 +12,10 @@ For the random-target demo, select **MuJoCo demo → Start**.
 - **Position inset:** top view shows X/Y; the Z bar shows height. Blue is the target;
   green is the measured fingertip midpoint. The inset is a readout, not a control pad.
 - **Magnet board:** board X/Y and calibrated magnet height control X/Y/Z.
+- **Board readiness:** Enter requires a fresh pose inside the ±50 mm X/Y input area.
+- **Tracking interruption:** lifted, outlying or stale estimates hold the robot and reset
+  the loading ring. Fresh valid input resumes the same trial; wall time and the timeout continue.
+  A serial connection failure ends and logs the attempt with its error message.
 - **Enter:** reveal a random target and start timing from the common pose.
 - **Hold:** keep the green fingertip midpoint inside the single blue target sphere for **2 seconds**.
 - **Loading ring:** fills during the hold; leaving the sphere resets it.
@@ -97,6 +101,9 @@ cannot earn a hold: the actual measured fingertip midpoint must stay inside the
 target, with fresh physics feedback throughout. Input snapshots
 include the latest board pose and 48 magnetic channels; they are sampled with the
 robot trace rather than a full-rate sensor archive.
+The trajectory's `input_valid` flag and input snapshot retain tracking interruptions,
+raw outlying poses and their reasons. An interrupted hold cannot complete the target.
+Session metadata records this recovery policy; compare like policies for timing studies.
 
 New sessions use **protocol v2**, measuring `gripper_center` at the fingertip
 midpoint. Historical **v1** files retain their flange reference. Keep v1 and v2
@@ -110,6 +117,10 @@ pointing trials without accounting for the changed controls.
 Practice first. Keep seed, targets, tolerance and hold identical across input
 conditions, and keep each condition's control mapping fixed. Plan condition
 order and repetitions before collecting participant comparisons.
+
+Before choosing the small-magnet pen, run the [near-surface comparison](MAGNET_EVALUATION.md)
+in **Data → Sensor Evaluation**. That baseline evaluates writing-range behavior;
+the full 15 cm teleoperation range needs its own later height comparison.
 
 ## Gazebo pilot in the same panel
 

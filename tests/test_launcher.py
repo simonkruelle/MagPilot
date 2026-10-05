@@ -23,6 +23,7 @@ from colmag_launcher import (
     build_record_command,
     build_terminal_argv,
     build_tracking_command,
+    build_magnet_evaluation_command,
     build_teleoperation_argv,
     build_virtual_task_command,
     build_local_stage_status_command,
@@ -40,6 +41,7 @@ from colmag_launcher import (
     parse_local_stage_status,
     parse_franka_robot_mode,
     parse_tracking_settings,
+    parse_magnet_evaluation_settings,
     parse_teleoperation_settings,
     parse_gazebo_pilot_settings,
     next_teleoperation_session,
@@ -524,6 +526,46 @@ class DataCollectionCommandTests(unittest.TestCase):
         self.assertIn("'[r]ecord_tracking_error.py'", build_stop_all_command())
 
 
+class MagnetEvaluationCommandTests(unittest.TestCase):
+    def config(self):
+        return parse_magnet_evaluation_settings('Disk baseline', 'Ø9.5–10 × 5 mm',
+                                                 'coaxial stack, upright', '5', '2.5,5,7.5')
+
+    def test_nominal_condition_and_centre_offsets_are_separate(self):
+        config = self.config()
+        self.assertEqual(config['nominal_height_mm'], 0)
+        self.assertEqual(config['spacer_mm'], 5)
+        self.assertEqual(config['centre_offsets_mm'], [2.5, 5, 7.5])
+        unknown = parse_magnet_evaluation_settings('x', 'm', 'upright', '5', '')
+        self.assertEqual(unknown['centre_offsets_mm'], [None]*3)
+        for values in [('nan', '1,2,3'), ('5', '1,2'), ('5', '-1,2,3')]:
+            with self.assertRaises(ValueError):
+                parse_magnet_evaluation_settings('x', 'm', 'upright', *values)
+
+    def test_board_command_preserves_literals_and_demo_source_is_explicit(self):
+        config = self.config()
+        config['experiment_name'] = 'Week1; $(touch /tmp/never) `echo nope`'
+        args = shlex.split(build_magnet_evaluation_command('/host/dev/ttyACM0', config, 'baseline_test'))
+        self.assertEqual(args[args.index('--experiment-name')+1], config['experiment_name'])
+        self.assertEqual(args[args.index('--port')+1], '/host/dev/ttyACM0')
+        self.assertEqual(args[args.index('--output-dir')+1], 'data_collection/magnet_evaluation/baseline_test')
+        self.assertNotIn('--auto', args)
+        demo = shlex.split(build_magnet_evaluation_command('', config, 'baseline_demo', demo=True, resume=True))
+        for flag in ('--simulate', '--auto', '--resume'):
+            self.assertIn(flag, demo)
+        self.assertNotIn('--port', demo)
+        with self.assertRaises(ValueError):
+            build_magnet_evaluation_command('', config, 'board')
+        with self.assertRaises(ValueError):
+            build_magnet_evaluation_command('port', config, '../outside')
+
+    @mock.patch('colmag_launcher.in_container', return_value=(0, '123 python3 tools/record_magnet_evaluation.py'))
+    def test_serial_ownership_and_stop_all_cover_magnet_comparisons(self, container):
+        launcher = Launcher.__new__(Launcher)
+        self.assertEqual(launcher._sensor_in_use(), 'evaluation')
+        self.assertIn("'[r]ecord_magnet_evaluation.py'", build_stop_all_command())
+
+
 class DataCollectionRoutingTests(unittest.TestCase):
     @mock.patch('colmag_launcher.os.makedirs')
     @mock.patch('colmag_launcher.dataset.load_participants', return_value=[])
@@ -912,6 +954,66 @@ class TeleoperationPanelGuiTests(unittest.TestCase):
                 parent.update()
                 self.assertTrue(panel.character_panel.winfo_ismapped())
                 self.assertTrue(panel.participant_form_panel.winfo_ismapped())
+            finally:
+                panel.destroy()
+                parent.destroy()
+
+
+@unittest.skipUnless(_os.environ.get('COLMAG_TEST_LAUNCHER_GUI') == '1', 'requires a display')
+class MagnetEvaluationPanelGuiTests(unittest.TestCase):
+    def test_sensor_panel_start_and_resume_with_progress_and_source_separation(self):
+        from colmag import magnet_evaluation as evaluation
+        from tools import record_magnet_evaluation as recorder
+        from tools.record_tracking_error import SimulatedSource
+        import contextlib
+        import io
+        import tkinter as tk
+        with tempfile.TemporaryDirectory() as folder:
+            config = parse_magnet_evaluation_settings('Disk baseline', 'Approx. Ø9.5–10 × 5 mm disks',
+                                                       'coaxial stack, upright', '5', '2.5,5,7.5')
+            comparison = _os.path.join(folder, 'magnet_evaluation', 'baseline_test')
+            manifest = recorder.prepare(comparison, config, 'serial')
+            # One complete board-designated software fixture, clearly marked
+            # by its temporary folder; never mix this into the actual dataset.
+            manifest['purpose'] = 'test_fixture'
+            answers = iter([''] * 13 + ['q'])  # install + 12 captures; quit at next stack
+            with contextlib.redirect_stdout(io.StringIO()):
+                recorder.run(comparison, manifest, SimulatedSource(rate_hz=5), prompt=lambda _: next(answers))
+            parent = tk.Tk()
+            for name, font in [('f_title', ('Arial', 20)), ('f_h', ('Arial', 12)),
+                               ('f_body', ('Arial', 11)), ('f_small', ('Arial', 9)), ('f_btn', ('Arial', 11))]:
+                setattr(parent, name, font)
+            parent.start_magnet_evaluation = mock.Mock()
+            panel = DataPanel(parent, data_dir=folder)
+            try:
+                panel.experiment_name.set('Disk baseline')
+                panel.pipeline.set('evaluation')
+                panel._pipeline_changed()
+                parent.update()
+                self.assertTrue(panel.evaluation_panel.winfo_ismapped())
+                self.assertFalse(panel.character_panel.winfo_ismapped())
+                self.assertFalse(panel.participant_form_panel.winfo_ismapped())
+                self.assertEqual(panel.evaluation_progress[1][1].cget('text'), '1 / 3 runs')
+                self.assertIn('1 / 9', panel.summary.cget('text'))
+                self.assertLessEqual(panel.winfo_height(), panel.winfo_screenheight()-64)
+                panel.evaluation_spacer.set('50')
+                panel.start_magnet_evaluation(resume=True)
+                parent.start_magnet_evaluation.assert_called_once_with(config, demo=False, resume_run_id='baseline_test')
+                self.assertEqual(panel.evaluation_spacer.get(), '5')
+                panel.evaluation_source.set('simulated')
+                panel._refresh_evaluation()
+                self.assertEqual(panel.evaluation_progress[1][1].cget('text'), '0 / 3 runs')
+                panel.start_magnet_evaluation()
+                self.assertEqual(parent.start_magnet_evaluation.call_args.kwargs, dict(demo=True, resume_run_id=None))
+                panel.pipeline.set('teleoperation')
+                panel._pipeline_changed()
+                parent.update()
+                self.assertTrue(panel.teleoperation_panel.winfo_ismapped())
+                self.assertFalse(panel.evaluation_panel.winfo_ismapped())
+                panel.pipeline.set('characters')
+                panel._pipeline_changed()
+                parent.update()
+                self.assertTrue(panel.character_panel.winfo_ismapped())
             finally:
                 panel.destroy()
                 parent.destroy()

@@ -37,7 +37,7 @@ import tkinter.font as tkfont
 from datetime import date, datetime
 from tkinter import messagebox, ttk
 
-from colmag import dataset
+from colmag import dataset, magnet_evaluation
 from colmag.target_reaching import TrialSettings, default_targets
 from colmag.action_mapping import (
     ACTION_CATALOG,
@@ -316,6 +316,7 @@ def _legacy_process_signals(signal, groups=('interface', 'nodes', 'robot')):
     # command line. The old "pkill -f roslaunch" did, aborting Stop All early.
     by_group = {
         'interface': ('[m]agnetometer_reader.py', '[r]ecord_tracking_error.py',
+                      '[r]ecord_magnet_evaluation.py',
                       '[t]arget_reaching_pilot.py', '[t]eleoperation_serial_stream.py'),
         'nodes': (
             '[c]olmag_arm_nodes[.]launch',
@@ -705,6 +706,36 @@ def build_tracking_command(serial_port, magnet, magnet_offset_mm, heights_mm,
         '--run-id', run_id,
         '--output-dir', dataset.tracking_output_dir(run_id),
     ]
+    return 'cd /colmag && {}'.format(' '.join(shlex.quote(arg) for arg in args))
+
+
+def parse_magnet_evaluation_settings(experiment_name, magnet, arrangement, spacer_mm,
+                                     centre_offsets_mm):
+    parts = centre_offsets_mm.split(',') if centre_offsets_mm.strip() else ['?', '?', '?']
+    try:
+        offsets = [None if not value.strip() or value.strip() == '?' else float(value)
+                   for value in parts]
+        return magnet_evaluation.settings(experiment_name, magnet, arrangement,
+                                           spacer_mm, offsets)
+    except (TypeError, ValueError) as exc:
+        raise ValueError('Check the cardboard thickness and the three centre offsets: {}'.format(exc))
+
+
+def build_magnet_evaluation_command(serial_port, settings, run_id, demo=False, resume=False):
+    if not re.fullmatch(r'[A-Za-z0-9_-]+', run_id):
+        raise ValueError('Invalid comparison folder name.')
+    if not demo and not serial_port:
+        raise ValueError('A serial port is required for magnet evaluation.')
+    args = ['python3', 'tools/record_magnet_evaluation.py',
+            '--experiment-name', settings['experiment_name'], '--magnet', settings['magnet'],
+            '--arrangement', settings['arrangement'], '--spacer-mm', str(settings['spacer_mm']),
+            '--centre-offsets-mm', ','.join('?' if value is None else str(value)
+                                           for value in settings['centre_offsets_mm']),
+            '--capture-s', str(settings['capture_s']), '--sweep-s', str(settings['sweep_s']),
+            '--output-dir', os.path.join(dataset.DATA_DIR_NAME, 'magnet_evaluation', run_id)]
+    args += ['--simulate', '--auto'] if demo else ['--port', serial_port]
+    if resume:
+        args.append('--resume')
     return 'cd /colmag && {}'.format(' '.join(shlex.quote(arg) for arg in args))
 
 
@@ -1277,6 +1308,12 @@ class DataPanel(tk.Toplevel):
         self.magnet_offset = tk.StringVar(value='0')
         self.tracking_heights = tk.StringVar(
             value=','.join(str(h) for h in dataset.HEIGHTS_MM if h > 0))
+        self.evaluation_source = tk.StringVar(value='serial')
+        self.evaluation_magnet = tk.StringVar(value='Approx. Ø9.5–10 × 5 mm disks')
+        self.evaluation_arrangement = tk.StringVar(value='coaxial stack, upright')
+        self.evaluation_spacer = tk.StringVar(value='5')
+        self.evaluation_offsets = tk.StringVar(value='2.5,5,7.5')
+        self.evaluation_runs = []
 
         self._build()
         for variable in (self.experiment_name, self.teleop_source, self.pilot_condition):
@@ -1322,8 +1359,9 @@ class DataPanel(tk.Toplevel):
         row = tk.Frame(heading, bg=BG)
         row.pack(fill='x', pady=(10, 0))
         self._pipeline_selector = Segmented(row, self.pipeline,
-                  [('characters', 'Character Pipeline'), ('teleoperation', 'Teleoperation Pipeline')],
-                  command=self._pipeline_changed, width=490, height=34, font=f.f_body,
+                  [('characters', 'Character Pipeline'), ('teleoperation', 'Teleoperation Pipeline'),
+                   ('evaluation', 'Sensor Evaluation')],
+                  command=self._pipeline_changed, width=710, height=34, font=f.f_body,
                   parent_bg=BG)
         self._pipeline_selector.pack(side='left')
 
@@ -1339,7 +1377,7 @@ class DataPanel(tk.Toplevel):
         self.experiment_history = Pill(row, 'History', self._choose_recorded_experiment,
              kind='plain', width=80, font=f.f_body)
         self.experiment_history.pack(side='right', padx=(8, 8))
-        tk.Label(experiment, text='Included in character and teleoperation sessions.',
+        tk.Label(experiment, text='Included in character, teleoperation and sensor-evaluation sessions.',
                  bg=CARD, fg=SUBTLE, font=f.f_small).pack(anchor='w', pady=(8, 0))
 
         # Participant form
@@ -1459,8 +1497,76 @@ class DataPanel(tk.Toplevel):
                                  justify='left')
         self.problems.pack(anchor='w', padx=28, pady=(4, 0))
 
-        # Tracking error
-        tracking = self._box('Tracking error (sensor board)', parent=self.character_panel)
+        # Hardware comparisons use the same Data panel and shared experiment.
+        self.evaluation_panel = tk.Frame(self.pipeline_body, bg=BG)
+        self.evaluation_view = tk.Canvas(self.evaluation_panel, bg=BG, highlightthickness=0,
+                                         width=WIDTH-40, height=400, yscrollincrement=28)
+        self.evaluation_scroll = tk.Scrollbar(self.evaluation_panel, orient='vertical',
+                                              command=self.evaluation_view.yview)
+        self.evaluation_view.configure(yscrollcommand=self.evaluation_scroll.set)
+        self.evaluation_view.pack(side='left', fill='both', expand=True)
+        self.evaluation_content = tk.Frame(self.evaluation_view, bg=BG)
+        self._evaluation_window = self.evaluation_view.create_window(
+            0, 0, window=self.evaluation_content, anchor='nw', width=WIDTH-40)
+        self.evaluation_content.bind('<Configure>', self._fit_evaluation)
+        self.evaluation_view.bind('<Configure>', self._fit_evaluation)
+        comparison = self._box('Magnet baseline · 1 / 2 / 3', parent=self.evaluation_content)
+        row = tk.Frame(comparison, bg=CARD)
+        row.pack(fill='x', pady=(0, 10))
+        Segmented(row, self.evaluation_source,
+                  [('serial', 'Sensor board'), ('simulated', 'Demo')],
+                  command=self._refresh_evaluation, width=260, height=30,
+                  font=f.f_body, parent_bg=CARD).pack(side='left')
+        tk.Label(row, text='3 complete runs per stack', bg=CARD, fg=TEXT,
+                 font=f.f_h).pack(side='right')
+        row = tk.Frame(comparison, bg=CARD)
+        row.pack(fill='x', pady=(0, 8))
+        self._caption(row, 'magnets')
+        RoundEntry(row, self.evaluation_magnet, width=275, height=30,
+                   font=f.f_body, parent_bg=CARD).pack(side='left')
+        self._caption(row, 'arrangement')
+        RoundEntry(row, self.evaluation_arrangement, width=210, height=30,
+                   font=f.f_body, parent_bg=CARD).pack(side='left')
+        row = tk.Frame(comparison, bg=CARD)
+        row.pack(fill='x', pady=(0, 8))
+        self._caption(row, 'cardboard mm')
+        RoundEntry(row, self.evaluation_spacer, width=60, height=30,
+                   font=f.f_body, parent_bg=CARD).pack(side='left')
+        self._caption(row, 'centre offsets mm · 1 / 2 / 3')
+        RoundEntry(row, self.evaluation_offsets, width=160, height=30,
+                   font=f.f_body, parent_bg=CARD).pack(side='left')
+        tk.Label(comparison, text='Nominal condition: 0 mm above cardboard. Offsets are above the cardboard.\n'
+                 '2.5 / 5 / 7.5 mm assume touching, upright 5 mm disks; verify before testing.\n'
+                 'Each run: baseline → 9 grid positions + 1 above a sensor → 10 s sweep.',
+                 bg=CARD, fg=SUBTLE, font=f.f_small, justify='left').pack(anchor='w', pady=(0, 10))
+        self.evaluation_progress = {}
+        for count in magnet_evaluation.COUNTS:
+            row = tk.Frame(comparison, bg=CARD)
+            row.pack(fill='x', pady=3)
+            tk.Label(row, text='{} magnet{}'.format(count, '' if count == 1 else 's'),
+                     bg=CARD, fg=TEXT, font=f.f_body, width=12, anchor='w').pack(side='left')
+            bar = tk.Canvas(row, width=360, height=12, bg=CARD, highlightthickness=0)
+            bar.pack(side='left', padx=12)
+            label = tk.Label(row, bg=CARD, fg=SUBTLE, font=f.f_body)
+            label.pack(side='left')
+            self.evaluation_progress[count] = (bar, label)
+        self.evaluation_status = tk.Label(comparison, bg=CARD, fg=SUBTLE,
+                                         font=f.f_small, justify='left', wraplength=660)
+        self.evaluation_status.pack(anchor='w', pady=(8, 10))
+        row = tk.Frame(comparison, bg=CARD)
+        row.pack(fill='x')
+        Pill(row, 'Start comparison', self.start_magnet_evaluation, kind='primary',
+             width=160, font=f.f_btn).pack(side='left')
+        Pill(row, 'Resume', lambda: self.start_magnet_evaluation(resume=True),
+             kind='plain', width=90, font=f.f_body).pack(side='left', padx=8)
+        Pill(row, 'Open report', self.open_magnet_evaluation_report,
+             kind='plain', width=115, font=f.f_body).pack(side='left')
+        Pill(row, 'Placement guide', lambda: subprocess.Popen(
+             ['xdg-open', os.path.join(REPO_DIR, 'docs', 'magnet_evaluation_grid.svg')]),
+             kind='plain', width=145, font=f.f_body).pack(side='right')
+
+        # Extended heights/orientations remain available beneath the baseline.
+        tracking = self._box('Advanced tracking error · other heights', parent=self.evaluation_content)
         row = tk.Frame(tracking, bg=CARD)
         row.pack(fill='x')
         tk.Label(row, text='magnet', bg=CARD, fg=SUBTLE, font=f.f_body).pack(
@@ -1599,16 +1705,21 @@ class DataPanel(tk.Toplevel):
 
     def _pipeline_changed(self):
         self._pipeline_selector._redraw()
+        self.character_panel.pack_forget()
+        self.teleoperation_panel.pack_forget()
+        self.evaluation_panel.pack_forget()
+        self.participant_form_panel.pack_forget()
+        self.participant_compact_panel.pack_forget()
         if self.pipeline.get() == 'teleoperation':
-            self.participant_form_panel.pack_forget()
             self.participant_compact_panel.pack(fill='x', before=self.pipeline_body)
-            self.character_panel.pack_forget()
             self.teleoperation_panel.pack(fill='x')
             self._update_teleop_summary()
+        elif self.pipeline.get() == 'evaluation':
+            self.evaluation_panel.pack(fill='x')
+            self._refresh_evaluation()
+            self._fit_evaluation()
         else:
-            self.participant_compact_panel.pack_forget()
             self.participant_form_panel.pack(fill='x', before=self.pipeline_body)
-            self.teleoperation_panel.pack_forget()
             self.character_panel.pack(fill='x')
             self.refresh()
         self.update_idletasks()
@@ -1655,6 +1766,9 @@ class DataPanel(tk.Toplevel):
             self.teleop_options_scroll.pack_forget()
 
     def _scroll_data_content(self, event, step):
+        if self.pipeline.get() == 'evaluation':
+            self.evaluation_view.yview_scroll(step, 'units')
+            return 'break'
         if self.pipeline.get() == 'characters':
             self.table_view.yview_scroll(step, 'units')
         elif (self.teleop_view.winfo_rooty() <= event.y_root <
@@ -1724,12 +1838,16 @@ class DataPanel(tk.Toplevel):
         if self.pipeline.get() == 'teleoperation':
             self._update_teleop_summary()
             self._fit_teleop_options()
+        elif self.pipeline.get() == 'evaluation':
+            self._refresh_evaluation()
 
     def _choose_recorded_experiment(self):
         menu = tk.Menu(self, tearoff=False, bg=CARD, fg=TEXT,
                        activebackground=TRACK, activeforeground=TEXT,
                        font=self.parent.f_body)
-        names = sorted({run['experiment_name'] for run in self.teleop_runs}, key=str.casefold)
+        names = sorted({run['experiment_name'] for run in self.teleop_runs} |
+                       {run['settings']['experiment_name'] for run in
+                        magnet_evaluation.list_comparisons(self.data_dir)}, key=str.casefold)
         if not names:
             menu.add_command(label='No recorded experiments yet', state='disabled')
         for name in names:
@@ -1877,6 +1995,8 @@ class DataPanel(tk.Toplevel):
         if self.pipeline.get() == 'teleoperation':
             self._update_teleop_summary()
             self._fit_teleop_options()
+        elif self.pipeline.get() == 'evaluation':
+            self._refresh_evaluation()
 
     def show_table(self):
         for child in self.table.winfo_children():
@@ -1987,6 +2107,8 @@ class DataPanel(tk.Toplevel):
             self._scan_teleop_progress()
             self._update_teleop_summary()
             self._fit_teleop_options()
+        if self.pipeline.get() == 'evaluation':
+            self._refresh_evaluation()
         self._rescan_job = self.after(self.RESCAN_MS, self._rescan)
 
     def _cell_colour(self, n):
@@ -2107,6 +2229,85 @@ class DataPanel(tk.Toplevel):
         self.parent.start_tracking_error(
             self.magnet.get(), self.magnet_offset.get(),
             self.tracking_heights.get())
+
+    def _refresh_evaluation(self):
+        self.evaluation_runs = [run for run in magnet_evaluation.list_comparisons(
+            self.data_dir, self.experiment_name.get())
+            if run['input_source'] == self.evaluation_source.get()]
+        latest = self.evaluation_runs[0] if self.evaluation_runs else None
+        counts = latest['counts'] if latest else {count: 0 for count in magnet_evaluation.COUNTS}
+        for count, (bar, label) in self.evaluation_progress.items():
+            bar.delete('all')
+            bar.create_rectangle(0, 0, 360, 12, fill=TRACK, outline='')
+            if counts[count]:
+                bar.create_rectangle(0, 0, 360*counts[count]/3, 12, fill=BLUE, outline='')
+            label.configure(text='{} / 3 runs'.format(counts[count]))
+        source = 'BOARD' if self.evaluation_source.get() == 'serial' else 'DEMO · simulated'
+        self.summary.configure(text='{} · {} / 9 complete baseline runs'.format(source, sum(counts.values())))
+        self.recording_help.configure(text=(
+            'Start opens the guided test in a terminal. Enter records a placement; q saves and quits.\n'
+            'Resume keeps the original setup and saved captures. Stop all ends acquisition.'
+            if self.evaluation_source.get() == 'serial' else
+            'DEMO runs all nine tests automatically with synthetic poses. It does not evaluate the magnets.\n'
+            'Select Sensor board for the physical comparison. Board and demo progress stay separate.'))
+        self.evaluation_status.configure(text=(
+            '{} · {:g} mm cardboard · {}. Partial runs can be resumed.\n'
+            'Counts refer to this comparison; board and simulated results stay separate.'.format(
+                latest['run_id'], latest['settings']['spacer_mm'], latest['settings']['magnet'])
+            if latest else 'No {} comparison for this experiment yet. Start creates a new comparison.'.format(source.lower())))
+        self._fit_evaluation()
+
+    def _fit_evaluation(self, _event=None):
+        if self.pipeline.get() != 'evaluation':
+            return
+        self.update_idletasks()
+        width = max(WIDTH-40, self.evaluation_view.winfo_width())
+        self.evaluation_view.itemconfigure(self._evaluation_window, width=width)
+        height = self.evaluation_content.winfo_reqheight()
+        fixed = self.winfo_reqheight() - self.evaluation_view.winfo_reqheight()
+        visible = min(height, max(80, self.winfo_screenheight() - fixed - 96))
+        self.evaluation_view.configure(height=visible, scrollregion=(0, 0, width, height))
+        if height > visible:
+            self.evaluation_scroll.pack(side='right', fill='y')
+        else:
+            self.evaluation_scroll.pack_forget()
+            self.evaluation_view.yview_moveto(0)
+
+    def start_magnet_evaluation(self, resume=False):
+        self._refresh_evaluation()
+        latest = self.evaluation_runs[0] if self.evaluation_runs else None
+        if resume:
+            if latest is None:
+                messagebox.showinfo('Sensor Evaluation', 'No comparison to resume for this experiment and input.', parent=self)
+                return
+            if sum(latest['counts'].values()) == 9:
+                messagebox.showinfo('Sensor Evaluation', 'All nine runs are complete. Open the report or start a new comparison.', parent=self)
+                return
+            config = latest['settings']
+            self.evaluation_magnet.set(config['magnet'])
+            self.evaluation_arrangement.set(config['arrangement'])
+            self.evaluation_spacer.set('{:g}'.format(config['spacer_mm']))
+            self.evaluation_offsets.set(','.join('?' if value is None else '{:g}'.format(value)
+                                                for value in config['centre_offsets_mm']))
+        else:
+            try:
+                config = parse_magnet_evaluation_settings(self.experiment_name.get(),
+                    self.evaluation_magnet.get(), self.evaluation_arrangement.get(),
+                    self.evaluation_spacer.get(), self.evaluation_offsets.get())
+            except ValueError as exc:
+                messagebox.showerror('Sensor Evaluation', str(exc), parent=self)
+                return
+        if not self._save_experiment():
+            return
+        self.parent.start_magnet_evaluation(config, demo=self.evaluation_source.get() == 'simulated',
+                                            resume_run_id=latest['run_id'] if resume else None)
+
+    def open_magnet_evaluation_report(self):
+        self._refresh_evaluation()
+        if not self.evaluation_runs:
+            messagebox.showinfo('Sensor Evaluation', 'Start a comparison to create its report.', parent=self)
+            return
+        subprocess.Popen(['xdg-open', os.path.join(self.evaluation_runs[0]['directory'], 'report.md')])
 
     def start_teleoperation(self, participant_id):
         participant = next(p for p in self.participants if p['participant_id'] == participant_id)
@@ -2779,13 +2980,17 @@ class Launcher(tk.Tk):
 
     def _sensor_in_use(self):
         """Report each process that can own the board's serial stream."""
+        if time.monotonic() - self.__dict__.get('_evaluation_started_at', -60) < 5:
+            return 'evaluation'
         _, processes = in_container(
-            "pgrep -af '[m]agnetometer_reader.py|[r]ecord_tracking_error.py|[t]eleoperation_serial_stream.py' "
+            "pgrep -af '[m]agnetometer_reader.py|[r]ecord_tracking_error.py|[r]ecord_magnet_evaluation.py|[t]eleoperation_serial_stream.py' "
             "|| true", timeout=5)
         if 'teleoperation_serial_stream' in processes:
             return 'teleoperation'
         if 'record_tracking_error' in processes:
             return 'tracking'
+        if 'record_magnet_evaluation' in processes:
+            return 'evaluation'
         if 'magnetometer_reader' in processes:
             return 'interface'
         return None
@@ -2794,8 +2999,8 @@ class Launcher(tk.Tk):
         if busy == 'teleoperation':
             text = ('The Teleoperation Pipeline is using the sensor board. '
                     'Close its simulation window or press Stop in Data first.')
-        elif busy == 'tracking':
-            text = ('The tracking-error recorder is still open in its '
+        elif busy in ('tracking', 'evaluation'):
+            text = ('The sensor-evaluation recorder is still open in its '
                     'terminal. Type q and Enter there, or press Stop all.')
         else:
             text = ('A character recording or the Interface '
@@ -3009,6 +3214,42 @@ class Launcher(tk.Tk):
         self._pipeline_notice = (
             'Tracking-error run {} opened in a new {} window. Follow the '
             'prompts there; Stop all also ends it.'.format(run_id, terminal))
+        self._replace_log(self._pipeline_notice)
+        self.after(8000, self._clear_pipeline_notice, self._pipeline_notice)
+
+    def start_magnet_evaluation(self, settings, demo=False, resume_run_id=None):
+        """Open the operator-guided nine-run comparison in the Data workflow."""
+        if time.monotonic() - getattr(self, '_tracking_started_at', -60) < 10:
+            return
+        if not self._pipeline_action_ready() or not self._ensure_container():
+            return
+        busy = self._sensor_in_use()
+        if busy:
+            self._warn_sensor_busy(busy)
+            return
+        port = '' if demo else self._checked_sensor_port('Sensor Evaluation')
+        if not demo and not port:
+            return
+        run_id = resume_run_id or datetime.now().strftime('baseline_%Y%m%d_%H%M%S_%f')
+        try:
+            cmd = build_magnet_evaluation_command(port, settings, run_id, demo, bool(resume_run_id))
+        except ValueError as exc:
+            messagebox.showerror('Sensor Evaluation', str(exc))
+            return
+        terminal = find_terminal()
+        if terminal is None:
+            messagebox.showerror('No terminal found',
+                'Run this in a terminal:\n\ndocker exec -it {} bash -lc {}'.format(CONTAINER, shlex.quote(cmd)))
+            return
+        try:
+            subprocess.Popen(build_terminal_argv(terminal, cmd), start_new_session=True)
+        except OSError as exc:
+            messagebox.showerror('Sensor Evaluation', str(exc))
+            return
+        self._tracking_started_at = time.monotonic()
+        self._evaluation_started_at = time.monotonic()
+        self._pipeline_notice = '{} comparison {} opened. Follow the placement prompts; q pauses it.'.format(
+            'DEMO' if demo else 'Board', run_id)
         self._replace_log(self._pipeline_notice)
         self.after(8000, self._clear_pipeline_notice, self._pipeline_notice)
 
