@@ -20,6 +20,7 @@ Logs of each stage are written inside the container to /tmp/colmag_gui_*.log
 and tailed in the bottom pane.
 """
 
+import json
 import os
 import shlex
 import shutil
@@ -133,6 +134,43 @@ def sh(cmd, timeout=10):
         return out.returncode == 0, (out.stdout + out.stderr).strip()
     except subprocess.TimeoutExpired:
         return False, '(timeout)'
+
+
+def validate_project_mount(mounts_json, repo_dir):
+    """Check that /colmag is bound to the checkout running this launcher."""
+    try:
+        mounts = json.loads(mounts_json)
+    except (TypeError, json.JSONDecodeError):
+        return False, 'Docker returned unreadable mount metadata.'
+    if not isinstance(mounts, list) or not all(isinstance(m, dict) for m in mounts):
+        return False, 'Docker returned invalid mount metadata; expected a list of mounts.'
+    project_mounts = [m for m in mounts if m.get('Destination') == '/colmag']
+    if not project_mounts:
+        return False, 'The container has no project bind mount at /colmag.'
+    if len(project_mounts) != 1:
+        return False, 'Docker returned multiple project mounts at /colmag.'
+    project_mount = project_mounts[0]
+    source = project_mount.get('Source')
+    if project_mount.get('Type') != 'bind':
+        return False, '/colmag must be a bind mount; current source: {!r}.'.format(source)
+    if not isinstance(source, str) or not source or not os.path.isabs(source):
+        return False, 'Docker returned an invalid source for the /colmag bind mount.'
+    expected = os.path.realpath(repo_dir)
+    actual = os.path.realpath(source)
+    if actual != expected:
+        return False, ('The container is using a different project at /colmag.\n'
+                       'Current source: {}\nExpected checkout: {}').format(source, expected)
+    return True, ''
+
+
+def probe_container_project_mount(repo_dir):
+    """Inspect the existing container without changing it or its mounts."""
+    ok, output = sh('docker inspect --format {} {}'.format(
+        shlex.quote('{{json .Mounts}}'), shlex.quote(CONTAINER)), timeout=8)
+    if not ok:
+        return False, 'Could not inspect the container project mount: {}'.format(
+            output or 'docker inspect failed')
+    return validate_project_mount(output, repo_dir)
 
 
 def stop_conflicting_colmag_containers():
@@ -494,13 +532,14 @@ def build_interface_command(input_source, serial_port=''):
     return 'cd /colmag && {}'.format(' '.join(shlex.quote(arg) for arg in args))
 
 
-def build_record_command(serial_port, participant_id, session_id, height_mm):
-    """Record one participant's characters with the sensor board.
+def build_record_command(serial_port, participant_id, session_id, height_mm,
+                         experiment_name='', demo=False):
+    """Record participant characters from the board or a separate mouse demo.
 
     Unlike the Interface stage this never passes --ros: a recording must not
     send commands to the robot.
     """
-    if not serial_port:
+    if not demo and not serial_port:
         raise ValueError('A serial port is required for recording.')
     if not dataset.PARTICIPANT_ID.match(participant_id or ''):
         raise ValueError('Participant IDs look like P01, got {!r}.'.format(
@@ -510,17 +549,26 @@ def build_record_command(serial_port, participant_id, session_id, height_mm):
             session_id))
     args = [
         'python3', 'magnetometer_reader.py',
-        '--input-source', 'serial',
-        '--port', serial_port,
+        '--input-source', 'trackpad' if demo else 'serial',
+    ]
+    if demo:
+        args.extend(['--touchpad-ink-mode', 'pen', '--writing-min-velocity', '0'])
+    else:
+        args.extend(['--port', serial_port])
+    args.extend([
         '--clean',
         '--record-data',
-        '--output-dir', dataset.session_output_dir(participant_id, session_id),
+        '--no-classifier',
+        '--output-dir', dataset.session_output_dir(participant_id, session_id,
+                                                   demo=demo),
         '--participant-id', participant_id,
         '--session-id', session_id,
         '--height-mm', '{:g}'.format(height_mm),
         '--target-reps', str(dataset.TARGET_REPS),
-    ]
-    if height_mm == 0:
+    ])
+    if experiment_name.strip():
+        args.extend(['--experiment-name', experiment_name.strip()])
+    if not demo and height_mm == 0:
         # Same pen-up filter as the Interface stage. Raised heights skip it,
         # because it would blank the saved picture above 5 cm.
         args.extend(['--writing-max-z', '0.05'])
@@ -1005,16 +1053,26 @@ class DataPanel(tk.Toplevel):
         self.participants = []
         self.samples = []
         self.participants_error = None
+        self.collection_settings_error = None
         self.record = None  # participant shown in the form
+
+        self.experiment_name = tk.StringVar(value='')
+        try:
+            settings = dataset.load_collection_settings(data_dir)
+            self.experiment_name.set(settings['experiment_name'])
+        except ValueError as exc:
+            self.collection_settings_error = str(exc)
 
         # Form of the selected participant
         self.pid = tk.StringVar()
+        self.name = tk.StringVar()
         self.hand = tk.StringVar(value=dataset.HANDS[0])
         self.age = tk.StringVar(value=dataset.AGE_BANDS[0])
         self.consent = tk.BooleanVar(value=False)
         self.excluded = tk.BooleanVar(value=False)
         self.notes = tk.StringVar()
         # Table switches
+        self.source = tk.StringVar(value='serial')
         self.char_set = tk.StringVar(value='digits')
         self.height = tk.StringVar(value='0')
         # Tracking-error settings
@@ -1024,6 +1082,12 @@ class DataPanel(tk.Toplevel):
             value=','.join(str(h) for h in dataset.HEIGHTS_MM if h > 0))
 
         self._build()
+        if self.collection_settings_error:
+            messagebox.showerror(
+                'Collection settings',
+                '{}\n\nFix or restore the file before saving an experiment '
+                'or starting a recording.'.format(self.collection_settings_error),
+                parent=self)
         self.refresh()
         if self.participants:
             self.load_participant(self.participants[0]['participant_id'])
@@ -1037,7 +1101,9 @@ class DataPanel(tk.Toplevel):
         self.update_idletasks()
         x = parent.winfo_rootx() + parent.winfo_width() + 12
         x = max(0, min(x, self.winfo_screenwidth() - self.winfo_reqwidth()))
-        self.geometry('+{}+{}'.format(x, parent.winfo_rooty()))
+        y = max(0, min(parent.winfo_rooty(),
+                       self.winfo_screenheight() - self.winfo_reqheight() - 64))
+        self.geometry('+{}+{}'.format(x, y))
         self.focus_set()
         self.after(self.RESCAN_MS, self._rescan)
 
@@ -1053,6 +1119,29 @@ class DataPanel(tk.Toplevel):
                  font=f.f_title).pack(anchor='w')
         self.summary = tk.Label(heading, bg=BG, fg=SUBTLE, font=f.f_body)
         self.summary.pack(anchor='w', pady=(3, 0))
+        row = tk.Frame(heading, bg=BG)
+        row.pack(fill='x', pady=(10, 0))
+        tk.Label(row, text='Character source', bg=BG, fg=SUBTLE,
+                 font=f.f_body).pack(side='left', padx=(0, 12))
+        Segmented(row, self.source,
+                  [('serial', 'Sensor board'), ('touchpad', 'Demo (mouse)')],
+                  command=self.refresh, width=310, height=30, font=f.f_body,
+                  parent_bg=BG).pack(side='left')
+        self.source_notice = tk.Label(heading, bg=BG, fg=SUBTLE, font=f.f_small,
+                                      anchor='w', justify='left')
+        self.source_notice.pack(anchor='w', pady=(6, 0))
+
+        experiment = self._box('Experiment')
+        row = tk.Frame(experiment, bg=CARD)
+        row.pack(fill='x')
+        tk.Label(row, text='name', bg=CARD, fg=SUBTLE, font=f.f_body).pack(
+            side='left', padx=(0, 8))
+        RoundEntry(row, self.experiment_name, width=425, height=30,
+                   font=f.f_body, parent_bg=CARD).pack(side='left')
+        Pill(row, 'Save', self._save_experiment, kind='primary', width=80,
+             font=f.f_btn).pack(side='right')
+        tk.Label(experiment, text='Included in every character recording.',
+                 bg=CARD, fg=SUBTLE, font=f.f_small).pack(anchor='w', pady=(8, 0))
 
         # Participant form
         form = self._box('Participant')
@@ -1060,6 +1149,12 @@ class DataPanel(tk.Toplevel):
         row.pack(fill='x', pady=(0, 8))
         tk.Label(row, textvariable=self.pid, width=5, bg='#eef4fb', fg=TEXT,
                  font=f.f_h).pack(side='left')
+        self._caption(row, 'name')
+        RoundEntry(row, self.name, width=270, height=30, font=f.f_body,
+                   parent_bg=CARD).pack(side='left')
+
+        row = tk.Frame(form, bg=CARD)
+        row.pack(fill='x', pady=(0, 8))
         self._caption(row, 'hand')
         self._hand = Segmented(
             row, self.hand, [('right', 'Right'), ('left', 'Left')],
@@ -1088,8 +1183,7 @@ class DataPanel(tk.Toplevel):
              font=f.f_body).pack(side='right', padx=(0, 8))
         self.form_status = tk.Label(
             form, bg=CARD, fg=SUBTLE, font=f.f_small,
-            text='No names here: the name-to-ID list stays on the paper '
-                 'consent form.')
+            text='Names are shown here; recording folders keep the participant ID.')
         self.form_status.pack(anchor='w', pady=(8, 0))
 
         # Which part of the dataset the table shows
@@ -1103,7 +1197,7 @@ class DataPanel(tk.Toplevel):
         Segmented(
             switches, self.height,
             [(str(h), '{} mm'.format(h)) for h in dataset.HEIGHTS_MM],
-            command=self.show_table, width=390, height=30, font=f.f_small,
+            command=self.refresh, width=390, height=30, font=f.f_small,
             parent_bg=BG).pack(side='right')
         tk.Label(switches, text='height', bg=BG, fg=SUBTLE,
                  font=f.f_body).pack(side='right', padx=(0, 8))
@@ -1129,7 +1223,7 @@ class DataPanel(tk.Toplevel):
         self.problems.pack(anchor='w', padx=28, pady=(4, 0))
 
         # Tracking error
-        tracking = self._box('Tracking error')
+        tracking = self._box('Tracking error (sensor board)')
         row = tk.Frame(tracking, bg=CARD)
         row.pack(fill='x')
         tk.Label(row, text='magnet', bg=CARD, fg=SUBTLE, font=f.f_body).pack(
@@ -1150,12 +1244,10 @@ class DataPanel(tk.Toplevel):
 
         footer = tk.Frame(self, bg=BG)
         footer.pack(fill='x', padx=28, pady=(12, 22))
-        tk.Label(
+        self.recording_help = tk.Label(
             footer,
-            text='Start records at the height selected above, using the '
-                 'port # of the main window.\nIn the recorder window: press a '
-                 'character key to record a take, s to save it.',
-            bg=BG, fg=SUBTLE, font=f.f_small, justify='left').pack(side='left')
+            bg=BG, fg=SUBTLE, font=f.f_small, justify='left')
+        self.recording_help.pack(side='left')
         Pill(footer, 'Close', self.destroy, kind='plain', width=80,
              font=f.f_body, parent_bg=BG).pack(side='right')
 
@@ -1186,17 +1278,33 @@ class DataPanel(tk.Toplevel):
                 'participants.json',
                 '{}\n\nFix or restore the file. Saving participants is '
                 'blocked until then.'.format(exc), parent=self)
-        self.samples, problems = dataset.scan_samples(self.data_dir)
+        demo = self.source.get() == 'touchpad'
+        collection_dir = dataset.collection_data_dir(self.data_dir, demo=demo)
+        self.samples, problems = dataset.scan_samples(
+            collection_dir, input_source=self.source.get())
 
         active = [p for p in self.participants if not p.get('excluded')]
         wanted = len(active) * (len(dataset.DIGITS) + len(dataset.LETTERS)) \
             * dataset.TARGET_REPS
         active_ids = {p['participant_id'] for p in active}
-        done = dataset.progress(self.samples, active_ids, 0)
-        self.summary.configure(text='Folder: {}/ · {} participants · {} / {} '
-                               'takes at 0 mm'.format(
-                                   dataset.DATA_DIR_NAME, len(active), done,
-                                   wanted))
+        height_mm = int(self.height.get())
+        done = dataset.progress(self.samples, active_ids, height_mm)
+        folder = dataset.collection_data_dir(dataset.DATA_DIR_NAME, demo=demo)
+        self.summary.configure(text='{} · {}/ · {} participants · {} / {} '
+                               'takes at {} mm'.format(
+                                   'DEMO' if demo else 'Sensor board', folder,
+                                   len(active), done, wanted, height_mm))
+        self.source_notice.configure(
+            text=('DEMO: draw with the mouse. No sensor board or robot is required; '
+                  'demo takes are saved separately.' if demo else
+                  'Sensor-board recordings count toward the participant dataset.'),
+            fg=BLUE if demo else SUBTLE)
+        self.recording_help.configure(text=(
+            'DEMO: select 0-9 or A-J; Enter starts and saves a take.\n'
+            'Move the mouse to draw while recording; Enter stops the ink and saves.'
+            if demo else
+            'Start uses the selected height and the main window\'s port #.\n'
+            'Select 0-9 or A-J, then press Enter to start and Enter to save.'))
         self.problems.configure(text='Check: ' + ' · '.join(
             '{} {}'.format(n, reason) for reason, n in sorted(problems.items()))
             if problems else '')
@@ -1223,7 +1331,7 @@ class DataPanel(tk.Toplevel):
             {'participant_id': pid} for pid in sorted(coverage)
             if pid not in registered]
 
-        headers = ['ID', 'Hand'] + list(chars) + ['Total']
+        headers = ['Participant', 'Hand'] + list(chars) + ['Total']
         for column, text in enumerate(headers):
             tk.Label(self.table, text=text, bg=CARD, fg=SUBTLE,
                      font=f.f_small).grid(row=0, column=column, padx=3,
@@ -1242,8 +1350,9 @@ class DataPanel(tk.Toplevel):
             counts = coverage.get(pid, {})
             known = pid in registered
             counted = known and not participant.get('excluded')
-            label = tk.Label(self.table, text=pid, bg=CARD,
-                             fg=BLUE if known else SUBTLE, font=f.f_h,
+            label = tk.Label(self.table, text=dataset.participant_label(participant),
+                             width=18, wraplength=155, anchor='w', justify='left',
+                             bg=CARD, fg=BLUE if known else SUBTLE, font=f.f_body,
                              cursor='hand2' if known else '')
             label.grid(row=row, column=0, padx=(10, 3), pady=2)
             if known:
@@ -1283,11 +1392,16 @@ class DataPanel(tk.Toplevel):
         self._fit_table()
 
     def _fit_table(self):
-        """Show up to TABLE_ROWS participants; scroll for the rest."""
+        """Fit participant rows while keeping the form and footer on screen."""
         self.table.update_idletasks()
         width, height = self.table.winfo_reqwidth(), self.table.winfo_reqheight()
         rows = max(1, self.table.grid_size()[1])
         visible = int(height * min(1.0, (self.TABLE_ROWS + 2) / rows))
+        self.table_view.configure(height=visible)
+        self.update_idletasks()
+        fixed_height = self.winfo_reqheight() - visible
+        available = max(40, self.winfo_screenheight() - fixed_height - 80)
+        visible = min(visible, available)
         self.table_view.configure(scrollregion=(0, 0, width, height),
                                   height=visible)
         if visible < height:
@@ -1300,7 +1414,10 @@ class DataPanel(tk.Toplevel):
         """Pick up new takes while the window is open (not participants.json)."""
         if not self.winfo_exists():
             return
-        samples, _ = dataset.scan_samples(self.data_dir)
+        collection_dir = dataset.collection_data_dir(
+            self.data_dir, demo=self.source.get() == 'touchpad')
+        samples, _ = dataset.scan_samples(
+            collection_dir, input_source=self.source.get())
         if samples != self.samples:
             self.refresh()
         self.after(self.RESCAN_MS, self._rescan)
@@ -1315,6 +1432,7 @@ class DataPanel(tk.Toplevel):
     def _fill_form(self, record):
         self.record = dict(record)
         self.pid.set(record['participant_id'])
+        self.name.set(record.get('name', ''))
         self.hand.set(record.get('handedness', dataset.HANDS[0]))
         self.age.set(record.get('age_band', dataset.AGE_BANDS[0]))
         self.consent.set(bool(record.get('consent')))
@@ -1326,14 +1444,16 @@ class DataPanel(tk.Toplevel):
     def new_participant(self):
         # Never reuse an ID that already has recordings on disk.
         seen = {s['participant_id'] for s in self.samples}
-        characters_dir = os.path.join(self.data_dir, dataset.CHARACTERS_DIR)
-        if os.path.isdir(characters_dir):
-            seen.update(os.listdir(characters_dir))
+        for demo in (False, True):
+            characters_dir = os.path.join(
+                dataset.collection_data_dir(self.data_dir, demo=demo),
+                dataset.CHARACTERS_DIR)
+            if os.path.isdir(characters_dir):
+                seen.update(os.listdir(characters_dir))
         pid = dataset.next_participant_id(self.participants, seen)
         self._fill_form(dataset.new_participant(pid))
         self.form_status.configure(
-            text='{} is new and not saved yet. No names here: the name-to-ID '
-                 'list stays on the paper consent form.'.format(pid))
+            text='{} is new and not saved yet. Add a name and press Save.'.format(pid))
 
     def load_participant(self, participant_id):
         for record in self.participants:
@@ -1341,7 +1461,7 @@ class DataPanel(tk.Toplevel):
                 self._fill_form(record)
                 self.form_status.configure(
                     text='{} saved on {}.'.format(
-                        participant_id, record.get('created_at', '?')))
+                        dataset.participant_label(record), record.get('created_at', '?')))
                 return
 
     def save_participant(self):
@@ -1351,6 +1471,7 @@ class DataPanel(tk.Toplevel):
             return
         record = dict(self.record)
         record.update({
+            'name': self.name.get().strip(),
             'handedness': self.hand.get(),
             'age_band': self.age.get(),
             'consent': bool(self.consent.get()),
@@ -1374,22 +1495,42 @@ class DataPanel(tk.Toplevel):
 
     # ── Starting recordings ─────────────────────────────────────────────────
 
+    def _save_experiment(self):
+        experiment_name = self.experiment_name.get().strip()
+        try:
+            # Re-read before saving so a damaged file cannot be overwritten.
+            dataset.load_collection_settings(self.data_dir)
+            dataset.save_collection_settings(self.data_dir, experiment_name)
+        except (OSError, ValueError) as exc:
+            self.collection_settings_error = str(exc)
+            messagebox.showerror('Could not save experiment', str(exc), parent=self)
+            return False
+        self.collection_settings_error = None
+        self.experiment_name.set(experiment_name)
+        return True
+
     def start_recording(self, participant_id):
         record = next(p for p in self.participants
                       if p['participant_id'] == participant_id)
+        demo = self.source.get() == 'touchpad'
         if record.get('excluded'):
             messagebox.showwarning(
-                'Excluded', '{} is marked as excluded.'.format(participant_id),
+                'Excluded', '{} is marked as excluded.'.format(
+                    dataset.participant_label(record)),
                 parent=self)
             return
-        if not record.get('consent'):
+        if not demo and not record.get('consent'):
             messagebox.showwarning(
                 'No consent',
                 'No consent is recorded for {}. Switch on consent in the form '
-                'and press Save first.'.format(participant_id), parent=self)
+                'and press Save first.'.format(dataset.participant_label(record)),
+                parent=self)
+            return
+        if not self._save_experiment():
             return
         self.parent.start_character_recording(
-            participant_id, int(self.height.get()))
+            participant_id, int(self.height.get()), self.experiment_name.get(),
+            demo=demo)
 
     def start_tracking(self):
         self.parent.start_tracking_error(
@@ -1732,13 +1873,23 @@ class Launcher(tk.Tk):
 
     def _ensure_container(self):
         ok, _ = sh('docker ps --format "{{.Names}}" | grep -qx %s' % CONTAINER)
-        if ok:
-            return True
-        ok2, _ = sh('docker start %s' % CONTAINER, timeout=30)
-        if not ok2:
-            messagebox.showerror('Docker', 'Container "%s" not found.\n'
-                                 'Run: bash ros/docker_setup.sh' % CONTAINER)
-        return ok2
+        if not ok:
+            started, _ = sh('docker start %s' % CONTAINER, timeout=30)
+            if not started:
+                messagebox.showerror('Docker', 'Container "%s" not found.\n'
+                                     'Run: bash ros/docker_setup.sh' % CONTAINER)
+                return False
+        mounted, error = probe_container_project_mount(REPO_DIR)
+        if not mounted:
+            repair = 'cd {} && COLMAG_SKIP_BUILD=1 bash ros/docker_setup.sh'.format(
+                shlex.quote(os.path.realpath(REPO_DIR)))
+            messagebox.showerror(
+                'Docker project mount',
+                '{}\n\nThe launcher needs this checkout mounted at /colmag.\n'
+                'Recreate the container from the current project:\n\n{}'.format(
+                    error, repair))
+            return False
+        return True
 
     def start_robot(self):
         if not self._pipeline_action_ready():
@@ -1982,36 +2133,54 @@ class Launcher(tk.Tk):
                     'or press Stop all first.')
         messagebox.showwarning('Sensor board busy', text)
 
-    def start_character_recording(self, participant_id, height_mm):
+    def start_character_recording(self, participant_id, height_mm,
+                                  experiment_name='', demo=False):
         """Data window: record digits and letters for one participant."""
         if not self._pipeline_action_ready() or not self._ensure_container():
             return
-        busy = self._sensor_in_use()
-        if busy:
-            self._warn_sensor_busy(busy)
+        port = ''
+        if not demo:
+            busy = self._sensor_in_use()
+            if busy:
+                self._warn_sensor_busy(busy)
+                return
+            port = self._checked_sensor_port('Data collection')
+            if not port:
+                return
+        collection_dir = dataset.collection_data_dir(DATA_DIR, demo=demo)
+        session_id = dataset.next_session_id(collection_dir, participant_id)
+        try:
+            participants = dataset.load_participants(DATA_DIR)
+        except ValueError as exc:
+            messagebox.showerror('Data collection', str(exc))
             return
-        port = self._checked_sensor_port('Data collection')
-        if not port:
-            return
-        session_id = dataset.next_session_id(DATA_DIR, participant_id)
-        where = ('on the cover (0 mm)' if height_mm == 0 else
+        participant = next((p for p in participants
+                            if p['participant_id'] == participant_id),
+                           {'participant_id': participant_id})
+        where = ('with mouse input' if demo else
+                 'on the cover (0 mm)' if height_mm == 0 else
                  'at {0:g} mm. Fit the {0:g} mm spacer first'.format(height_mm))
+        experiment = ('Experiment: {}\n\n'.format(experiment_name.strip())
+                      if experiment_name.strip() else '')
         if not messagebox.askokcancel(
-                'Record characters',
-                'Record {} session {} {}?'.format(
-                    participant_id, session_id, where)):
+                'DEMO character recording' if demo else 'Record characters',
+                '{}{}Record {} session {} {}?'.format(
+                    'DEMO — no sensor board or robot required.\n\n' if demo else '',
+                    experiment, dataset.participant_label(participant),
+                    session_id, where)):
             return
         # Creating the folder now reserves the session number, even if the
         # recorder stops before its first take.
         try:
             os.makedirs(os.path.join(
                 REPO_DIR,
-                dataset.session_output_dir(participant_id, session_id)),
+                dataset.session_output_dir(participant_id, session_id, demo=demo)),
                 exist_ok=True)
         except OSError as exc:
             messagebox.showerror('Data collection', str(exc))
             return
-        cmd = build_record_command(port, participant_id, session_id, height_mm)
+        cmd = build_record_command(port, participant_id, session_id, height_mm,
+                                   experiment_name, demo=demo)
         if self._launch_stage('interface', cmd):
             self._interface_notice = None
 

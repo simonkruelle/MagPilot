@@ -3,8 +3,10 @@
 Everything lives in one folder next to the code that git ignores:
 
     data_collection/
-      participants.json                  who took part (IDs only, no names)
+      participants.json                  who took part (IDs and optional names)
+      collection_settings.json           last selected experiment name
       characters/P03/S01/...             magnetometer_reader.py --record-data output
+      demo/characters/P03/S01/...        trackpad rehearsal, separate from board data
       tracking_error/<run_id>/...        tools/record_tracking_error.py output
 
 The launcher's Data window uses these functions. They only use the standard
@@ -17,16 +19,17 @@ import re
 import tempfile
 from datetime import date
 
+from colmag.collection_protocol import DIGITS, LETTERS, TARGET_REPS
+
 
 DATA_DIR_NAME = 'data_collection'
+DEMO_DIR = 'demo'
 CHARACTERS_DIR = 'characters'
 TRACKING_DIR = 'tracking_error'
 PARTICIPANTS_FILE = 'participants.json'
+COLLECTION_SETTINGS_FILE = 'collection_settings.json'
 SCHEMA_VERSION = 1
 
-DIGITS = tuple('0123456789')
-LETTERS = tuple('ABCDEFGHIJ')
-TARGET_REPS = 10
 HEIGHTS_MM = (0, 10, 50, 100, 150, 200)
 HANDS = ('right', 'left')
 AGE_BANDS = ('not given', '18-24', '25-34', '35-44', '45-54', '55+')
@@ -95,10 +98,11 @@ def next_participant_id(participants, seen_ids=()):
     return 'P{:02d}'.format(max(numbers) + 1)
 
 
-def new_participant(participant_id):
+def new_participant(participant_id, name=''):
     """Return a fresh participant record with default values."""
     return {
         'participant_id': participant_id,
+        'name': name.strip(),
         'created_at': date.today().isoformat(),
         'handedness': HANDS[0],
         'age_band': AGE_BANDS[0],
@@ -107,6 +111,57 @@ def new_participant(participant_id):
         'excluded': False,
         'notes': '',
     }
+
+
+def participant_label(record):
+    """Display a participant's optional name with their stable folder ID."""
+    participant_id = record['participant_id']
+    name = record.get('name', '')
+    name = name.strip() if isinstance(name, str) else ''
+    return '{} ({})'.format(name, participant_id) if name else participant_id
+
+
+# ── Collection settings ────────────────────────────────────────────────────
+
+def load_collection_settings(data_dir):
+    """Return the last experiment name; reject damaged settings files."""
+    path = os.path.join(data_dir, COLLECTION_SETTINGS_FILE)
+    if not os.path.exists(path):
+        return {'experiment_name': ''}
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            settings = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError('{} cannot be read: {}'.format(path, exc))
+    if not isinstance(settings, dict) or not isinstance(
+            settings.get('experiment_name'), str):
+        raise ValueError('{} must contain a string experiment_name'.format(path))
+    return {'experiment_name': settings['experiment_name']}
+
+
+def save_collection_settings(data_dir, experiment_name):
+    """Atomically remember an experiment name without replacing corrupt input."""
+    if not isinstance(experiment_name, str):
+        raise ValueError('experiment_name must be a string')
+    load_collection_settings(data_dir)
+    os.makedirs(data_dir, exist_ok=True)
+    settings = {'experiment_name': experiment_name.strip()}
+    fd, temporary_path = tempfile.mkstemp(
+        prefix='.collection_settings.', suffix='.tmp', dir=data_dir)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(settings, f, indent=2)
+            f.write('\n')
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary_path, os.path.join(data_dir, COLLECTION_SETTINGS_FILE))
+    except Exception:
+        try:
+            os.unlink(temporary_path)
+        except OSError:
+            pass
+        raise
+    return settings
 
 
 # ── Recorded characters ─────────────────────────────────────────────────────
@@ -121,9 +176,15 @@ def character_of(label):
     return None
 
 
-def session_output_dir(participant_id, session_id):
+def collection_data_dir(data_dir, demo=False):
+    """Select the board dataset or its separate trackpad rehearsal root."""
+    return os.path.join(data_dir, DEMO_DIR) if demo else data_dir
+
+
+def session_output_dir(participant_id, session_id, demo=False):
     """Recorder output folder for one session, relative to the repo root."""
-    return os.path.join(DATA_DIR_NAME, CHARACTERS_DIR, participant_id, session_id)
+    return os.path.join(collection_data_dir(DATA_DIR_NAME, demo),
+                        CHARACTERS_DIR, participant_id, session_id)
 
 
 def next_session_id(data_dir, participant_id):
@@ -137,12 +198,14 @@ def next_session_id(data_dir, participant_id):
     return 'S{:02d}'.format(max(numbers) + 1)
 
 
-def scan_samples(data_dir):
-    """Read every recorded take's JSON file.
+def scan_samples(data_dir, input_source='serial'):
+    """Read one dataset root's takes, accepting only the selected input source.
 
     Returns (samples, problems). Each sample is a dict with participant_id,
     session_id, height_mm and char. problems counts what was skipped, so the
-    Data window can say why a take is missing from the table.
+    Data window can say why a take is missing from the table. Pass the demo
+    root and input_source='touchpad' for rehearsal coverage; the default root
+    only descends characters/, so demo recordings never affect board coverage.
     """
     samples = []
     problems = {}
@@ -169,8 +232,9 @@ def scan_samples(data_dir):
             if char is None:
                 skip('other label')
                 continue
-            if take.get('input_source') != 'serial':
-                skip('not from the sensor board')
+            if take.get('input_source') != input_source:
+                skip('not from the sensor board' if input_source == 'serial'
+                     else 'not from {}'.format(input_source))
                 continue
             if not take.get('sample_count'):
                 skip('empty')

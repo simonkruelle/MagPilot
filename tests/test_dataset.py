@@ -14,6 +14,7 @@ import tempfile
 import unittest
 
 from colmag import dataset
+from colmag import collection_protocol as protocol
 
 
 def write_take(data_dir, participant_id='P01', session_id='S01', label='digit_3',
@@ -54,6 +55,27 @@ class ParticipantTests(unittest.TestCase):
             self.assertEqual([p['participant_id'] for p in loaded], ['P01', 'P02'])
             self.assertFalse(loaded[0]['consent'])
 
+    def test_name_round_trip_and_display_include_stable_id(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            participant = dataset.new_participant('P01', '  Simon  ')
+            dataset.save_participants(data_dir, [participant])
+            loaded = dataset.load_participants(data_dir)[0]
+            self.assertEqual(loaded['name'], 'Simon')
+            self.assertEqual(dataset.participant_label(loaded), 'Simon (P01)')
+
+    def test_legacy_registry_without_name_retains_schema_and_id(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            participant = dataset.new_participant('P01')
+            del participant['name']
+            dataset.save_participants(data_dir, [participant])
+            loaded = dataset.load_participants(data_dir)[0]
+            self.assertEqual(loaded, participant)
+            self.assertEqual(dataset.participant_label(loaded), 'P01')
+            self.assertEqual(dataset.participant_label(
+                dataset.new_participant('P02', '  ')), 'P02')
+            with open(os.path.join(data_dir, dataset.PARTICIPANTS_FILE)) as f:
+                self.assertEqual(json.load(f)['schema_version'], 1)
+
     def test_damaged_file_raises_instead_of_resetting(self):
         with tempfile.TemporaryDirectory() as data_dir:
             path = os.path.join(data_dir, dataset.PARTICIPANTS_FILE)
@@ -77,6 +99,69 @@ class ParticipantTests(unittest.TestCase):
             os.makedirs(os.path.join(data_dir, dataset.CHARACTERS_DIR, 'P01', 'S01'))
             os.makedirs(os.path.join(data_dir, dataset.CHARACTERS_DIR, 'P01', 'S03'))
             self.assertEqual(dataset.next_session_id(data_dir, 'P01'), 'S04')
+
+
+class CollectionProtocolTests(unittest.TestCase):
+    def test_shared_protocol_is_twenty_characters_and_ten_repetitions(self):
+        self.assertEqual(protocol.DIGITS, tuple('0123456789'))
+        self.assertEqual(protocol.LETTERS, tuple('ABCDEFGHIJ'))
+        self.assertEqual(protocol.CHARACTER_LABELS, tuple(
+            ['digit_{}'.format(c) for c in '0123456789'] +
+            ['letter_{}'.format(c) for c in 'ABCDEFGHIJ']))
+        self.assertEqual(protocol.TARGET_REPS, 10)
+        self.assertIs(dataset.DIGITS, protocol.DIGITS)
+        self.assertIs(dataset.LETTERS, protocol.LETTERS)
+        self.assertEqual(dataset.TARGET_REPS, protocol.TARGET_REPS)
+        self.assertFalse(set(protocol.CONTROL_LABELS) & set(protocol.CHARACTER_LABELS))
+
+    def test_metadata_is_json_serializable_and_cannot_mutate_protocol(self):
+        metadata = protocol.protocol_metadata()
+        self.assertEqual(json.loads(json.dumps(metadata)), metadata)
+        self.assertEqual(metadata['protocol_id'], protocol.PROTOCOL_ID)
+        self.assertEqual(metadata['character_labels'], list(protocol.CHARACTER_LABELS))
+        self.assertEqual(metadata['control_labels'], list(protocol.CONTROL_LABELS))
+        self.assertEqual(metadata['target_reps'], 10)
+        metadata['character_labels'].clear()
+        self.assertEqual(len(protocol.protocol_metadata()['character_labels']), 20)
+
+
+class CollectionSettingsTests(unittest.TestCase):
+    def test_missing_settings_and_round_trip(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            self.assertEqual(dataset.load_collection_settings(data_dir),
+                             {'experiment_name': ''})
+            self.assertEqual(dataset.save_collection_settings(data_dir, '  New pen pilot  '),
+                             {'experiment_name': 'New pen pilot'})
+            self.assertEqual(dataset.load_collection_settings(data_dir),
+                             {'experiment_name': 'New pen pilot'})
+            dataset.save_collection_settings(data_dir, 'Tuesday baseline')
+            self.assertEqual(dataset.load_collection_settings(data_dir),
+                             {'experiment_name': 'Tuesday baseline'})
+            self.assertEqual(os.listdir(data_dir), [dataset.COLLECTION_SETTINGS_FILE])
+
+    def test_invalid_existing_settings_cannot_be_overwritten(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            path = os.path.join(data_dir, dataset.COLLECTION_SETTINGS_FILE)
+            for content in ('{not json', '[]', '{}', '{"experiment_name": null}',
+                            '{"experiment_name": 42}'):
+                with self.subTest(content=content):
+                    with open(path, 'w') as f:
+                        f.write(content)
+                    with self.assertRaises(ValueError):
+                        dataset.load_collection_settings(data_dir)
+                    with self.assertRaises(ValueError):
+                        dataset.save_collection_settings(data_dir, 'Replacement')
+                    with open(path) as f:
+                        self.assertEqual(f.read(), content)
+
+    def test_non_string_name_rejected_without_changing_saved_settings(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            dataset.save_collection_settings(data_dir, 'Pilot')
+            for experiment_name in (None, 1, {}, []):
+                with self.assertRaises(ValueError):
+                    dataset.save_collection_settings(data_dir, experiment_name)
+            self.assertEqual(dataset.load_collection_settings(data_dir),
+                             {'experiment_name': 'Pilot'})
 
 
 class CoverageTests(unittest.TestCase):
@@ -151,6 +236,54 @@ class CoverageTests(unittest.TestCase):
             samples, _ = dataset.scan_samples(data_dir)
             self.assertEqual(dataset.progress(samples, {'P01'}, 0), dataset.TARGET_REPS)
             self.assertEqual(dataset.progress(samples, {'P01'}, 50), 0)
+
+
+class DemoDatasetTests(unittest.TestCase):
+    def test_output_paths_preserve_board_paths_and_separate_demo(self):
+        self.assertEqual(dataset.collection_data_dir('data_collection'), 'data_collection')
+        self.assertEqual(dataset.collection_data_dir('data_collection', demo=True),
+                         os.path.join('data_collection', 'demo'))
+        self.assertEqual(dataset.session_output_dir('P01', 'S02'),
+                         os.path.join('data_collection', 'characters', 'P01', 'S02'))
+        self.assertEqual(dataset.session_output_dir('P01', 'S02', demo=True),
+                         os.path.join('data_collection', 'demo', 'characters', 'P01', 'S02'))
+
+    def test_board_and_demo_coverage_use_independent_roots(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            demo_dir = dataset.collection_data_dir(data_dir, demo=True)
+            write_take(data_dir, basename='board')
+            write_take(demo_dir, basename='demo', label='letter_A', input_source='touchpad')
+            # Even a misplaced serial take inside demo cannot enter default board coverage.
+            write_take(demo_dir, basename='demo_serial', label='letter_B')
+            board_samples, board_problems = dataset.scan_samples(data_dir)
+            demo_samples, demo_problems = dataset.scan_samples(demo_dir, input_source='touchpad')
+            self.assertEqual(dataset.count_coverage(board_samples, dataset.DIGITS + dataset.LETTERS, 0),
+                             {'P01': {'3': 1}})
+            self.assertEqual(dataset.count_coverage(demo_samples, dataset.DIGITS + dataset.LETTERS, 0),
+                             {'P01': {'A': 1}})
+            self.assertEqual(board_problems, {})
+            self.assertEqual(demo_problems, {'not from touchpad': 1})
+
+    def test_source_filter_rejects_other_input_even_in_the_selected_root(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            write_take(data_dir, basename='board', label='digit_0', input_source='serial')
+            write_take(data_dir, basename='trackpad', label='letter_A', input_source='touchpad')
+            board_samples, board_problems = dataset.scan_samples(data_dir)
+            demo_samples, demo_problems = dataset.scan_samples(data_dir, input_source='touchpad')
+            self.assertEqual([sample['char'] for sample in board_samples], ['0'])
+            self.assertEqual([sample['char'] for sample in demo_samples], ['A'])
+            self.assertEqual(board_problems, {'not from the sensor board': 1})
+            self.assertEqual(demo_problems, {'not from touchpad': 1})
+
+    def test_board_and_demo_sessions_are_numbered_independently(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            demo_dir = dataset.collection_data_dir(data_dir, demo=True)
+            write_take(data_dir, session_id='S03', basename='board')
+            self.assertEqual(dataset.next_session_id(data_dir, 'P01'), 'S04')
+            self.assertEqual(dataset.next_session_id(demo_dir, 'P01'), 'S01')
+            write_take(demo_dir, session_id='S01', basename='demo', input_source='touchpad')
+            self.assertEqual(dataset.next_session_id(data_dir, 'P01'), 'S04')
+            self.assertEqual(dataset.next_session_id(demo_dir, 'P01'), 'S02')
 
 
 class TrackingRunTests(unittest.TestCase):

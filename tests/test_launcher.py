@@ -8,10 +8,14 @@ _ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 if _ROOT not in _sys.path:
     _sys.path.insert(0, _ROOT)
 
+import json
+import shlex
+import tempfile
 import unittest
 from unittest import mock
 
 from colmag_launcher import (
+    DataPanel,
     Launcher,
     build_clear_stale_launcher_state_command,
     build_detached_inner,
@@ -34,9 +38,11 @@ from colmag_launcher import (
     parse_local_stage_status,
     parse_franka_robot_mode,
     parse_tracking_settings,
+    probe_container_project_mount,
     resolve_serial_port,
     serial_port_label,
     stop_conflicting_colmag_containers,
+    validate_project_mount,
 )
 
 
@@ -252,6 +258,103 @@ controller:
         self.assertIsNone(parse_franka_robot_mode('robot_mode: unknown\n'))
 
 
+class ProjectMountTests(unittest.TestCase):
+    def test_current_checkout_mount_accepts_symlink_aliases(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            checkout = _os.path.join(temporary_dir, 'MagPilot')
+            alias = _os.path.join(temporary_dir, 'workspace alias')
+            _os.mkdir(checkout)
+            _os.symlink(checkout, alias)
+            metadata = json.dumps([{
+                'Type': 'bind', 'Destination': '/colmag', 'Source': alias,
+            }])
+
+            self.assertEqual(validate_project_mount(metadata, checkout), (True, ''))
+            self.assertEqual(validate_project_mount(metadata, alias), (True, ''))
+
+    def test_other_checkout_reports_actual_and_expected_source(self):
+        metadata = json.dumps([{
+            'Type': 'bind', 'Destination': '/colmag', 'Source': '/tmp/old-colmag',
+        }])
+
+        ok, error = validate_project_mount(metadata, '/tmp/current-magpilot')
+
+        self.assertFalse(ok)
+        self.assertIn('/tmp/old-colmag', error)
+        self.assertIn('/tmp/current-magpilot', error)
+
+    def test_missing_project_mount_is_rejected(self):
+        ok, error = validate_project_mount(json.dumps([{
+            'Type': 'bind', 'Destination': '/catkin_ws', 'Source': '/tmp/catkin',
+        }]), '/tmp/current-magpilot')
+
+        self.assertFalse(ok)
+        self.assertIn('no project bind mount at /colmag', error)
+
+    def test_malformed_mount_metadata_is_rejected_clearly(self):
+        for metadata in ('not json', '{}', '[null]', json.dumps([{
+                'Type': 'bind', 'Destination': '/colmag', 'Source': ['wrong'],
+        }])):
+            with self.subTest(metadata=metadata):
+                ok, error = validate_project_mount(metadata, '/tmp/current-magpilot')
+                self.assertFalse(ok)
+                self.assertTrue(error)
+
+    def test_named_volume_is_not_a_workspace_bind(self):
+        ok, error = validate_project_mount(json.dumps([{
+            'Type': 'volume', 'Destination': '/colmag', 'Source': '/tmp/current-magpilot',
+        }]), '/tmp/current-magpilot')
+
+        self.assertFalse(ok)
+        self.assertIn('must be a bind mount', error)
+
+    @mock.patch('colmag_launcher.sh', return_value=(False, 'Docker permission denied'))
+    def test_failed_docker_inspection_is_rejected(self, inspect):
+        ok, error = probe_container_project_mount('/tmp/current-magpilot')
+
+        self.assertFalse(ok)
+        self.assertIn('Could not inspect', error)
+        self.assertIn('Docker permission denied', error)
+        self.assertIn("docker inspect --format '{{json .Mounts}}' colmag_simon",
+                      inspect.call_args.args[0])
+
+    @mock.patch('colmag_launcher.messagebox.showerror')
+    @mock.patch('colmag_launcher.os.makedirs')
+    @mock.patch('colmag_launcher.dataset.next_session_id')
+    @mock.patch('colmag_launcher.sh')
+    def test_wrong_mount_blocks_demo_before_creating_a_session(
+            self, run, next_session, mkdir, showerror):
+        run.side_effect = [(True, ''), (True, json.dumps([{
+            'Type': 'bind', 'Destination': '/colmag', 'Source': '/tmp/old-colmag',
+        }]))]
+        launcher = Launcher.__new__(Launcher)
+        launcher._pipeline_action_ready = mock.Mock(return_value=True)
+        launcher._launch_stage = mock.Mock()
+
+        launcher.start_character_recording('P01', 0, 'Lab meeting', demo=True)
+
+        next_session.assert_not_called()
+        mkdir.assert_not_called()
+        launcher._launch_stage.assert_not_called()
+        message = showerror.call_args.args[1]
+        self.assertIn('/tmp/old-colmag', message)
+        self.assertIn('cd ', message)
+        self.assertIn('COLMAG_SKIP_BUILD=1 bash ros/docker_setup.sh', message)
+
+    @mock.patch('colmag_launcher.REPO_DIR', '/tmp/current-magpilot')
+    @mock.patch('colmag_launcher.sh')
+    def test_stopped_container_mount_is_checked_after_start(self, run):
+        run.side_effect = [(False, ''), (True, ''), (True, json.dumps([{
+            'Type': 'bind', 'Destination': '/colmag', 'Source': '/tmp/current-magpilot',
+        }]))]
+        launcher = Launcher.__new__(Launcher)
+
+        self.assertTrue(launcher._ensure_container())
+
+        self.assertEqual(run.call_args_list[1].args[0], 'docker start colmag_simon')
+        self.assertIn('docker inspect', run.call_args_list[2].args[0])
+
+
 class LauncherCleanupHookTests(unittest.TestCase):
     def test_startup_requests_pipeline_cleanup(self):
         launcher = Launcher.__new__(Launcher)
@@ -328,12 +431,46 @@ class DataCollectionCommandTests(unittest.TestCase):
         self.assertTrue(command.startswith('cd /colmag && python3 magnetometer_reader.py'))
         self.assertIn('--input-source serial --port /host/dev/ttyACM0', command)
         self.assertIn('--record-data', command)
+        self.assertIn('--no-classifier', command)
         self.assertIn('--output-dir data_collection/characters/P03/S01', command)
         self.assertIn('--participant-id P03 --session-id S01 --height-mm 0', command)
         self.assertIn('--target-reps 10', command)
         self.assertIn('--writing-max-z 0.05', command)
         self.assertNotIn('--ros', command)
         self.assertNotIn('--classifier-labels', command)
+        self.assertNotIn('--experiment-name', command)
+
+    def test_experiment_name_is_one_quoted_metadata_argument(self):
+        experiment_name = "Pen pilot: Simon's $(touch /tmp/never) `echo nope`; v2"
+        command = build_record_command(
+            '/host/dev/ttyACM0', 'P03', 'S01', 0, experiment_name)
+        args = shlex.split(command.partition(' && ')[2])
+
+        self.assertEqual(args[args.index('--experiment-name') + 1], experiment_name)
+        self.assertEqual(args[args.index('--participant-id') + 1], 'P03')
+        self.assertEqual(args[args.index('--output-dir') + 1],
+                         'data_collection/characters/P03/S01')
+
+    def test_blank_experiment_name_keeps_existing_command_shape(self):
+        self.assertEqual(
+            build_record_command('/dev/ttyACM0', 'P01', 'S01', 0, '  '),
+            build_record_command('/dev/ttyACM0', 'P01', 'S01', 0))
+
+    def test_demo_records_without_serial_or_ros_into_a_separate_folder(self):
+        command = build_record_command('', 'P03', 'S01', 0, 'Lab demo', demo=True)
+        args = shlex.split(command.partition(' && ')[2])
+
+        self.assertEqual(args[args.index('--input-source') + 1], 'trackpad')
+        self.assertEqual(args[args.index('--touchpad-ink-mode') + 1], 'pen')
+        self.assertEqual(args[args.index('--writing-min-velocity') + 1], '0')
+        self.assertEqual(args[args.index('--output-dir') + 1],
+                         'data_collection/demo/characters/P03/S01')
+        self.assertIn('--record-data', args)
+        self.assertIn('--no-classifier', args)
+        self.assertIn('--clean', args)
+        self.assertNotIn('--port', args)
+        self.assertNotIn('--ros', args)
+        self.assertNotIn('--writing-max-z', args)
 
     def test_raised_heights_skip_the_pen_up_filter(self):
         command = build_record_command('/host/dev/ttyACM0', 'P01', 'S02', 50)
@@ -379,6 +516,76 @@ class DataCollectionCommandTests(unittest.TestCase):
 
     def test_stop_all_also_ends_the_tracking_error_recorder(self):
         self.assertIn("'[r]ecord_tracking_error.py'", build_stop_all_command())
+
+
+class DataCollectionRoutingTests(unittest.TestCase):
+    @mock.patch('colmag_launcher.os.makedirs')
+    @mock.patch('colmag_launcher.dataset.load_participants', return_value=[])
+    @mock.patch('colmag_launcher.dataset.next_session_id', return_value='S01')
+    @mock.patch('colmag_launcher.messagebox.askokcancel', return_value=True)
+    def test_demo_start_skips_sensor_checks_and_uses_demo_session_root(
+            self, confirm, next_session, _participants, mkdir):
+        launcher = Launcher.__new__(Launcher)
+        launcher._pipeline_action_ready = mock.Mock(return_value=True)
+        launcher._ensure_container = mock.Mock(return_value=True)
+        launcher._sensor_in_use = mock.Mock()
+        launcher._checked_sensor_port = mock.Mock()
+        launcher._launch_stage = mock.Mock(return_value=True)
+
+        launcher.start_character_recording('P01', 0, 'Lab meeting', demo=True)
+
+        launcher._sensor_in_use.assert_not_called()
+        launcher._checked_sensor_port.assert_not_called()
+        self.assertTrue(next_session.call_args.args[0].endswith('/data_collection/demo'))
+        self.assertEqual(next_session.call_args.args[1], 'P01')
+        self.assertIn('DEMO', confirm.call_args.args[0])
+        self.assertIn('Lab meeting', confirm.call_args.args[1])
+        self.assertIn('/data_collection/demo/characters/P01/S01', mkdir.call_args.args[0])
+        stage, command = launcher._launch_stage.call_args.args
+        self.assertEqual(stage, 'interface')
+        self.assertIn('--input-source trackpad', command)
+
+    @mock.patch('colmag_launcher.messagebox.showwarning')
+    @mock.patch('colmag_launcher.in_container_detached')
+    @mock.patch('colmag_launcher.in_container', return_value=(True, 'running'))
+    def test_demo_cannot_replace_an_active_interface_stage(
+            self, _probe, start_detached, showwarning):
+        launcher = Launcher.__new__(Launcher)
+        launcher._select_stage_log = mock.Mock()
+        command = build_record_command('', 'P01', 'S01', 0, demo=True)
+
+        self.assertFalse(launcher._launch_stage('interface', command))
+
+        start_detached.assert_not_called()
+        showwarning.assert_called_once()
+
+    @mock.patch('colmag_launcher.messagebox.showwarning')
+    def test_demo_bypasses_consent_but_sensor_recording_requires_it(self, warn):
+        panel = DataPanel.__new__(DataPanel)
+        panel.participants = [{'participant_id': 'P01', 'consent': False}]
+        panel.source = mock.Mock()
+        panel.source.get.return_value = 'touchpad'
+        panel.height = mock.Mock()
+        panel.height.get.return_value = '0'
+        panel.experiment_name = mock.Mock()
+        panel.experiment_name.get.return_value = 'Lab meeting'
+        panel._save_experiment = mock.Mock(return_value=True)
+        panel.parent = mock.Mock()
+
+        panel.start_recording('P01')
+
+        panel.parent.start_character_recording.assert_called_once_with(
+            'P01', 0, 'Lab meeting', demo=True)
+        warn.assert_not_called()
+        panel.parent.start_character_recording.reset_mock()
+        panel._save_experiment.reset_mock()
+        panel.source.get.return_value = 'serial'
+
+        panel.start_recording('P01')
+
+        panel.parent.start_character_recording.assert_not_called()
+        panel._save_experiment.assert_not_called()
+        warn.assert_called_once()
 
 
 if __name__ == '__main__':

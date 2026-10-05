@@ -12,6 +12,7 @@ import csv
 import os
 import json
 import re
+import textwrap
 
 os.environ.setdefault('XDG_CACHE_HOME', '/private/tmp/colmag-cache')
 os.environ.setdefault('MPLCONFIGDIR', '/private/tmp/colmag-matplotlib-cache')
@@ -30,6 +31,10 @@ from datetime import datetime
 import select
 
 from colmag.interaction import AppController, InputMode, VirtualJoystick
+from colmag.collection_protocol import (
+    CHARACTER_LABELS, CONTROL_LABELS, DIGITS, LETTERS, TARGET_REPS,
+    protocol_metadata,
+)
 from colmag.action_mapping import (
     DEFAULT_ACTION_MAP_PATH,
     ReloadableActionMapping,
@@ -247,12 +252,8 @@ CLASSIFIER_LABEL_PRESETS = {
 SYMBOL_LABELS = ('heart', 'star', 'circle', 'cube', 'rectangle', 'diamond')
 DATA_MANIFEST_SCHEMA_VERSION = 1
 
-RECORDING_TARGETS = (
-    tuple(f'digit_{d}' for d in '0123456789') +
-    tuple(f'letter_{c}' for c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ') +
-    ('control_blank', 'control_still')
-)
-TARGET_REPS_DEFAULT = 5
+RECORDING_TARGETS = CHARACTER_LABELS
+TARGET_REPS_DEFAULT = TARGET_REPS
 
 
 def top_label_indices(scores, count):
@@ -321,6 +322,7 @@ class MagnetometerReader:
         run_id=None,
         participant_id=None,
         session_id=None,
+        experiment_name='',
         height_mm=None,
         target_reps=TARGET_REPS_DEFAULT,
         # ROS bridge
@@ -400,6 +402,7 @@ class MagnetometerReader:
             self.sanitize_path_component(participant_id) if participant_id else None
         )
         self.session_id = self.sanitize_path_component(session_id) if session_id else None
+        self.experiment_name = str(experiment_name or '').strip()
         self.height_mm = height_mm
         self.target_reps = target_reps
         self.command_line = list(sys.argv)
@@ -597,6 +600,11 @@ class MagnetometerReader:
         self.current_session = None
         self.session_data = []
         self.current_session_started_at = None
+        self.selected_recording_label = None
+        self.saving_session = False
+        self.pending_capture = None  # frozen rows retained if saving fails
+        self.last_capture_rows = ()
+        self._collection_enter_down = False
 
         # Setup signal handler for graceful shutdown
         signal.signal(signal.SIGINT, self.signal_handler)
@@ -690,12 +698,17 @@ class MagnetometerReader:
                 'min_velocity': self.writing_min_velocity,
                 'max_velocity': self.writing_max_velocity,
                 'min_closeness': self.writing_min_closeness,
+                'max_z': self.writing_max_z,
             },
             'touchpad': {
                 'z': self.touchpad_z,
                 'sample_rate': self.touchpad_sample_rate,
                 'ink_strength': self.touchpad_ink_strength,
                 'ink_mode': self.touchpad_ink_mode,
+                'recording_ink_gate': (
+                    'capture_interval' if self.record_data and self.input_source == 'touchpad'
+                    else None
+                ),
                 'synthetic_magnetics': self.touchpad_synthetic_magnetics,
                 'magnetic_scale': self.touchpad_magnetic_scale,
                 'magnetic_calibration_file': self.touchpad_magnetic_calibration_file,
@@ -739,26 +752,30 @@ class MagnetometerReader:
         try:
             with open(self.manifest_path, 'r', encoding='utf-8') as f:
                 manifest = json.load(f)
-        except (IOError, json.JSONDecodeError):
-            manifest = {
-                'schema_version': DATA_MANIFEST_SCHEMA_VERSION,
-                'created_at': datetime.now().isoformat(),
-                'sessions': [],
-            }
+        except (IOError, json.JSONDecodeError) as exc:
+            raise ValueError(f'Cannot read recording manifest {self.manifest_path}: {exc}') from exc
+        if not isinstance(manifest, dict) or not isinstance(manifest.get('sessions', []), list):
+            raise ValueError(f'Invalid recording manifest: {self.manifest_path}')
 
         manifest.setdefault('schema_version', DATA_MANIFEST_SCHEMA_VERSION)
         manifest.setdefault('created_at', datetime.now().isoformat())
         manifest.setdefault('sessions', [])
         return manifest
 
-    def write_manifest(self, session_entry=None):
+    def write_manifest(self, session_entry=None, remove_basename=None):
         """Write the manifest atomically, optionally appending one session."""
         if not self.manifest_path:
             return
 
         manifest = self.load_manifest()
         sessions = manifest.get('sessions', [])
+        if remove_basename:
+            sessions = [s for s in sessions if s.get('basename') != remove_basename]
         if session_entry is not None:
+            # Retrying a failed save uses the same basename and must not add
+            # a second manifest entry for that capture.
+            sessions = [s for s in sessions
+                        if s.get('basename') != session_entry['basename']]
             sessions.append(session_entry)
 
         manifest.update({
@@ -767,11 +784,14 @@ class MagnetometerReader:
             'run_id': self.run_id,
             'participant_id': self.participant_id,
             'session_id': self.session_id,
+            'experiment_name': self.experiment_name,
+            'protocol': dict(protocol_metadata(), target_reps=self.target_reps),
             'height_mm': self.height_mm,
             'output_dir': os.path.abspath(self.output_dir) if self.output_dir else None,
             'command_line': self.command_line,
             'input_source': self.input_source,
             'record_data': self.record_data,
+            'synthetic_data': self.input_source == 'touchpad',
             'dry_run': self.dry_run,
             'validation_mode': self.validation_mode,
             'git': self.collect_git_metadata(),
@@ -830,12 +850,13 @@ class MagnetometerReader:
         target_reps = target_reps or self.target_reps
         counts = self.reps_by_label()
 
-        digits  = [f'digit_{d}' for d in '0123456789']
-        letters = [f'letter_{c}' for c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ']
-        controls = ['control_blank', 'control_still']
+        digits = [f'digit_{d}' for d in DIGITS]
+        letters = [f'letter_{c}' for c in LETTERS]
+        controls = CONTROL_LABELS
 
         done_labels = sum(1 for lbl in RECORDING_TARGETS if counts.get(lbl, 0) >= target_reps)
-        total_reps  = sum(counts.values())
+        total_reps = sum(min(counts.get(label, 0), target_reps)
+                         for label in RECORDING_TARGETS)
         needed_reps = len(RECORDING_TARGETS) * target_reps
 
         def cell(label, display):
@@ -843,18 +864,16 @@ class MagnetometerReader:
             mark = 'v' if n >= target_reps else ' '
             return f"{display}[{n}{mark}]"
 
-        dig_row = ' '.join(cell(lbl, d) for lbl, d in zip(digits, '0123456789'))
-        let_row1 = ' '.join(cell(lbl, c) for lbl, c in zip(letters[:13], 'ABCDEFGHIJKLM'))
-        let_row2 = ' '.join(cell(lbl, c) for lbl, c in zip(letters[13:], 'NOPQRSTUVWXYZ'))
+        dig_row = ' '.join(cell(lbl, d) for lbl, d in zip(digits, DIGITS))
+        let_row = ' '.join(cell(lbl, c) for lbl, c in zip(letters, LETTERS))
         ctl_row  = '  '.join(cell(lbl, name) for lbl, name in zip(controls, ['blank(-)', 'still(=)']))
 
         print()
         print("=" * 60)
         print(f"RECORDING PROGRESS  (target: {target_reps} reps each, v = done)")
         print(f"  Digits:   {dig_row}")
-        print(f"  Letters:  {let_row1}")
-        print(f"            {let_row2}")
-        print(f"  Controls: {ctl_row}")
+        print(f"  Letters:  {let_row}")
+        print(f"  Controls (optional, outside character target): {ctl_row}")
         print(f"  Done: {done_labels}/{len(RECORDING_TARGETS)} labels | {total_reps}/{needed_reps} reps total")
         missing = [
             lbl.replace('digit_', '').replace('letter_', '').replace('control_', '')
@@ -1557,7 +1576,7 @@ class MagnetometerReader:
             # Check if there's input available
             if select.select([sys.stdin], [], [], 0.1)[0]:
                 try:
-                    key = sys.stdin.read(1).strip()
+                    key = sys.stdin.read(1)
                     self.handle_keypress(key)
                 except:
                     pass
@@ -1570,6 +1589,58 @@ class MagnetometerReader:
     def handle_keypress(self, key):
         """Handle keyboard input for session controls."""
         if not key:
+            return
+        if self.record_data:
+            if key in ('enter', 'return', '\n', '\r', 's', 'shift+s', 'S'):
+                if self.current_session or self.pending_capture:
+                    self.stop_session()
+                elif key in ('enter', 'return', '\n', '\r'):
+                    if self.selected_recording_label:
+                        self.start_session(self.selected_recording_label)
+                    else:
+                        self._set_key_feedback('Select 0-9 or A-J before pressing Enter', 3.0)
+                return
+            if key in ('escape', '\x1b'):
+                with self.data_lock:
+                    if self.saving_session:
+                        return
+                    self.current_session = None
+                    self.current_session_started_at = None
+                    self.session_data = []
+                    cancelled_capture = self.pending_capture
+                    self.pending_capture = None
+                    self.last_capture_rows = ()
+                self.reset_live_digit_image()
+                if cancelled_capture and cancelled_capture.get('paths'):
+                    try:
+                        self.write_manifest(remove_basename=cancelled_capture['paths']['basename'])
+                    except (OSError, ValueError) as exc:
+                        print(f'Cancelled take; could not remove incomplete manifest entry: {exc}')
+                self._set_key_feedback('Take cancelled; Enter to try again', 3.0)
+                return
+            if key in ('q', 'Q', 'shift+q'):
+                self.stop()
+                return
+            if key.startswith('shift+') and len(key) == 7:
+                key = key[-1]
+            label = None
+            if key in DIGITS:
+                label = f'digit_{key}'
+            elif len(key) == 1 and key.upper() in LETTERS:
+                label = f'letter_{key.upper()}'
+            elif key in ('-', '='):
+                label = CONTROL_LABELS[0 if key == '-' else 1]
+            if label:
+                with self.data_lock:
+                    if self.current_session or self.saving_session or self.pending_capture:
+                        self._set_key_feedback('Stop, retry saving, or cancel the current take first', 3.0)
+                        return
+                    self.selected_recording_label = label
+                    self.last_capture_rows = ()
+                self.reset_live_digit_image()
+                self._set_key_feedback(f'Ready: {label} — Enter to start', 3.0)
+            elif len(key) == 1 and key.isalpha():
+                self._set_key_feedback('Collection protocol: digits 0-9 and letters A-J', 3.0)
             return
         if key in '0123456789':
             self._set_key_feedback(f"REC  digit_{key}")
@@ -1591,13 +1662,22 @@ class MagnetometerReader:
 
     def start_session(self, session_name):
         """Start recording a new session."""
-        if self.current_session:
-            print(f"Already recording session '{self.current_session}'. Stop it first with 's'.")
-            return
-
-        self.current_session = session_name
-        self.session_data = []
-        self.current_session_started_at = datetime.now().isoformat()
+        if self.record_data and session_name not in CHARACTER_LABELS + CONTROL_LABELS:
+            print('Collection protocol only allows 0-9, A-J and optional control recordings.')
+            return False
+        if self.input_source == 'touchpad' and not self.current_session:
+            self.append_touchpad_sample(force=True)
+        with self.data_lock:
+            if self.current_session or self.saving_session or self.pending_capture:
+                print('Stop, retry saving, or cancel the current take before starting another.')
+                return False
+            self.session_data = []
+            self.current_session_started_at = datetime.now().isoformat()
+            self.classification_started_at = datetime.fromisoformat(self.current_session_started_at)
+            self.selected_recording_label = session_name
+            self.last_capture_rows = ()
+            self.current_session = session_name
+        self.reset_live_digit_image()
         self.prediction_history.clear()
         if self.classifier is not None:
             self.latest_prediction_text = "Prediction: --"
@@ -1608,78 +1688,121 @@ class MagnetometerReader:
         existing_reps = self.reps_by_label().get(label, 0)
         rep_info = f"rep {existing_reps + 1}" if self.record_data else "live"
         print(f"\n>>> RECORDING: '{session_name}'  [{rep_info}]")
-        print(f"    Draw — then move to classification button — then press 's' to save <<<")
+        stop_key = 'Enter' if self.record_data else 's'
+        if self.record_data and self.input_source == 'touchpad':
+            print('    Move the mouse to draw; press Enter to stop and save <<<')
+        else:
+            print(f"    Draw one character; press {stop_key} to stop BEFORE lifting or repositioning <<<")
         if self.record_data:
             print(f"    Save dir : {self.output_dir}/samples/{label}/")
+        self._set_key_feedback(f'RECORDING {session_name} — {stop_key} to stop', 3.0)
+        return True
 
     def stop_session(self):
-        """Stop the current recording session."""
-        if not self.current_session:
-            print("No active recording session to stop.")
-            return
+        """Detach one capture under the producer lock, then save its frozen rows."""
+        if self.input_source == 'touchpad' and self.current_session:
+            self.append_touchpad_sample(flush=True)
+        with self.data_lock:
+            if self.saving_session:
+                return False
+            if self.current_session:
+                capture = {
+                    'session_name': self.current_session,
+                    'rows': tuple(tuple(row) for row in self.session_data),
+                    'capture_started_at': self.current_session_started_at,
+                    'capture_stopped_at': datetime.now().isoformat(),
+                }
+                # The serial/touchpad producer immediately stops appending to
+                # this take, even while image generation or disk I/O runs.
+                self.current_session = None
+                self.session_data = []
+                self.current_session_started_at = None
+                self.pending_capture = capture
+                self.last_capture_rows = capture['rows']
+            else:
+                capture = self.pending_capture
+            if not capture:
+                print('No active recording session to stop.')
+                return False
+            if not capture['rows']:
+                self.pending_capture = None
+                print('Empty take; nothing saved or counted.')
+                self._set_key_feedback('Empty take — Enter to record again', 3.0)
+                return False
+            if (self.record_data and self.input_source == 'touchpad'
+                    and capture['session_name'] in CHARACTER_LABELS
+                    and not np.any(self.touchpad_pen_mask(capture['rows']))):
+                self.pending_capture = None
+                self.last_capture_rows = ()
+                self.reset_live_digit_image()
+                print('No samples inside the writing area; nothing saved or counted. '
+                      'Press Enter and move the mouse inside the canvas to try again.')
+                self._set_key_feedback(
+                    'No canvas samples — Enter to retry; move the mouse inside the writing area', 8.0)
+                return False
+            self.saving_session = True
 
-        session_name = self.current_session
-        data_points = len(self.session_data)
+        rows = capture['rows']
+        session_name = capture['session_name']
+        start_time, end_time = rows[0][0], rows[-1][0]
+        saved = False
+        try:
+            if self.record_data:
+                saved = bool(self.save_session_artifacts(
+                    session_name, start_time, end_time, len(rows),
+                    rows=rows, capture=capture))
+            else:
+                saved = True
+        except Exception as exc:
+            print(f'Could not save capture: {exc}')
+        finally:
+            with self.data_lock:
+                self.saving_session = False
+                if saved:
+                    self.pending_capture = None
+                    self.recording_sessions.append((session_name, start_time, end_time, len(rows)))
 
-        start_time = (
-            self.session_data[0][0]
-            if self.session_data
-            else self.current_session_started_at or datetime.now().isoformat()
-        )
-        end_time = self.session_data[-1][0] if self.session_data else datetime.now().isoformat()
-
-        self.recording_sessions.append((session_name, start_time, end_time, data_points))
-
-        label = self.session_label(session_name)
-        completed_reps = self.reps_by_label().get(label, 1)
-
-        print(f"\n<<< SAVED: '{session_name}'  rep {completed_reps}/{self.target_reps}  ({data_points} samples) >>>")
-
+        if not saved:
+            self._set_key_feedback('Save failed; Enter to retry, Escape to discard', 5.0)
+            return False
+        completed_reps = self.reps_by_label().get(self.session_label(session_name), 1)
         if self.record_data:
-            self.save_session_artifacts(session_name, start_time, end_time, data_points)
+            print(f"\n<<< SAVED: '{session_name}' rep {completed_reps}/{self.target_reps} ({len(rows)} samples) >>>")
             self.print_recording_checklist()
             self._set_key_feedback(
-                f"Saved  {session_name}  rep {completed_reps}/{self.target_reps}  ({data_points} pts)",
-                duration=3.0,
-            )
+                f'Saved {session_name} {completed_reps}/{self.target_reps} — Enter to record another', 4.0)
         else:
-            print("(live mode — use --record-data to save CSV/PNG/JSON)")
-            self._set_key_feedback(
-                f"Stopped  {session_name}  ({data_points} pts, not saved)",
-                duration=3.0,
-            )
+            self._set_key_feedback(f'Stopped {session_name} ({len(rows)} pts, not saved)', 3.0)
+        return True
 
-        self.current_session = None
-        self.session_data = []
-        self.current_session_started_at = None
-
-    def save_session_artifacts(self, session_name, start_time, end_time, data_points):
+    def save_session_artifacts(self, session_name, start_time, end_time, data_points,
+                               rows=None, capture=None):
         """Save matched CSV/PNG/JSON artifacts and append the manifest entry."""
-        if not self.session_data:
-            return
+        rows = self.session_data if rows is None else rows
+        if not rows:
+            return False
 
         if not self.output_dir:
             print("Cannot save session artifacts: output_dir is not configured")
-            return
+            return False
         if not self.run_id:
             self.run_id = datetime.now().strftime('run_%Y%m%d_%H%M%S')
 
-        paths = self.create_session_paths(session_name)
-        csv_saved = self.save_session_csv(paths['csv_path'])
-        image_result = self.save_session_image(paths['image_path'])
+        paths = capture.get('paths') if capture else None
+        if paths is None:
+            paths = self.create_session_paths(session_name)
+            if capture is not None:
+                capture['paths'] = paths
+        csv_saved = self.save_session_csv(paths['csv_path'], rows=rows)
+        if not csv_saved:
+            return False
+        image_result = self.save_session_image(paths['image_path'], rows=rows)
+        if not image_result:
+            return False
         prediction = None
         if image_result:
             _, character_image = image_result
             prediction = self.print_final_prediction(character_image)
-
-        metadata_path = self.save_session_metadata(
-            session_name=session_name,
-            paths=paths,
-            start_time=start_time,
-            end_time=end_time,
-            data_points=data_points,
-            prediction=prediction,
-        )
 
         session_entry = {
             'session_name': session_name,
@@ -1687,6 +1810,9 @@ class MagnetometerReader:
             'run_id': self.run_id,
             'participant_id': self.participant_id,
             'session_id': self.session_id,
+            'experiment_name': self.experiment_name,
+            'capture_started_at': (capture or {}).get('capture_started_at'),
+            'capture_stopped_at': (capture or {}).get('capture_stopped_at'),
             'height_mm': self.height_mm,
             'repetition': paths['repetition'],
             'basename': paths['basename'],
@@ -1697,24 +1823,36 @@ class MagnetometerReader:
             'paths': {
                 'csv': self.path_relative_to_output(paths['csv_path']) if csv_saved else None,
                 'png': self.path_relative_to_output(paths['image_path']) if image_result else None,
-                'json': self.path_relative_to_output(metadata_path) if metadata_path else None,
+                'json': self.path_relative_to_output(paths['metadata_path']),
             },
             'prediction': prediction,
         }
+        # Publish the sidecar last: the coverage scanner only sees a complete
+        # take once CSV, PNG and manifest persistence have succeeded.
         self.write_manifest(session_entry=session_entry)
+        metadata_path = self.save_session_metadata(
+            session_name=session_name, paths=paths,
+            start_time=start_time, end_time=end_time,
+            data_points=data_points, prediction=prediction, capture=capture,
+        )
+        if not metadata_path:
+            return False
         print(f"Manifest updated: {self.manifest_path}")
+        return True
 
-    def save_session_csv(self, filename):
+    def save_session_csv(self, filename, rows=None):
         """Save session data to a structured CSV file."""
-        if not self.session_data:
+        rows = self.session_data if rows is None else rows
+        if not rows:
             return False
 
         try:
-            with open(filename, 'w', newline='') as f:
+            with open(filename + '.tmp', 'w', newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow(self.csv_header())
-                for row in self.session_data:
+                for row in rows:
                     writer.writerow(row)
+            os.replace(filename + '.tmp', filename)
 
             print(f"Session data saved to: {filename}")
             return True
@@ -1829,7 +1967,8 @@ class MagnetometerReader:
         # when the cursor flicks in from the edge on entry, while still inking
         # deliberate (slower) writing near the border. Tunable via the two
         # constants below.
-        if self.input_source != 'serial' and self.writing_edge_margin_frac > 0.0:
+        if (self.input_source != 'serial' and self.writing_min_velocity > 0.0
+                and self.writing_edge_margin_frac > 0.0):
             extent = self.projection_extent
             margin = self.writing_edge_margin_frac * extent
             near_edge = (
@@ -1893,7 +2032,10 @@ class MagnetometerReader:
             # continuous line — but only if the two were (near-)adjacent in
             # the sample stream and reasonably close on the canvas; dropped
             # stretches and pen jumps must stay gaps.
-            if kept[j] - kept[j - 1] > 2:
+            # Synthetic collection rows mark cursor exits explicitly; never
+            # bridge across even one zero-ink row at a reentry boundary.
+            max_gap = 1 if self.record_data and self.input_source == 'touchpad' else 2
+            if kept[j] - kept[j - 1] > max_gap:
                 continue
             seg = float(np.hypot(fx[j] - fx[j - 1], fy[j] - fy[j - 1]))
             if seg > 10.0:
@@ -2077,16 +2219,19 @@ class MagnetometerReader:
         pen_mask = self.touchpad_pen_mask(rows[-len(writing_mask):] if len(writing_mask) else [])
         if pen_mask is not None:
             writing_mask &= pen_mask
-        writing_mask &= ~self.joystick_button_mask(pose_x, pose_y)
+        if not self.record_data:
+            writing_mask &= ~self.joystick_button_mask(pose_x, pose_y)
         return self.pose_to_digit_image(pose_x, pose_y, pose_z, sample_mask=writing_mask)
 
-    def save_session_image(self, output_path):
+    def save_session_image(self, output_path, rows=None):
         """Save the recorded pose trail as a classifier-ready grayscale PNG."""
-        if not self.session_data:
+        rows = self.session_data if rows is None else rows
+        if not rows:
             return
 
-        image = self.rows_to_digit_image(self.session_data, trail_length=0)
-        plt.imsave(output_path, image, cmap='gray', vmin=0.0, vmax=1.0)
+        image = self.rows_to_digit_image(rows, trail_length=0)
+        plt.imsave(output_path + '.tmp.png', image, cmap='gray', vmin=0.0, vmax=1.0)
+        os.replace(output_path + '.tmp.png', output_path)
         print(f"Projected character image saved to: {output_path}")
         return output_path, image
 
@@ -2098,6 +2243,7 @@ class MagnetometerReader:
         end_time,
         data_points,
         prediction=None,
+        capture=None,
     ):
         """Save a sidecar JSON file with session settings and git metadata."""
         metadata = {
@@ -2106,6 +2252,10 @@ class MagnetometerReader:
             'run_id': self.run_id,
             'participant_id': self.participant_id,
             'session_id': self.session_id,
+            'experiment_name': self.experiment_name,
+            'protocol': dict(protocol_metadata(), target_reps=self.target_reps),
+            'capture_started_at': (capture or {}).get('capture_started_at'),
+            'capture_stopped_at': (capture or {}).get('capture_stopped_at'),
             'height_mm': self.height_mm,
             'repetition': paths['repetition'],
             'basename': paths['basename'],
@@ -2120,6 +2270,7 @@ class MagnetometerReader:
             },
             'input_source': self.input_source,
             'command_line': self.command_line,
+            'synthetic_data': self.input_source == 'touchpad',
             'settings': self.manifest_settings(),
             'raw_log': {
                 'enabled': bool(self.raw_csv_enabled and self.raw_csv_path),
@@ -2129,9 +2280,10 @@ class MagnetometerReader:
             'git': self.collect_git_metadata(),
         }
         try:
-            with open(paths['metadata_path'], 'w', encoding='utf-8') as f:
+            with open(paths['metadata_path'] + '.tmp', 'w', encoding='utf-8') as f:
                 json.dump(metadata, f, indent=2)
                 f.write('\n')
+            os.replace(paths['metadata_path'] + '.tmp', paths['metadata_path'])
             print(f"Session metadata saved to: {paths['metadata_path']}")
             return paths['metadata_path']
         except IOError as e:
@@ -2232,7 +2384,7 @@ class MagnetometerReader:
                         xdata, ydata = float(xd), float(yd)
             if xdata is None or ydata is None:
                 self.touchpad_state['inside'] = False
-                if pen_down is not None:
+                if pen_down is not None and not self.record_data:
                     self.touchpad_state['pen_down'] = pen_down
                 return
 
@@ -2245,7 +2397,7 @@ class MagnetometerReader:
             self.touchpad_state['x'] = x
             self.touchpad_state['y'] = y
             self.touchpad_state['inside'] = True
-            if pen_down is not None:
+            if pen_down is not None and not self.record_data:
                 self.touchpad_state['pen_down'] = pen_down
 
         def on_press(event):
@@ -2266,6 +2418,15 @@ class MagnetometerReader:
         def on_key_press(event):
             raw_key = event.key or ''
             key = raw_key.lower()
+            if self.record_data:
+                if self.input_source == 'touchpad' and key in (' ', 'space'):
+                    return
+                if key in ('enter', 'return'):
+                    if self._collection_enter_down:
+                        return  # ignore key auto-repeat while Enter is held
+                    self._collection_enter_down = True
+                self.handle_keypress(raw_key)
+                return
             # Shift+E = SAFETY EXIT from teleoperation, in BOTH trackpad and
             # magnet (serial) mode. Returns to letter-drawing mode and publishes
             # letter_detection so the draw node stops following immediately.
@@ -2371,7 +2532,11 @@ class MagnetometerReader:
 
         def on_key_release(event):
             key = (event.key or '').lower()
-            if self.input_source == 'touchpad' and key in (' ', 'space'):
+            if self.record_data and key in ('enter', 'return'):
+                self._collection_enter_down = False
+                return
+            if (not self.record_data and self.input_source == 'touchpad'
+                    and key in (' ', 'space')):
                 self.touchpad_state['pen_down'] = False
             elif (self.input_source == 'touchpad'
                     and (key.endswith('left') or key.endswith('right'))):
@@ -2404,25 +2569,35 @@ class MagnetometerReader:
         except AttributeError:
             pass
 
-    def append_touchpad_sample(self, force=False):
+    def append_touchpad_sample(self, force=False, flush=False):
         """Append synthetic rows from the current touchpad state."""
         if self.input_source != 'touchpad':
             return
 
         now = time.monotonic()
         last_sample_at = self.touchpad_state['last_sample_at']
-        if not force and now - last_sample_at < self.touchpad_sample_interval:
+        if not force and not flush and now - last_sample_at < self.touchpad_sample_interval:
             return
 
         current_x = self.touchpad_state['x']
         current_y = self.touchpad_state['y']
-        current_pen_down = bool(self.touchpad_state['pen_down'])
+        if self.record_data:
+            # During collection the experimenter's Enter key controls ink;
+            # participants only need to move the mouse inside the canvas.
+            current_pen_down = bool(self.current_session in CHARACTER_LABELS
+                                    and self.touchpad_state['inside'])
+        else:
+            current_pen_down = bool(self.touchpad_state['pen_down'])
 
         if force or last_sample_at <= 0.0 or self.touchpad_state.get('reentered'):
             # Fresh start (boot or cursor re-entry): one sample at the current
             # point, with no interpolation back to a stale/edge position.
+            # A zero-ink endpoint breaks the image path after cursor reentry,
+            # even when exit and reentry happen between animation frames.
+            sample_pen_down = current_pen_down and not (
+                self.record_data and self.touchpad_state.get('reentered'))
             self.touchpad_state['reentered'] = False
-            sample_specs = [(now, current_x, current_y, current_pen_down)]
+            sample_specs = [(now, current_x, current_y, sample_pen_down)]
         else:
             elapsed = max(0.0, now - last_sample_at)
             last_x = self.touchpad_state['last_sample_x']
@@ -2440,7 +2615,8 @@ class MagnetometerReader:
                 sample_time = last_sample_at + elapsed * fraction
                 sample_x = last_x + (current_x - last_x) * fraction
                 sample_y = last_y + (current_y - last_y) * fraction
-                sample_pen_down = current_pen_down or (last_pen_down and fraction < 1.0)
+                sample_pen_down = (current_pen_down if self.record_data else
+                                   current_pen_down or (last_pen_down and fraction < 1.0))
                 sample_specs.append((sample_time, sample_x, sample_y, sample_pen_down))
 
         rows = []
@@ -2495,7 +2671,9 @@ class MagnetometerReader:
             for row_data in rows:
                 self.data_buffer.append(row_data)
                 if self.current_session:
-                    self.session_data.append(row_data)
+                    if (not self.current_session_started_at
+                            or row_data[0] >= self.current_session_started_at):
+                        self.session_data.append(row_data)
 
         if self.csv_writer:
             for row_data in rows:
@@ -2538,9 +2716,11 @@ class MagnetometerReader:
         return values
 
     def touchpad_pen_mask(self, rows):
-        """Return the pen-down gate encoded in Pose_mx for synthetic rows."""
+        """Return the collection or live pen gate encoded in synthetic Pose_mx."""
         if self.input_source != 'touchpad':
             return None
+        if self.record_data:
+            return np.array([float(row[-3]) > 0.5 for row in rows], dtype=bool)
         if not self.touchpad_pen_enabled:
             return np.zeros(len(rows), dtype=bool)
         if self.touchpad_ink_mode == 'pen':
@@ -2743,6 +2923,12 @@ class MagnetometerReader:
         return button_artists, cursor_artist, interface_text, completion_text
 
     def update_joystick_artists(self, button_artists):
+        if self.record_data:
+            for group in button_artists.values():
+                for artist in group.values():
+                    if hasattr(artist, 'set_visible'):
+                        artist.set_visible(False)
+            return
         active_button = self.app_controller.active_button
         last_button = self.app_controller.last_event.button.name if self.app_controller.last_event else None
 
@@ -3332,6 +3518,8 @@ class MagnetometerReader:
 
     def _refresh_robot_action_legend(self, now):
         """Watch the atomic map file and redraw only when its view changes."""
+        if self.record_data:
+            return
         if now - self._action_legend_last_check < 1.0:
             return
         self._action_legend_last_check = now
@@ -3359,6 +3547,38 @@ class MagnetometerReader:
                 animation._blit_cache.clear()
             except AttributeError:
                 pass
+
+    def _draw_collection_legend(self, ax):
+        """Show collection instructions instead of the robot action vocabulary."""
+        ax.clear()
+        ax.axis('off')
+        ax.set_title('Character collection', fontsize=13, fontweight='bold',
+                     pad=14, loc='left')
+        demo = self.input_source == 'touchpad'
+        ax.text(0.03, 0.94, 'DEMO · mouse input' if demo else 'Sensor board',
+                transform=ax.transAxes, va='top', fontsize=10, fontweight='bold',
+                color='#b96b00' if demo else '#0060df')
+        ax.text(0.03, 0.86, '\n'.join(textwrap.wrap(
+            self.experiment_name or 'Unnamed experiment', width=25)),
+            transform=ax.transAxes, va='top', fontsize=10, color='#1d1d1f')
+        ax.text(0.03, 0.72,
+                f'Participant: {self.participant_id or "not set"}\n'
+                f'Session: {self.session_id or "not set"}\n\n'
+                f'Digits 0–9 · Letters A–J\n{self.target_reps} takes per character',
+                transform=ax.transAxes, va='top', fontsize=9, linespacing=1.6)
+        ax.text(0.03, 0.47,
+                '1  Select the character\n2  Position the pen / cursor\n'
+                '3  Enter to start\n'
+                + ('4  Move the mouse to draw\n' if demo else
+                   '4  Draw one character\n')
+                + '5  Enter to stop and save',
+                transform=ax.transAxes, va='top', fontsize=9, linespacing=1.8)
+        ax.text(0.03, 0.19,
+                'Mouse movement draws\nwhile recording is active.' if demo else
+                'Stop before lifting or\nrepositioning the pen.',
+                transform=ax.transAxes, va='top', fontsize=9, linespacing=1.5)
+        ax.text(0.03, 0.07, 'Escape cancels an unfinished take.\nEnter repeats the selected character.',
+                transform=ax.transAxes, va='top', fontsize=8, color='#6e6e73')
 
     def plot_data(self):
         """Create real-time plot of Bx, By, Bz for the selected sensor."""
@@ -3395,7 +3615,10 @@ class MagnetometerReader:
             ax_legend = fig.add_subplot(grid[0, 0])
             ax5 = fig.add_subplot(grid[0, 1])
             ax6 = fig.add_subplot(grid[0, 2])
-            self._draw_robot_action_legend(ax_legend)
+            if self.record_data:
+                self._draw_collection_legend(ax_legend)
+            else:
+                self._draw_robot_action_legend(ax_legend)
             ax1 = ax2 = ax3 = ax4 = None
             _suptitle = None
         else:
@@ -3501,7 +3724,14 @@ class MagnetometerReader:
         else:
             ax5.set_aspect('equal', adjustable='box')
         _hint_teleop = "MagPilot: Shift+E EXIT | move=cursor  numpad 8/2 tilt→grip  4/6 twist→rotate  5 reset  scroll=height"
-        if self.input_source == 'touchpad':
+        if self.record_data:
+            _hint_lines = [
+                '0-9 / A-J select   Enter start / stop & save   Escape cancel   q quit',
+                ('Move the mouse to draw while recording; Enter again repeats the selected character'
+                 if self.input_source == 'touchpad' else
+                 'Stop before lifting or repositioning; Enter again repeats the selected character'),
+            ]
+        elif self.input_source == 'touchpad':
             _hint_line1 = "Shift+S save   Shift+Q quit   |   A-Z / 0-9 / - / = record"
             _hint_line2 = "Space/click draw   Shift+P pen   |   Shift+L letters   Shift+R digits   Shift+D reset"
             _hint_lines = [_hint_line1, _hint_line2, _hint_teleop]
@@ -3521,6 +3751,14 @@ class MagnetometerReader:
             bbox={'facecolor': '#eef6fc', 'edgecolor': 'none',
                   'boxstyle': 'round,pad=0.45', 'alpha': 0.95},
             zorder=9,
+        )
+        demo_recording_status = ax5.text(
+            0.5, 0.97, '', transform=ax5.transAxes,
+            ha='center', va='top', fontsize=11, fontweight='bold',
+            color='#8a5100',
+            bbox={'facecolor': '#fff0cc', 'edgecolor': '#d98b16',
+                  'boxstyle': 'round,pad=0.55', 'alpha': 0.98},
+            zorder=10, visible=False,
         )
         button_artists, cursor_artist, interface_text, completion_text = self.setup_joystick_artists(ax5)
         # Collect button artists for blit. Circles must be redrawn for hover/feedback,
@@ -3555,13 +3793,17 @@ class MagnetometerReader:
             if self.z_near is not None and self.z_far is not None
             else "relative trail range"
         )
-        classifier_labels = display_labels_for(self.classifier_labels)
-        display_count = min(12, len(classifier_labels))
+        if self.record_data:
+            source = 'DEMO' if self.input_source == 'touchpad' else 'Sensor board'
+            fig.canvas.manager.set_window_title(f'MagPilot collection · {source}')
+        classifier_labels = (DIGITS + LETTERS if self.record_data
+                             else display_labels_for(self.classifier_labels))
+        display_count = len(classifier_labels) if self.record_data else min(12, len(classifier_labels))
         display_indices = list(range(display_count))
-        classifier_header_rows = 2.8
+        classifier_header_rows = 4.5 if self.record_data else 2.8
         y_positions = np.arange(display_count) + classifier_header_rows
         current_classifier_axis_labels = [classifier_labels[index] for index in display_indices]
-        ax6.set_title('Classifier', fontweight='bold', fontsize=13,
+        ax6.set_title('Saved takes' if self.record_data else 'Classifier', fontweight='bold', fontsize=13,
                       loc='left', color='#1d1d1f')
         ax6.set_xlim(0.0, 1.0)
         ax6.set_ylim(-0.5, display_count + classifier_header_rows - 0.5)
@@ -3617,6 +3859,8 @@ class MagnetometerReader:
                 f"{self.latest_runner_up_text}\n"
                 "Z: --"
             )
+        if self.record_data:
+            info_text.set_text('Select 0–9 or A–J\nEnter starts / stops\nEscape cancels')
 
         # tight_layout once at init, not per-frame
         plt.tight_layout()
@@ -3692,6 +3936,7 @@ class MagnetometerReader:
             image_artist,
             teleop_trail_collection,
             hint_text,       # drawn after image so it stays on top of ink
+            demo_recording_status,
             self._teleop_taskbar_patch,  # after image so ink cannot cover the bar
             *button_circles,
             *button_labels,
@@ -3835,7 +4080,8 @@ class MagnetometerReader:
             pen_mask = self.touchpad_pen_mask(pose_rows)
             if pen_mask is not None:
                 writing_mask &= pen_mask
-            writing_mask &= ~self.joystick_button_mask(pose_x, pose_y)
+            if not self.record_data:
+                writing_mask &= ~self.joystick_button_mask(pose_x, pose_y)
             capture_mask = self.classification_sample_mask(pose_rows)
             ocr_mask = writing_mask & capture_mask
             teleop_mode = self.app_controller.mode.value == 'robot'
@@ -3864,6 +4110,13 @@ class MagnetometerReader:
                 pose_z,
                 ocr_mask,
             )
+            if self.record_data:
+                with self.data_lock:
+                    capture_rows = (tuple(tuple(row) for row in self.session_data)
+                                    if self.current_session else self.last_capture_rows)
+                # The displayed character uses exactly the same interval as
+                # its saved image; between-take movement only moves the cursor.
+                digit_image = self.rows_to_digit_image(capture_rows, trail_length=0)
             image_artist.set_data(digit_image)
             clear_canvas_requested = False
             now = time.monotonic()
@@ -3874,11 +4127,10 @@ class MagnetometerReader:
                              self._teleop_cursor_display_xy(
                                  pose_x[-1], pose_y[-1]))
                 cursor_artist.set_offsets([cursor_xy])
-                interface_event = self.app_controller.update_cursor(
-                    pose_x[-1],
-                    pose_y[-1],
-                    now,
-                )
+                if not self.record_data:
+                    interface_event = self.app_controller.update_cursor(
+                        pose_x[-1], pose_y[-1], now,
+                    )
                 if teleop_mode:
                     self.teleop_trail.append((now, float(pose_x[-1]), float(pose_y[-1])))
                     # Bank the cursor plane into the direction of travel.
@@ -3981,9 +4233,41 @@ class MagnetometerReader:
                     f" | Rec: {self.current_session} "
                     f"({len(self.session_data)})"
                 )
+            if self.record_data:
+                if self.pending_capture and not self.saving_session:
+                    capture_status = 'Save failed: Enter retry / Escape discard'
+                elif self.saving_session:
+                    capture_status = 'Saving frozen take'
+                elif self.current_session:
+                    capture_status = ('Move mouse to draw · Enter stop / save'
+                                      if self.input_source == 'touchpad' else
+                                      'Enter to stop before moving the pen')
+                else:
+                    capture_status = f'Ready: {self.selected_recording_label or "select 0-9/A-J"} | Enter start'
+                self.latest_interface_text = (
+                    f'{"DEMO · " if self.input_source == "touchpad" else ""}'
+                    f'{self.experiment_name or "Character collection"} | {capture_status}'
+                )
+            show_demo_recording_status = (
+                self.record_data and self.input_source == 'touchpad'
+                and bool(self.current_session)
+            )
+            demo_recording_status.set_visible(show_demo_recording_status)
+            if show_demo_recording_status:
+                control_capture = self.current_session in CONTROL_LABELS
+                ink_on = control_capture or self.touchpad_state['inside']
+                demo_recording_status.set_text(
+                    'Recording control — Enter stops' if control_capture else
+                    'Recording — move mouse to draw · Enter stops' if ink_on else
+                    'Recording paused — move mouse inside the canvas')
+                demo_recording_status.set_color('#12632b' if ink_on else '#8a5100')
+                demo_recording_status.get_bbox_patch().set_facecolor(
+                    '#daf5e1' if ink_on else '#fff0cc')
+                demo_recording_status.get_bbox_patch().set_edgecolor(
+                    '#35a75b' if ink_on else '#d98b16')
             if now < self.action_feedback_until and self.action_feedback_text:
                 self.latest_interface_text += f" | {self.action_feedback_text}"
-                completion_text.set_text(self.action_feedback_text)
+                completion_text.set_text('' if show_demo_recording_status else self.action_feedback_text)
             else:
                 completion_text.set_text("")
             interface_text.set_text(self.latest_interface_text)
@@ -3993,6 +4277,7 @@ class MagnetometerReader:
             is_writing_now = bool(len(ocr_mask) > 0 and ocr_mask[-1])
             can_classify = (
                 self.enable_classifier
+                and not self.record_data
                 and self.app_controller.mode.value in ('letters', 'digits')
                 and ink_count >= self.classifier_min_ink_samples
             )
@@ -4152,6 +4437,26 @@ class MagnetometerReader:
                     f"{speed_text}\n"
                     "Z: --"
                 )
+
+            if self.record_data:
+                counts = self.reps_by_label()
+                total = sum(min(counts.get(label, 0), self.target_reps)
+                            for label in CHARACTER_LABELS)
+                selected = self.selected_recording_label
+                selected_char = selected.partition('_')[2] if selected else '—'
+                selected_count = counts.get(selected, 0)
+                phase = ('Saving frozen take' if self.saving_session else
+                         'Save failed; Enter retries' if self.pending_capture else
+                         f'Recording: {len(self.session_data)} samples' if self.current_session else
+                         'Ready · Enter starts')
+                info_text.set_text(
+                    f'Selected: {selected_char}  ·  {selected_count}/{self.target_reps}\n'
+                    f'{phase}\nTotal: {total}/{len(CHARACTER_LABELS) * self.target_reps}\n'
+                    'Enter start / stop · Escape cancel')
+                for bar, label in zip(prob_bars, CHARACTER_LABELS):
+                    count = counts.get(label, 0)
+                    bar.set_width(min(count / self.target_reps, 1.0))
+                    bar.set_color('#34c759' if count >= self.target_reps else '#0a84ff')
 
             # The 3D subplot is intentionally not part of the blit set. Matplotlib's
             # mplot3d artists are backend-fragile under blitting and were causing
@@ -4365,7 +4670,16 @@ class MagnetometerReader:
             else:
                 print("Live view only. Use --record-data to enable CSV/PNG session saving.")
             print("Controls:")
-            if self.input_source == 'touchpad':
+            if self.record_data:
+                print("  0-9 / A-J      : select the character (does not start capture)")
+                print("  Enter          : start; Enter again stops and saves the take")
+                print("                   Stop BEFORE lifting or repositioning the pen")
+                print("  Escape         : cancel the current take without counting it")
+                print("  - / =          : select optional blank / still controls")
+                print("  q              : quit (stop and save your take first)")
+                if self.input_source == 'touchpad':
+                    print("  Mouse/touchpad : move to draw while recording; Enter controls ink")
+            elif self.input_source == 'touchpad':
                 if self.touchpad_ink_mode == 'pen':
                     print("  Mouse/touchpad : hover to move, click-drag or Space to draw")
                 else:
@@ -4381,9 +4695,9 @@ class MagnetometerReader:
             else:
                 print("  s              : stop & save current recording")
                 print("  q              : quit")
-            print("  0-9 / A-Z      : start recording that digit / letter")
-            print("                   (tip: draw → move to classification button → Shift+S to save)")
-            print("  - / =          : start control_blank / control_still recording")
+            if not self.record_data:
+                print("  0-9 / A-Z      : start recording that digit / letter")
+                print("  - / =          : start control_blank / control_still recording")
             print(f"Projection: X/Y plane, Z intensity, {self.image_size}x{self.image_size}px, last {self.trail_length} samples")
             if self.enable_writing_filter:
                 velocity_range = f"velocity>={self.writing_min_velocity}"
@@ -4536,6 +4850,8 @@ def main():
                        help='Participant ID stored in filenames and the manifest (e.g. P01)')
     parser.add_argument('--session-id', type=str, default=None,
                        help='Recording session ID stored in filenames and the manifest (e.g. S01)')
+    parser.add_argument('--experiment-name', type=str, default='',
+                       help='Descriptive experiment name stored in the manifest and sample metadata')
     parser.add_argument('--target-reps', type=int, default=TARGET_REPS_DEFAULT,
                        help='Takes wanted per character; shown as "rep n/N" and in the checklist')
     parser.add_argument('--height-mm', type=float, default=None,
@@ -4664,6 +4980,7 @@ def main():
             f"Session: {args.session_id or 'not set'}, "
             f"Height: {'not set' if args.height_mm is None else f'{args.height_mm:g} mm'}"
         )
+        print(f"Experiment: {args.experiment_name.strip() or 'not set'}")
         if not args.participant_id:
             print("  (use --participant-id / --session-id to tag recordings for the dataset)")
     else:
@@ -4694,7 +5011,7 @@ def main():
             f"plot_fps={args.plot_fps or 60.0}, "
             f"display_window={args.display_window}, "
             f"ink_strength={args.touchpad_ink_strength}, "
-            f"ink_mode={args.touchpad_ink_mode}, "
+            f"ink_mode={'active_capture' if args.record_data else args.touchpad_ink_mode}, "
             f"magnetics={'off' if args.no_touchpad_magnetics else 'synthetic'}, "
             f"calibration={args.touchpad_magnetic_calibration or 'none'}, "
             f"speed_log={args.touchpad_speed_log or 'off'}"
@@ -4790,6 +5107,7 @@ def main():
         run_id=args.run_id,
         participant_id=args.participant_id,
         session_id=args.session_id,
+        experiment_name=args.experiment_name,
         height_mm=args.height_mm,
         target_reps=args.target_reps,
         ros=args.ros,
