@@ -30,6 +30,23 @@ and fly the arm in real time.
 
 <br>
 
+## Current Progress
+
+**[Weekly lab reports →](docs/reports/README.md)**
+
+<sub>Week 1 · 5 October 2026 · <a href="docs/reports/MagPilot_Lab_Update_2026-10-05.md">Read update</a> · <a href="docs/reports/MagPilot_Lab_Update_2026-10-05.pdf">PDF slides</a></sub>
+
+Board repaired. Three smaller magnets available. **Virtual task development
+starts in Week 1.**
+
+<p align="center">
+  <img src="docs/reports/assets/project_timeline.png" width="880" alt="Proposed ten-week project plan: virtual task and pilot start in Week 1">
+  <br>
+  <sub>Relative project weeks · <a href="docs/LAB_MEETING_PLAN.md">Full plan</a></sub>
+</p>
+
+<br>
+
 ## Why a magnet?
 
 Robot teleoperation usually means expensive hardware and a steep learning
