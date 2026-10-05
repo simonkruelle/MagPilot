@@ -38,7 +38,6 @@ from datetime import date, datetime
 from tkinter import messagebox, ttk
 
 from colmag import dataset
-from colmag.pilot_launcher import PilotPanel
 from colmag.target_reaching import TrialSettings, default_targets
 from colmag.action_mapping import (
     ACTION_CATALOG,
@@ -711,7 +710,8 @@ def build_tracking_command(serial_port, magnet, magnet_offset_mm, heights_mm,
 
 def build_virtual_task_command(run_id, participant_id, condition, input_source,
                                tolerance_mm=20.0, dwell_s=0.5, repetitions=1,
-                               magnet_count=None, notes=''):
+                               magnet_count=None, notes='', participant_name='',
+                               experiment_name=''):
     """Observe Gazebo TF in a separate window while the existing UI controls it."""
     TrialSettings(tolerance_m=tolerance_mm / 1000, dwell_s=dwell_s)
     default_targets(repetitions)
@@ -726,7 +726,30 @@ def build_virtual_task_command(run_id, participant_id, condition, input_source,
             '--repetitions', str(repetitions), '--notes', notes]
     if magnet_count is not None:
         args.extend(['--magnet-count', str(magnet_count)])
+    if participant_name:
+        args.extend(['--participant-name', participant_name])
+    if experiment_name:
+        args.extend(['--experiment-name', experiment_name])
     return 'cd /colmag && {}'.format(' '.join(shlex.quote(arg) for arg in args))
+
+
+def parse_gazebo_pilot_settings(condition, magnet_count, tolerance_mm,
+                                dwell_s, repetitions, notes=''):
+    condition = condition.strip()
+    if not condition:
+        raise ValueError('Enter a condition label, for example practice.')
+    try:
+        tolerance_mm, dwell_s = float(tolerance_mm), float(dwell_s)
+        repetitions = int(repetitions)
+        magnets = None if magnet_count in (None, '', 'Not specified') else int(magnet_count)
+    except (TypeError, ValueError):
+        raise ValueError('Margin and hold must be numbers; repetitions must be an integer.')
+    if magnets not in (None, 1, 2, 3):
+        raise ValueError('Choose 1, 2 or 3 magnets, or leave the count unspecified.')
+    TrialSettings(tolerance_m=tolerance_mm / 1000, dwell_s=dwell_s)
+    default_targets(repetitions)
+    return dict(condition=condition, magnet_count=magnets, tolerance_mm=tolerance_mm,
+                dwell_s=dwell_s, repetitions=repetitions, notes=notes)
 
 
 def active_teleop_input_source(process_output):
@@ -1227,11 +1250,17 @@ class DataPanel(tk.Toplevel):
         self.notes = tk.StringVar()
         self.pipeline = tk.StringVar(value='characters')
         self.teleop_source = tk.StringVar(value='trackpad')
+        self.teleop_mode = tk.StringVar(value='mujoco')
         self.teleop_seed = tk.StringVar(value='0')
         self.teleop_trials = tk.StringVar(value='10')
         self.teleop_tolerance = tk.StringVar(value='25')
         self.teleop_dwell = tk.StringVar(value='2')
         self.teleop_magnets = tk.StringVar(value='Not specified')
+        self.pilot_condition = tk.StringVar(value='practice')
+        self.pilot_tolerance = tk.StringVar(value='20')
+        self.pilot_dwell = tk.StringVar(value='0.5')
+        self.pilot_repetitions = tk.StringVar(value='1')
+        self.pilot_notes = tk.StringVar(value='')
         # Table switches
         self.source = tk.StringVar(value='serial')
         self.char_set = tk.StringVar(value='digits')
@@ -1301,7 +1330,9 @@ class DataPanel(tk.Toplevel):
                  bg=CARD, fg=SUBTLE, font=f.f_small).pack(anchor='w', pady=(8, 0))
 
         # Participant form
-        form = self._box('Participant')
+        self.participant_form_panel = tk.Frame(self, bg=BG)
+        self.participant_form_panel.pack(fill='x')
+        form = self._box('Participant', parent=self.participant_form_panel)
         row = tk.Frame(form, bg=CARD)
         row.pack(fill='x', pady=(0, 8))
         tk.Label(row, textvariable=self.pid, width=5, bg='#eef4fb', fg=TEXT,
@@ -1342,6 +1373,25 @@ class DataPanel(tk.Toplevel):
             form, bg=CARD, fg=SUBTLE, font=f.f_small,
             text='Names are shown here; recording folders keep the participant ID.')
         self.form_status.pack(anchor='w', pady=(8, 0))
+
+        # Teleoperation keeps the shared name/consent fields compact so the
+        # participant Start list stays visible beside the inline pilot options.
+        self.participant_compact_panel = tk.Frame(self, bg=BG)
+        compact = self._box('Participant', parent=self.participant_compact_panel)
+        row = tk.Frame(compact, bg=CARD)
+        row.pack(fill='x')
+        tk.Label(row, textvariable=self.pid, width=5, bg='#eef4fb', fg=TEXT,
+                 font=f.f_h).pack(side='left')
+        self._caption(row, 'name')
+        RoundEntry(row, self.name, width=230, height=30, font=f.f_body,
+                   parent_bg=CARD).pack(side='left')
+        self._caption(row, 'consent')
+        self._compact_consent = Toggle(row, self.consent)
+        self._compact_consent.pack(side='left')
+        Pill(row, 'Save', self.save_participant, kind='primary', width=80,
+             font=f.f_btn).pack(side='right')
+        Pill(row, 'New', self.new_participant, kind='plain', width=70,
+             font=f.f_body).pack(side='right', padx=(0, 8))
 
         self.pipeline_body = tk.Frame(self, bg=BG)
         self.pipeline_body.pack(fill='x')
@@ -1389,8 +1439,9 @@ class DataPanel(tk.Toplevel):
         self.table = tk.Frame(self.table_view, bg=CARD)
         self.table_view.create_window(0, 0, window=self.table, anchor='nw')
         for event, step in (('<Button-4>', -1), ('<Button-5>', 1)):
-            self.bind(event, lambda _, step=step: self.table_view.yview_scroll(
-                step, 'units'))
+            self.bind(event, lambda event, step=step: self._scroll_data_content(event, step))
+        self.bind('<MouseWheel>', lambda event: self._scroll_data_content(
+            event, -1 if event.delta > 0 else 1))
         self.problems = tk.Label(self.character_panel, bg=BG, fg=SUBTLE, font=f.f_small,
                                  justify='left')
         self.problems.pack(anchor='w', padx=28, pady=(4, 0))
@@ -1416,7 +1467,33 @@ class DataPanel(tk.Toplevel):
         self.tracking_runs.pack(anchor='w', pady=(8, 0))
 
         self.teleoperation_panel = tk.Frame(self.pipeline_body, bg=BG)
-        task = self._box('MuJoCo · reach and hold', parent=self.teleoperation_panel)
+        mode_row = tk.Frame(self.teleoperation_panel, bg=BG)
+        mode_row.pack(fill='x', padx=28, pady=(14, 0))
+        self._teleop_mode_selector = Segmented(mode_row, self.teleop_mode,
+                  [('mujoco', 'MuJoCo demo'), ('gazebo', 'Gazebo pilot')],
+                  command=self._teleop_mode_changed, width=340, height=32,
+                  font=f.f_body, parent_bg=BG)
+        self._teleop_mode_selector.pack(side='left')
+        self._caption(mode_row, 'magnets')
+        Selector(mode_row, self.teleop_magnets, ['Not specified', '1', '2', '3'],
+                 width=135, height=30, font=f.f_body, parent_bg=BG).pack(side='left')
+
+        options = tk.Frame(self.teleoperation_panel, bg=BG)
+        options.pack(fill='x')
+        self.teleop_options_view = tk.Canvas(options, bg=BG, highlightthickness=0,
+                                            width=WIDTH - 40, height=180,
+                                            yscrollincrement=28)
+        self.teleop_options_scroll = tk.Scrollbar(options, orient='vertical',
+                                                 command=self.teleop_options_view.yview)
+        self.teleop_options_view.pack(side='left', fill='both', expand=True)
+        self.teleop_options_view.configure(yscrollcommand=self.teleop_options_scroll.set)
+        self.teleop_options_content = tk.Frame(self.teleop_options_view, bg=BG)
+        self.teleop_options_view.create_window(0, 0, window=self.teleop_options_content,
+                                              anchor='nw', width=WIDTH - 40)
+        self.teleop_options_content.bind('<Configure>', self._fit_teleop_options)
+        self.mujoco_options = tk.Frame(self.teleop_options_content, bg=BG)
+        self.mujoco_options.pack(fill='x')
+        task = self._box('MuJoCo · random targets', parent=self.mujoco_options)
         row = tk.Frame(task, bg=CARD)
         row.pack(fill='x')
         tk.Label(row, text='input', bg=CARD, fg=SUBTLE, font=f.f_body).pack(side='left', padx=(0, 12))
@@ -1424,9 +1501,6 @@ class DataPanel(tk.Toplevel):
                   [('trackpad', 'Trackpad / mouse'), ('serial', 'Sensor board')],
                   command=self._update_teleop_summary, width=330, height=30,
                   font=f.f_body, parent_bg=CARD).pack(side='left')
-        self._caption(row, 'magnets')
-        Selector(row, self.teleop_magnets, ['Not specified', '1', '2', '3'],
-                 width=135, height=30, font=f.f_body).pack(side='left')
         row = tk.Frame(task, bg=CARD)
         row.pack(fill='x', pady=(12, 0))
         for caption, variable, width in (
@@ -1438,17 +1512,42 @@ class DataPanel(tk.Toplevel):
         tk.Label(task, text='Enter starts each trial. Reach the blue target and hold for the selected duration.\n'
                  'The circle fills while the measured flange stays inside the margin; completion saves automatically.',
                  bg=CARD, fg=SUBTLE, font=f.f_small, justify='left', wraplength=690).pack(anchor='w', pady=(12, 0))
+
+        self.gazebo_options = tk.Frame(self.teleop_options_content, bg=BG)
+        task = self._box('Gazebo · cube-corner pilot', parent=self.gazebo_options)
+        row = tk.Frame(task, bg=CARD)
+        row.pack(fill='x')
+        tk.Label(row, text='condition', bg=CARD, fg=SUBTLE, font=f.f_body).pack(side='left', padx=(0, 8))
+        RoundEntry(row, self.pilot_condition, width=220, height=30, font=f.f_body,
+                   parent_bg=CARD).pack(side='left')
+        self._caption(row, 'repetitions')
+        RoundEntry(row, self.pilot_repetitions, width=65, height=30, font=f.f_body,
+                   parent_bg=CARD).pack(side='left')
+        row = tk.Frame(task, bg=CARD)
+        row.pack(fill='x', pady=(8, 0))
+        for caption, variable in (('margin mm', self.pilot_tolerance), ('hold seconds', self.pilot_dwell)):
+            self._caption(row, caption)
+            RoundEntry(row, variable, width=65, height=30, font=f.f_body,
+                       parent_bg=CARD).pack(side='left')
+        row = tk.Frame(task, bg=CARD)
+        row.pack(fill='x', pady=(8, 0))
+        tk.Label(row, text='notes', bg=CARD, fg=SUBTLE, font=f.f_body).pack(side='left', padx=(0, 8))
+        RoundEntry(row, self.pilot_notes, width=440, height=30, font=f.f_body,
+                   parent_bg=CARD).pack(side='left')
+        tk.Label(task, text='Uses the running Interface input and observes actual Gazebo flange feedback.\n'
+                 'Condition is a log label. Robot controls remain in the Interface window.',
+                 bg=CARD, fg=SUBTLE, font=f.f_small, justify='left', wraplength=630).pack(anchor='w', pady=(10, 0))
         people = self._box('Choose a participant', parent=self.teleoperation_panel)
         list_holder = tk.Frame(people, bg=CARD)
         list_holder.pack(fill='x')
         self.teleop_view = tk.Canvas(list_holder, bg=CARD, highlightthickness=0,
-                                    width=WIDTH - 100, height=100)
+                                    width=WIDTH - 100, height=100, yscrollincrement=34)
         self.teleop_scroll = tk.Scrollbar(list_holder, orient='vertical', command=self.teleop_view.yview)
         self.teleop_view.configure(yscrollcommand=self.teleop_scroll.set)
         self.teleop_view.pack(side='left', fill='both', expand=True)
         self.teleop_participants = tk.Frame(self.teleop_view, bg=CARD)
         self.teleop_view.create_window(0, 0, window=self.teleop_participants, anchor='nw', width=WIDTH - 100)
-        Pill(people, 'Stop', self.parent.stop_teleoperation,
+        Pill(people, 'Stop', self.stop_teleoperation,
              kind='plain', width=80, height=28, font=f.f_body).pack(anchor='e', pady=(8, 0))
         self.teleop_status = tk.Label(people, bg=CARD, fg=SUBTLE, font=f.f_small,
                                      justify='left', wraplength=690)
@@ -1477,16 +1576,79 @@ class DataPanel(tk.Toplevel):
     def _pipeline_changed(self):
         self._pipeline_selector._redraw()
         if self.pipeline.get() == 'teleoperation':
+            self.participant_form_panel.pack_forget()
+            self.participant_compact_panel.pack(fill='x', before=self.pipeline_body)
             self.character_panel.pack_forget()
             self.teleoperation_panel.pack(fill='x')
             self._update_teleop_summary()
         else:
+            self.participant_compact_panel.pack_forget()
+            self.participant_form_panel.pack(fill='x', before=self.pipeline_body)
             self.teleoperation_panel.pack_forget()
             self.character_panel.pack(fill='x')
             self.refresh()
         self.update_idletasks()
+        if self.pipeline.get() == 'teleoperation':
+            self._fit_teleop_options()
+
+    def _teleop_mode_changed(self):
+        self._teleop_mode_selector._redraw()
+        if self.teleop_mode.get() == 'gazebo':
+            self.mujoco_options.pack_forget()
+            self.gazebo_options.pack(fill='x')
+        else:
+            self.gazebo_options.pack_forget()
+            self.mujoco_options.pack(fill='x')
+        self._update_teleop_summary()
+        self._fit_teleop_options()
+        self.teleop_options_view.yview_moveto(0)
+
+    def _fit_teleop_options(self, _event=None):
+        """Scroll settings while keeping the participant Start buttons visible."""
+        if self.pipeline.get() != 'teleoperation':
+            return
+        self.update_idletasks()
+        height = self.teleop_options_content.winfo_reqheight()
+        current = self.teleop_options_view.winfo_reqheight()
+        people_current = self.teleop_view.winfo_reqheight()
+        fixed = self.winfo_reqheight() - current - people_current
+        budget = self.winfo_screenheight() - fixed - 96
+        people_height = self.teleop_participants.winfo_reqheight()
+        wanted_people = min(people_height, 3 * 34)
+        people_visible = min(wanted_people, max(34, int((budget - 80) // 34) * 34))
+        self.teleop_view.configure(height=people_visible)
+        if people_height > people_visible:
+            self.teleop_scroll.pack(side='right', fill='y')
+        else:
+            self.teleop_scroll.pack_forget()
+        available = max(80, budget - people_visible)
+        visible = min(height, available)
+        self.teleop_options_view.configure(height=visible,
+            scrollregion=(0, 0, WIDTH - 40, height))
+        if height > visible:
+            self.teleop_options_scroll.pack(side='right', fill='y')
+        else:
+            self.teleop_options_scroll.pack_forget()
+
+    def _scroll_data_content(self, event, step):
+        if self.pipeline.get() == 'characters':
+            self.table_view.yview_scroll(step, 'units')
+        elif (self.teleop_view.winfo_rooty() <= event.y_root <
+              self.teleop_view.winfo_rooty() + self.teleop_view.winfo_height()):
+            self.teleop_view.yview_scroll(step, 'units')
+        else:
+            self.teleop_options_view.yview_scroll(step, 'units')
+        return 'break'
 
     def _update_teleop_summary(self):
+        if self.teleop_mode.get() == 'gazebo':
+            self.summary.configure(text='Gazebo FR3 · cube corners · measured end-effector feedback')
+            self.recording_help.configure(text='Start Robot → Arm nodes → Interface in Simulation first.\n'
+                                          'Enter starts a trial; controls stay in the Interface window.')
+            running = self.parent.__dict__.get('_virtual_task_running', False)
+            self.teleop_status.configure(text='Gazebo pilot running. Close its window or use Stop to finish recording.'
+                                        if running else 'Saved pilot runs: data_collection/virtual_task/<run-id>/')
+            return
         self.summary.configure(text='MuJoCo FR3 · random positions · measured end-effector feedback')
         self.recording_help.configure(text='Start opens the simulation. Enter begins a trial; hold inside the target to save.\n'
                                       'Trackpad / mouse runs without Docker. Sensor board uses the main window\'s port #.')
@@ -1513,7 +1675,7 @@ class DataPanel(tk.Toplevel):
                  kind='primary', width=80, height=28, font=self.parent.f_body).pack(side='right')
         self.teleop_participants.update_idletasks()
         height = self.teleop_participants.winfo_reqheight()
-        visible = min(height, self.TABLE_ROWS * 34)
+        visible = min(height, 3 * 34)
         self.teleop_view.configure(height=visible,
             scrollregion=(0, 0, WIDTH - 100, height))
         if height > visible:
@@ -1580,6 +1742,7 @@ class DataPanel(tk.Toplevel):
         self._show_teleop_participants()
         if self.pipeline.get() == 'teleoperation':
             self._update_teleop_summary()
+            self._fit_teleop_options()
 
     def show_table(self):
         for child in self.table.winfo_children():
@@ -1703,7 +1866,7 @@ class DataPanel(tk.Toplevel):
         self.consent.set(bool(record.get('consent')))
         self.excluded.set(bool(record.get('excluded')))
         self.notes.set(record.get('notes', ''))
-        for widget in (self._hand, self._age, self._consent, self._excluded):
+        for widget in (self._hand, self._age, self._consent, self._excluded, self._compact_consent):
             widget._redraw()
 
     def new_participant(self):
@@ -1811,24 +1974,44 @@ class DataPanel(tk.Toplevel):
             messagebox.showwarning('Excluded', '{} is marked as excluded.'.format(
                 dataset.participant_label(participant)), parent=self)
             return
-        source = self.teleop_source.get()
-        if source == 'serial' and not participant.get('consent'):
+        gazebo = self.teleop_mode.get() == 'gazebo'
+        source = None if gazebo else self.teleop_source.get()
+        if not gazebo and source == 'serial' and not participant.get('consent'):
             messagebox.showwarning('No consent', 'Save consent for {} before collecting with the sensor board.'.format(
                 dataset.participant_label(participant)), parent=self)
             return
         try:
-            settings = parse_teleoperation_settings(
-                self.teleop_seed.get(), self.teleop_trials.get(), self.teleop_tolerance.get(),
-                self.teleop_dwell.get(), self.teleop_magnets.get())
+            if gazebo:
+                settings = parse_gazebo_pilot_settings(self.pilot_condition.get(),
+                    self.teleop_magnets.get(), self.pilot_tolerance.get(), self.pilot_dwell.get(),
+                    self.pilot_repetitions.get(), self.pilot_notes.get())
+            else:
+                settings = parse_teleoperation_settings(
+                    self.teleop_seed.get(), self.teleop_trials.get(), self.teleop_tolerance.get(),
+                    self.teleop_dwell.get(), self.teleop_magnets.get())
         except ValueError as exc:
             messagebox.showerror('Teleoperation Pipeline', str(exc), parent=self)
             return
         if not self._save_experiment():
             return
-        self.parent.start_teleoperation(
-            participant_id, input_source=source, participant_name=participant.get('name', ''),
-            experiment_name=self.experiment_name.get(), **settings)
+        if gazebo:
+            self.parent.start_virtual_task(participant_id,
+                participant_name=participant.get('name', ''),
+                experiment_name=self.experiment_name.get(), **settings)
+        else:
+            self.parent.start_teleoperation(
+                participant_id, input_source=source, participant_name=participant.get('name', ''),
+                experiment_name=self.experiment_name.get(), **settings)
         self._update_teleop_summary()
+
+    def stop_teleoperation(self):
+        process = self.parent.__dict__.get('_teleoperation_process')
+        mujoco_running = process is not None and process.poll() is None
+        gazebo_running = self.parent.__dict__.get('_virtual_task_running', False)
+        if self.teleop_mode.get() == 'gazebo' or gazebo_running:
+            self.parent.stop_virtual_task()
+        if self.teleop_mode.get() == 'mujoco' or mujoco_running:
+            self.parent.stop_teleoperation()
 
 
 # ── The app ──────────────────────────────────────────────────────────────────
@@ -1847,6 +2030,7 @@ class Launcher(tk.Tk):
         self._teleoperation_process = None
         self._teleoperation_log_path = None
         self._teleoperation_log_file = None
+        self._virtual_task_running = False
         self._fonts()
         self._build_ui()
         self._poll_running = True
@@ -1959,13 +2143,6 @@ class Launcher(tk.Tk):
                                         fg=DOT_OFF, font=self.f_body)
         self.container_light.pack(side='right')
 
-        pilot_row = tk.Frame(self, bg=BG)
-        pilot_row.pack(fill='x', padx=26, pady=(4, 0))
-        Pill(pilot_row, 'Virtual task', self.open_virtual_task, kind='plain',
-             width=110, font=self.f_body, parent_bg=BG).pack(side='left')
-        tk.Label(pilot_row, text='Target-reaching time + end-effector error · simulation',
-                 bg=BG, fg=SUBTLE, font=self.f_small).pack(side='left', padx=12)
-
         # Log card
         log_card = Card(self, height=196)
         log_card.pack(padx=26, pady=(10, 20))
@@ -2036,14 +2213,17 @@ class Launcher(tk.Tk):
         self._data_panel = DataPanel(self)
 
     def open_virtual_task(self):
-        existing = getattr(self, '_pilot_panel', None)
-        if existing is not None and existing.winfo_exists():
-            existing.lift()
-            return
-        self._pilot_panel = PilotPanel(self)
+        """Compatibility entry point: the pilot controls live inside Data."""
+        self.open_data_panel()
+        panel = self._data_panel
+        panel.pipeline.set('teleoperation')
+        panel.teleop_mode.set('gazebo')
+        panel._teleop_mode_changed()
+        panel._pipeline_changed()
 
     def start_virtual_task(self, participant_id, condition, magnet_count,
-                           tolerance_mm, dwell_s, repetitions, notes=''):
+                           tolerance_mm, dwell_s, repetitions, notes='',
+                           participant_name='', experiment_name=''):
         if self.mode.get() != 'sim':
             messagebox.showerror('Virtual task', 'Select Simulation mode for the virtual task.')
             return
@@ -2062,11 +2242,20 @@ class Launcher(tk.Tk):
             source = active_teleop_input_source(processes)
             command = build_virtual_task_command(
                 run_id, participant_id, condition, source,
-                tolerance_mm, dwell_s, repetitions, magnet_count, notes)
+                tolerance_mm, dwell_s, repetitions, magnet_count, notes,
+                participant_name, experiment_name)
         except (TypeError, ValueError) as exc:
             messagebox.showerror('Virtual task', str(exc))
             return
-        self._launch_stage('pilot', command)
+        if self._launch_stage('pilot', command):
+            self._virtual_task_running = True
+
+    def stop_virtual_task(self):
+        def stop():
+            command = _managed_stage_signal('pilot', 'TERM') + "; pkill -TERM -f '[t]arget_reaching_pilot.py' 2>/dev/null || true"
+            in_container(command, timeout=8)
+            self._virtual_task_running = False
+        threading.Thread(target=stop, daemon=True).start()
 
     def _action_mapping_saved(self):
         self._pipeline_notice = (
@@ -2782,6 +2971,7 @@ class Launcher(tk.Tk):
                    timeout=5)
         states = {'robot': False, 'nodes': False, 'interface': False}
         tail = '(container not running)'
+        self._virtual_task_running = False
         if ok:
             # Status LEDs describe this container, not every process visible
             # through the host-network ROS master. Otherwise an external or
@@ -2792,9 +2982,10 @@ class Launcher(tk.Tk):
                 states['robot'], states['nodes'] = parse_local_stage_status(
                     local_status)
             # [m] trick: don't match this pgrep's own bash wrapper
-            _, procs = in_container("pgrep -f '[m]agnetometer_reader' || true",
+            _, procs = in_container("pgrep -af '[m]agnetometer_reader.py|[t]arget_reaching_pilot.py' || true",
                                     timeout=5)
-            states['interface'] = procs.strip() != ''
+            states['interface'] = 'magnetometer_reader.py' in procs
+            self._virtual_task_running = 'target_reaching_pilot.py' in procs
             _, tail = in_container(
                 'tail -n 60 /tmp/colmag_gui_%s.log 2>/dev/null || true'
                 % self.log_choice.get(), timeout=5)

@@ -288,10 +288,12 @@ active with Gazebo closed. Select any stage to view and copy its live log. The
 **Action mapping** button opens the task vocabulary used by classified
 characters.
 
-**Data → Teleoperation Pipeline** opens the FR3 in **MuJoCo**. Press **Enter**
+**Data → Teleoperation Pipeline → MuJoCo demo** opens the FR3 in **MuJoCo**. Press **Enter**
 to reveal a random target, move with the trackpad or magnet board, and hold
 inside the blue sphere for **2 seconds**. The loading ring fills; the measured
 trajectory and completion time save automatically. No held button is needed.
+The **Gazebo pilot** is in the same Data tab, with shared experiment and
+participant details; it records the arm controlled by the running Interface.
 
 <p align="center">
   <img src="docs/teleoperation.png" width="880" alt="MuJoCo teleoperation collection: robot, random target sphere and continuous hold progress">

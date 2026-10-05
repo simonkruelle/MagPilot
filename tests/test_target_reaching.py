@@ -160,12 +160,18 @@ class PilotRunTests(unittest.TestCase):
         from tools.target_reaching_pilot import main
         with tempfile.TemporaryDirectory() as root:
             output = os.path.join(root, 'plan')
-            self.assertEqual(main(['--dry-run', '--output-dir', output]), 0)
+            self.assertEqual(main(['--dry-run', '--output-dir', output,
+                                   '--participant-id', 'P03',
+                                   '--participant-name', 'Alex Example',
+                                   '--experiment-name', 'Week 1: virtual task pilot']), 0)
             with open(os.path.join(output, 'manifest.json')) as stream:
                 manifest = json.load(stream)
             self.assertEqual(manifest['trials'], [])
             self.assertTrue(manifest['metadata']['dry_run'])
             self.assertEqual(manifest['source'], 'plan_only')
+            self.assertEqual(manifest['participant_id'], 'P03')
+            self.assertEqual(manifest['metadata']['participant_name'], 'Alex Example')
+            self.assertEqual(manifest['metadata']['experiment_name'], 'Week 1: virtual task pilot')
 
 
 class PilotLauncherTests(unittest.TestCase):

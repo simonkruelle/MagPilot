@@ -3,7 +3,8 @@
 For the integrated **Data → Teleoperation Pipeline** demo with random targets,
 a loading ring and a two-second hold, use the
 [MuJoCo collection instructions](TELEOPERATION_COLLECTION.md).
-The instructions below describe the separate Gazebo observer.
+The instructions below describe **Gazebo pilot**, now selected in the same
+Data panel.
 
 Start the difficult robot task early: pilot the existing simulated FR3 to a
 known Cartesian position, then record how long it takes and the remaining
@@ -17,15 +18,20 @@ participant comparisons and measured performance are pending.
    simulated arm; choose **trackpad** or **magnetometer** for the actual input.
 3. Enter MagPilot teleop in the Interface (Shift+E). For trackpad input, mouse
    motion controls X/Y and scrolling controls height.
-4. Open **Virtual task**. Enter participant ID and a condition label, such as
-   `practice`, `mouse`, or `magnet_stack_2`; set magnet count where relevant.
+4. Open **Data → Teleoperation Pipeline → Gazebo pilot**. Save the experiment
+   and participant name. Enter a condition such as `practice`, `mouse`, or
+   `magnet_stack_2`; set magnet count where relevant. Press **Start** beside
+   the participant's name.
 5. Return the measured flange to the common start **(0.45, 0.00, 0.40) m**.
    The pilot window shows the measured flange, target, and position error.
 6. Hold at the common start until **Ready**, then press **Enter in the pilot
    window**. Move the simulated arm to the blue target using the Interface.
    Recording ends automatically after staying within tolerance for the hold.
 7. Return to the same start for each target. **Escape** cancels a trial and
-   permits retry; closing the pilot or **Stop all** preserves its cancellation.
+   permits retry; closing the pilot or pressing **Stop in Data** preserves its
+   cancellation. Data's Stop leaves Robot and Interface running.
+
+<img src="teleoperation_pilot_data.png" width="560" alt="Gazebo pilot settings and participant Start buttons inside the Data panel">
 
 The recorder publishes **no arm commands** and refuses real `franka_control`,
 missing Gazebo, stale flange TF, or a paused simulation clock. It runs beside
@@ -66,7 +72,8 @@ when switching input conditions. Enter `practice` for initial software trials.
 Every start creates a new directory under the gitignored
 `data_collection/virtual_task/<run-id>/`:
 
-- `manifest.json`: frames, units, targets, protocol, condition, magnet count.
+- `manifest.json`: frames, units, targets, protocol, condition, magnet count,
+  participant name and experiment name.
 - `summary.csv`: every trial, completion status, time, endpoint error.
 - `trial_NNN_trajectory.csv`: measured X/Y/Z, timestamps, target error.
 

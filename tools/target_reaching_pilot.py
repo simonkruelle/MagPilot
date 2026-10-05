@@ -141,11 +141,18 @@ class PilotWindow:
         self.timer.start()
         self._show_target()
 
+    def _participant_caption(self):
+        metadata = self.run.manifest.get('metadata', {})
+        name = metadata.get('participant_name', '').strip()
+        label = '{} ({})'.format(name, self.run.participant_id) if name else self.run.participant_id
+        experiment = metadata.get('experiment_name', '').strip()
+        return '{} · {}'.format(experiment, label) if experiment else label
+
     def _show_target(self):
         targets = self.run.manifest['targets']
         if self.index == len(targets):
             self.target_dot.set_data_3d([], [], [])
-            self.caption.set_text('{} · {} · finished'.format(self.run.participant_id, self.run.condition))
+            self.caption.set_text('{} · {} · finished'.format(self._participant_caption(), self.run.condition))
             self.detail.set_text('Run finished\n{} trial records\n\nsummary.csv\n+ trajectory CSVs'.format(len(self.run.completed)))
             self.status.set_text('Saved to {}'.format(self.run.output_dir))
             return
@@ -153,7 +160,7 @@ class PilotWindow:
         xyz = target['position_m']
         self.target_dot.set_data_3d([xyz[0]], [xyz[1]], [xyz[2]])
         self.caption.set_text('{} · condition {} · target {}/{}'.format(
-            self.run.participant_id, self.run.condition, self.index + 1, len(targets)))
+            self._participant_caption(), self.run.condition, self.index + 1, len(targets)))
         self.detail.set_text('{} · repetition {}\n\nX {:.3f} m\nY {:.3f} m\nZ {:.3f} m\n\nTolerance {:.0f} mm\nHold {:.1f} s'.format(
             target['target_id'], target['repetition'], *xyz,
             self.settings.tolerance_m * 1000, self.settings.dwell_s))
@@ -259,6 +266,8 @@ def main(argv=None):
     parser.add_argument('--run-id', default=datetime.now().strftime('pilot_%Y%m%d_%H%M%S'))
     parser.add_argument('--output-dir', help='New directory; defaults to data_collection/virtual_task/<run-id>')
     parser.add_argument('--participant-id', default='pilot')
+    parser.add_argument('--participant-name', default='')
+    parser.add_argument('--experiment-name', default='')
     parser.add_argument('--condition', default='practice', help='Condition label only; does not change robot controls')
     parser.add_argument('--input-source', choices=('serial', 'trackpad'), default='trackpad',
                         help='Input used in the separate robot interface, saved as metadata')
@@ -283,6 +292,8 @@ def main(argv=None):
                        args.arm_id + '_link0', args.arm_id + '_link8',
                        metadata=dict(magnet_count=args.magnet_count, notes=args.notes,
                                      input_source=args.input_source,
+                                     participant_name=args.participant_name,
+                                     experiment_name=args.experiment_name,
                                      purpose='software_pilot', dry_run=args.dry_run))
         if args.dry_run:
             print('Plan only: {} targets; no measurements. {}'.format(len(targets), run.manifest_path))

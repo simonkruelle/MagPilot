@@ -1,6 +1,9 @@
 # Teleoperation Pipeline
 
-**Data → Teleoperation Pipeline → Start** opens the FR3 in MuJoCo.
+Open **Data → Teleoperation Pipeline** and choose **MuJoCo demo** or
+**Gazebo pilot**. Both use the shared experiment and named participant list.
+
+For the random-target demo, select **MuJoCo demo → Start**.
 
 - Shared experiment name and participant names from the collection registry.
 - **Trackpad:** move the pointer over the scene for X/Y; scroll for height.
@@ -10,7 +13,7 @@
 - **Loading ring:** fills during the hold; leaving the sphere resets it.
 - **Saved automatically:** Enter starts the next target. Escape cancels and logs the attempt.
 
-<img src="teleoperation_data.png" width="560" alt="Data window with a separate Teleoperation Pipeline and named participants">
+<img src="teleoperation_data.png" width="560" alt="Data window with MuJoCo demo and Gazebo pilot choices in the Teleoperation Pipeline">
 
 ![MuJoCo target-reaching collection](teleoperation.png)
 
@@ -65,8 +68,15 @@ robot trace rather than a full-rate sensor archive.
 
 Practice first. Keep seed, targets, tolerance, hold and control mapping identical
 when comparing trackpad and magnet conditions; plan condition order and repetitions
-before collecting participant comparisons. The existing Gazebo observer remains
-available under **Virtual task**: [earlier pilot](VIRTUAL_TASK_PILOT.md).
+before collecting participant comparisons.
+
+## Gazebo pilot in the same panel
+
+Select **Gazebo pilot** in the Teleoperation tab. Set condition, margin, hold,
+repetitions and notes, then press **Start** beside the participant's name.
+Start **Simulation → Robot → Arm nodes → Interface** first. The pilot reads
+the running Interface's input source; its controls and original protocol stay
+in the existing robot workflow. See the [Gazebo instructions](VIRTUAL_TASK_PILOT.md).
 
 The FR3 model is vendored from MuJoCo Menagerie; see its
 [source and license](../assets/teleoperation/franka_fr3/SOURCE.md).

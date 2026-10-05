@@ -24,6 +24,7 @@ from colmag_launcher import (
     build_terminal_argv,
     build_tracking_command,
     build_teleoperation_argv,
+    build_virtual_task_command,
     build_local_stage_status_command,
     build_live_ros_nodes_command,
     build_pipeline_probe_command,
@@ -40,6 +41,7 @@ from colmag_launcher import (
     parse_franka_robot_mode,
     parse_tracking_settings,
     parse_teleoperation_settings,
+    parse_gazebo_pilot_settings,
     next_teleoperation_session,
     teleoperation_python,
     probe_container_project_mount,
@@ -593,6 +595,57 @@ class DataCollectionRoutingTests(unittest.TestCase):
 
 
 class TeleoperationCollectionTests(unittest.TestCase):
+    def test_inline_gazebo_settings_keep_the_existing_protocol_defaults(self):
+        settings = parse_gazebo_pilot_settings('practice', 'Not specified', '20', '0.5', '1')
+        self.assertEqual(settings, dict(condition='practice', magnet_count=None,
+                    tolerance_mm=20.0, dwell_s=.5, repetitions=1, notes=''))
+        for values in [('', '', '20', '.5', '1'), ('practice', '', 'nan', '.5', '1'),
+                       ('practice', '', '20', '.5', '0'), ('practice', '4', '20', '.5', '1')]:
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                parse_gazebo_pilot_settings(*values)
+
+    def test_gazebo_command_preserves_shared_names_and_experiment_literals(self):
+        experiment = "Week 1; $(touch /tmp/never) `echo nope`"
+        command = build_virtual_task_command('pilot_run', 'P01', 'practice', 'trackpad',
+            participant_name='Ada Lovelace', experiment_name=experiment)
+        args = shlex.split(command)
+        self.assertEqual(args[args.index('--participant-name') + 1], 'Ada Lovelace')
+        self.assertEqual(args[args.index('--experiment-name') + 1], experiment)
+
+    def test_old_pilot_entry_redirects_to_existing_data_mode(self):
+        launcher = mock.Mock()
+        Launcher.open_virtual_task(launcher)
+        launcher.open_data_panel.assert_called_once_with()
+        launcher._data_panel.pipeline.set.assert_called_once_with('teleoperation')
+        launcher._data_panel.teleop_mode.set.assert_called_once_with('gazebo')
+        launcher._data_panel._pipeline_changed.assert_called_once_with()
+
+    def test_data_stop_also_ends_recorders_running_in_the_other_mode(self):
+        panel = DataPanel.__new__(DataPanel)
+        panel.teleop_mode = mock.Mock()
+        panel.teleop_mode.get.return_value = 'mujoco'
+        parent = mock.Mock()
+        parent._virtual_task_running = True
+        panel.parent = parent
+        panel.stop_teleoperation()
+        parent.stop_virtual_task.assert_called_once_with()
+        parent.stop_teleoperation.assert_called_once_with()
+        parent.stop_all.assert_not_called()
+        parent.start_robot.assert_not_called()
+
+    @mock.patch('colmag_launcher.in_container', return_value=(True, ''))
+    @mock.patch('colmag_launcher.threading.Thread')
+    def test_gazebo_stop_only_targets_the_pilot_observer(self, thread, run):
+        launcher = Launcher.__new__(Launcher)
+        launcher.stop_virtual_task()
+        thread.call_args.kwargs['target']()
+        command = run.call_args.args[0]
+        self.assertIn('/tmp/colmag_gui_pilot.pid', command)
+        self.assertIn('[t]arget_reaching_pilot.py', command)
+        self.assertNotIn('magnetometer_reader', command)
+        self.assertNotIn('rosnode', command)
+        self.assertNotIn('franka_control', command)
+
     def test_host_argv_preserves_literal_names_and_separate_output(self):
         experiment = "Simon's $(touch /tmp/never) `echo nope`; study"
         args = build_teleoperation_argv('/tmp/env/python', 'P02', 'S03',
@@ -730,13 +783,17 @@ class TeleoperationPanelGuiTests(unittest.TestCase):
         from colmag import dataset
         import tkinter as tk
         with tempfile.TemporaryDirectory() as folder:
-            dataset.save_participants(folder, [dict(dataset.new_participant('P01'), name='Ada', consent=True)])
+            dataset.save_participants(folder, [dict(dataset.new_participant('P01'), name='Ada', consent=True),
+                dict(dataset.new_participant('P02'), name='Bob', consent=True),
+                dict(dataset.new_participant('P03'), name='Casey', consent=True)])
             parent = tk.Tk()
             for name, font in [('f_title', ('Arial', 20)), ('f_h', ('Arial', 12)),
                                ('f_body', ('Arial', 11)), ('f_small', ('Arial', 9)), ('f_btn', ('Arial', 11))]:
                 setattr(parent, name, font)
             parent.start_teleoperation = mock.Mock()
             parent.stop_teleoperation = mock.Mock()
+            parent.start_virtual_task = mock.Mock()
+            parent.stop_virtual_task = mock.Mock()
             panel = DataPanel(parent, data_dir=folder)
             try:
                 panel.pipeline.set('teleoperation')
@@ -750,10 +807,36 @@ class TeleoperationPanelGuiTests(unittest.TestCase):
                 parent.start_teleoperation.assert_called_once_with('P01',
                     input_source='trackpad', participant_name='Ada', experiment_name='Week 1 pilot',
                     seed=0, trials=10, tolerance_mm=25.0, dwell_seconds=2.0, magnet_count=2)
+                self.assertTrue(panel.participant_compact_panel.winfo_ismapped())
+                self.assertFalse(panel.participant_form_panel.winfo_ismapped())
+                panel.teleop_mode.set('gazebo')
+                panel._teleop_mode_changed()
+                panel.pilot_notes.set('Same start; practice only')
+                panel.teleop_source.set('serial')
+                panel.start_teleoperation('P01')
+                parent.update()
+                self.assertTrue(panel.gazebo_options.winfo_ismapped())
+                self.assertFalse(panel.mujoco_options.winfo_ismapped())
+                if panel.teleop_options_content.winfo_reqheight() > panel.teleop_options_view.winfo_height():
+                    previous = panel.teleop_options_view.yview()[0]
+                    panel._scroll_data_content(mock.Mock(y_root=panel.teleop_options_view.winfo_rooty() + 5), 1)
+                    self.assertGreater(panel.teleop_options_view.yview()[0], previous)
+                    panel.teleop_options_view.yview_moveto(0)
+                parent.start_virtual_task.assert_called_once_with('P01',
+                    participant_name='Ada', experiment_name='Week 1 pilot',
+                    condition='practice', magnet_count=2, tolerance_mm=20.0,
+                    dwell_s=.5, repetitions=1, notes='Same start; practice only')
+                self.assertEqual(panel.teleop_tolerance.get(), '25')
+                self.assertEqual(panel.teleop_dwell.get(), '2')
+                first_row = panel.teleop_participants.winfo_children()[0]
+                self.assertLess(first_row.winfo_rooty() + first_row.winfo_height(),
+                                panel.winfo_screenheight() - 64)
+                self.assertLessEqual(panel.winfo_height(), panel.winfo_screenheight() - 64)
                 panel.pipeline.set('characters')
                 panel._pipeline_changed()
                 parent.update()
                 self.assertTrue(panel.character_panel.winfo_ismapped())
+                self.assertTrue(panel.participant_form_panel.winfo_ismapped())
             finally:
                 panel.destroy()
                 parent.destroy()
