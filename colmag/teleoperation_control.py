@@ -1,0 +1,36 @@
+"""Position-only input mappings for the 24 cm collection workspace."""
+
+import math
+
+from colmag.control_mapping import (
+    MAGNET_HEIGHT_MAX_M, calibrated_magnet_height, map_magnet_height,
+)
+from colmag.robot_targets import DIGIT_CUBE_CENTER_M, DIGIT_CUBE_EDGE_M
+
+
+def pointer_position(u, v, height_m):
+    """Horizontal flight-deck axes: up -> -X, right -> +Y; scroll -> Z."""
+    values = [float(u), float(v), float(height_m)]
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError('Input coordinates must be finite.')
+    half = DIGIT_CUBE_EDGE_M / 2
+    centre = DIGIT_CUBE_CENTER_M
+    u, v = [max(-1.0, min(1.0, value)) for value in values[:2]]
+    z = max(centre[2] - half, min(centre[2] + half, values[2]))
+    return (centre[0] - v * half, centre[1] + u * half, z)
+
+
+def magnet_position(pose, input_extent_m=0.05):
+    """Reuse board axes and calibrated nonlinear height within the task cube."""
+    if len(pose) != 6 or not all(math.isfinite(float(value)) for value in pose):
+        raise ValueError('A finite six-value board pose is required.')
+    if not math.isfinite(input_extent_m) or input_extent_m <= 0:
+        raise ValueError('Board input extent must be positive.')
+    height = calibrated_magnet_height(pose[2])
+    if height > MAGNET_HEIGHT_MAX_M:
+        raise ValueError('Magnet lifted above the 15 cm control range.')
+    half = DIGIT_CUBE_EDGE_M / 2
+    z = map_magnet_height(height, ee_min_m=DIGIT_CUBE_CENTER_M[2] - half,
+                          ee_max_m=DIGIT_CUBE_CENTER_M[2] + half)
+    return pointer_position(float(pose[0]) / input_extent_m,
+                            float(pose[1]) / input_extent_m, z)

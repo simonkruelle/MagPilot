@@ -1,0 +1,5 @@
+# Local MuJoCo collection window; tkinter comes from the Python/OS installation.
+mujoco==3.3.7
+numpy>=1.24,<3
+Pillow>=9
+pyserial==3.5
