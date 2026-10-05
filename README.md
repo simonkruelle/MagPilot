@@ -290,13 +290,16 @@ characters.
 
 **Data → Teleoperation Pipeline → MuJoCo demo** opens the FR3 in **MuJoCo**. Press **Enter**
 to reveal a random target, move with the trackpad or magnet board, and hold
-inside the blue sphere for **2 seconds**. The loading ring fills; the measured
+with the centre between the gripper fingertips inside the blue sphere for
+**2 seconds**. The loading ring fills; the measured
 trajectory and completion time save automatically. No held button is needed.
+Pointer movement over the scene controls X/Y; scrolling anywhere in the window
+or the height slider controls Z. The green point marks the measured finger centre.
 The **Gazebo pilot** is in the same Data tab, with shared experiment and
 participant details; it records the arm controlled by the running Interface.
 
 <p align="center">
-  <img src="docs/teleoperation.png" width="880" alt="MuJoCo teleoperation collection: robot, random target sphere and continuous hold progress">
+  <img src="docs/teleoperation.png" width="880" alt="MuJoCo teleoperation collection: Franka two-finger gripper, single target ring, height slider and continuous hold progress">
   <br>
   <sub><a href="docs/TELEOPERATION_COLLECTION.md">Setup, controls and saved data</a> · Trackpad demo works without the sensor board</sub>
 </p>

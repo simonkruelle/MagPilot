@@ -13,6 +13,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from colmag.teleoperation_task import (  # noqa: E402
+    END_EFFECTOR_FRAME, END_EFFECTOR_REFERENCE, END_EFFECTOR_SITE,
     PROTOCOL_ID, TeleoperationRun, TeleoperationSettings, TeleoperationTrial,
     random_targets,
 )
@@ -224,7 +225,11 @@ class TeleoperationRunTests(unittest.TestCase):
                 manifest = json.load(stream)
             self.assertEqual(manifest['protocol'], PROTOCOL_ID)
             self.assertEqual(manifest['settings']['dwell_s'], 2)
-            self.assertEqual(manifest['source'], 'mujoco_measured_flange')
+            self.assertEqual(manifest['source'], 'mujoco_measured_gripper_center')
+            self.assertEqual(manifest['protocol'], 'mujoco_random_target_reaching_v2')
+            self.assertEqual(manifest['end_effector_frame'], END_EFFECTOR_FRAME)
+            self.assertEqual(manifest['end_effector_site'], END_EFFECTOR_SITE)
+            self.assertEqual(manifest['end_effector_reference'], END_EFFECTOR_REFERENCE)
             self.assertEqual(manifest['experiment_name'], 'Pilot A')
             self.assertEqual(manifest['participant_name'], 'Example participant')
             self.assertEqual(manifest['magnet_count'], 2)
@@ -239,6 +244,9 @@ class TeleoperationRunTests(unittest.TestCase):
             with open(os.path.join(run.output_dir, row['trajectory_csv']), newline='') as stream:
                 trace = list(csv.DictReader(stream))
             self.assertEqual(result['samples'], len(trace))
+            self.assertEqual(result['protocol'], manifest['protocol'])
+            self.assertEqual(result['end_effector_site'], manifest['end_effector_site'])
+            self.assertEqual(result['end_effector_reference'], manifest['end_effector_reference'])
             self.assertEqual(result['completion_time_s'], row['completion_time_s'])
             self.assertAlmostEqual(float(trace[-1]['actual_x_m']), result['end_x_m'])
             self.assertAlmostEqual(float(trace[-1]['wall_elapsed_s']), result['wall_duration_s'])
@@ -281,6 +289,15 @@ class TeleoperationRunTests(unittest.TestCase):
                 run.save_trial(self.trial())
             with open(run.manifest_path) as stream:
                 self.assertEqual(json.load(stream)['trials'], [])
+
+    def test_new_protocol_cannot_label_flange_data_as_gripper_midpoint(self):
+        with tempfile.TemporaryDirectory() as root:
+            folder = os.path.join(root, 'new_session')
+            with self.assertRaisesRegex(ValueError, 'fingertip midpoint'):
+                TeleoperationRun(folder, 'P01', 'S01', self.settings, [self.target],
+                                 end_effector_frame='fr3_link8', end_effector_site='attachment_site',
+                                 end_effector_reference='flange')
+            self.assertFalse(os.path.exists(folder))
 
 
 if __name__ == '__main__':

@@ -1,11 +1,12 @@
 """Local FR3 physics and rendering for the position-reaching collection task.
 
-The measured attachment site comes from MuJoCo forward dynamics. Cartesian
+The measured fingertip midpoint comes from MuJoCo forward dynamics. Cartesian
 commands drive the model's joint position actuators; commanded coordinates are
 never substituted for feedback. This backend has no ROS or real-robot output.
 """
 
 from itertools import product
+from copy import deepcopy
 from pathlib import Path
 import math
 import xml.etree.ElementTree as ET
@@ -17,10 +18,70 @@ from colmag.robot_targets import DIGIT_CUBE_CENTER_M, DIGIT_CUBE_EDGE_M
 
 
 MODEL_DIRECTORY = Path(__file__).resolve().parents[1] / 'assets' / 'teleoperation' / 'franka_fr3'
+HAND_DIRECTORY = MODEL_DIRECTORY.parent / 'franka_hand'
+GRIPPER_OPENING_M = .040
 
 
-def _scene_xml(model_directory):
+def _attach_franka_hand(root, hand_directory):
+    """Attach the licensed hand geometry, with fixed opposing pad-face sites."""
+    source = ET.parse(hand_directory / 'panda.xml').getroot()
+    hand = deepcopy(source.find('.//body[@name="hand"]'))
+    referenced_meshes = {geom.get('mesh') for geom in hand.iter('geom') if geom.get('mesh')}
+    defaults = deepcopy(source.find('default'))
+    for element in defaults.iter():
+        if 'class' in element.attrib:
+            element.set('class', 'hand_' + element.get('class'))
+    root.find('default').extend(list(defaults))
+    assets = root.find('asset')
+    for element in source.find('asset'):
+        if element.tag == 'mesh':
+            original = element.get('name', Path(element.get('file')).stem)
+            if original not in referenced_meshes:
+                continue
+            element = deepcopy(element)
+            element.set('name', 'hand_' + original)
+            element.set('file', 'hand/' + element.get('file'))
+        elif element.tag == 'material':
+            element = deepcopy(element)
+            element.set('name', 'hand_' + element.get('name'))
+            element.set('class', 'hand_' + element.get('class'))
+        else:
+            continue
+        assets.append(element)
+    for element in hand.iter():
+        for attribute in ('class', 'mesh', 'material'):
+            if attribute in element.attrib:
+                element.set(attribute, 'hand_' + element.get(attribute))
+    hand.set('name', 'franka_hand')
+    hand.set('childclass', 'hand_panda')
+    # The inner face and longitudinal centre are derived from the source
+    # contact-pad box, rather than an arbitrary point on the flange.
+    pad = source.find('.//default[@class="fingertip_pad_collision_1"]/geom')
+    pad_position = np.fromstring(pad.get('pos'), sep=' ')
+    pad_size = np.fromstring(pad.get('size'), sep=' ')
+    inner_face_y = pad_position[1] - pad_size[1]
+    displacement = GRIPPER_OPENING_M / 2 - inner_face_y
+    finger_height = None
+    for name, sign in (('left_finger', 1), ('right_finger', -1)):
+        finger = hand.find('./body[@name="{}"]'.format(name))
+        origin = np.fromstring(finger.get('pos'), sep=' ')
+        origin[1] += sign * displacement
+        finger_height = origin[2]
+        finger.set('pos', ' '.join('{:.8g}'.format(value) for value in origin))
+        for joint in list(finger.findall('joint')):
+            finger.remove(joint)
+        ET.SubElement(finger, 'site', name=name + '_tip',
+                      pos='0 {:.8g} {:.8g}'.format(inner_face_y, pad_position[2]),
+                      size='.002', rgba='0 0 0 0', group='4')
+    ET.SubElement(hand, 'site', name='gripper_center',
+                  pos='0 0 {:.8g}'.format(finger_height + pad_position[2]),
+                  size='.002', rgba='0 0 0 0', group='4')
+    root.find('.//body[@name="fr3_link7"]').append(hand)
+
+
+def _scene_xml(model_directory, hand_directory=HAND_DIRECTORY):
     root = ET.parse(model_directory / 'fr3.xml').getroot()
+    _attach_franka_hand(root, hand_directory)
     root.find('option').set('timestep', '0.002')
     visual = ET.SubElement(root, 'visual')
     ET.SubElement(visual, 'global', offwidth='1280', offheight='960')
@@ -47,7 +108,7 @@ def _scene_xml(model_directory):
 
 
 class MuJoCoRobot:
-    """A position-actuated seven-joint FR3 with a measured flange position.
+    """A position-actuated FR3 with a measured midpoint between the fingers.
 
     ``reset`` establishes the shared start pose before timing. During a trial,
     ``command_cartesian`` changes actuator setpoints and ``step`` advances real
@@ -55,6 +116,10 @@ class MuJoCoRobot:
     """
 
     backend_name = 'mujoco_franka_fr3'
+    end_effector_site = 'gripper_center'
+    end_effector_frame = 'gripper_center'
+    end_effector_reference = 'fingertip_midpoint'
+    flange_to_gripper_offset_frame = 'flange_local'
 
     def __init__(self, home=DIGIT_CUBE_CENTER_M, model_directory=None):
         try:
@@ -65,10 +130,15 @@ class MuJoCoRobot:
         directory = Path(model_directory) if model_directory else MODEL_DIRECTORY
         with zipfile.ZipFile(directory / 'meshes.zip') as archive:
             assets = {name: archive.read(name) for name in archive.namelist()}
+        with zipfile.ZipFile(HAND_DIRECTORY / 'meshes.zip') as archive:
+            assets.update({name: archive.read(name) for name in archive.namelist()})
         self.model = mujoco.MjModel.from_xml_string(_scene_xml(directory), assets=assets)
         self.data = mujoco.MjData(self.model)
         self._ik_data = mujoco.MjData(self.model)
-        self._site = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, 'attachment_site')
+        self._site = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, self.end_effector_site)
+        self._flange_site = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, 'attachment_site')
+        self._finger_sites = tuple(mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, name)
+                                   for name in ('left_finger_tip', 'right_finger_tip'))
         self._joint_ranges = self.model.jnt_range[:7].copy()
         self._reference_joints = self.model.key_qpos[0, :7].copy()
         self._reference_rotation = None
@@ -94,6 +164,23 @@ class MuJoCoRobot:
     @property
     def position(self):
         return self.data.site_xpos[self._site].copy()
+
+    @property
+    def flange_position(self):
+        return self.data.site_xpos[self._flange_site].copy()
+
+    @property
+    def fingertip_positions(self):
+        return self.data.site_xpos[list(self._finger_sites)].copy()
+
+    @property
+    def gripper_opening_m(self):
+        return float(np.linalg.norm(self.fingertip_positions[1] - self.fingertip_positions[0]))
+
+    @property
+    def flange_to_gripper_offset_m(self):
+        rotation = self.data.site_xmat[self._flange_site].reshape(3, 3)
+        return rotation.T @ (self.position - self.flange_position)
 
     @property
     def sim_time(self):
@@ -200,7 +287,7 @@ class MuJoCoRobot:
             self.mujoco.mjv_connector(geom, self.mujoco.mjtGeom.mjGEOM_CAPSULE, radius, np.asarray(first), np.asarray(second))
 
     def render(self, width=960, height=640, target=None, tolerance=.025, dwell_progress=0.0):
-        """RGB frame with FR3, task volume, target sphere and loading circle."""
+        """RGB robot scene with a faint target volume for the UI's single rim."""
         width, height = int(width), int(height)
         if width < 32 or height < 32:
             raise ValueError('render dimensions must be at least 32 pixels')
@@ -221,44 +308,57 @@ class MuJoCoRobot:
             for second in corners[first_index + 1:]:
                 if np.count_nonzero(np.abs(second - first) > .001) == 1:
                     self._line(scene, first, second, .0007, (.29, .40, .58, .24))
-        self._add_geom(scene, self.mujoco.mjtGeom.mjGEOM_SPHERE, (.009, 0, 0), self.position, (.05, .80, .63, 1))
+        self._add_geom(scene, self.mujoco.mjtGeom.mjGEOM_SPHERE, (.005, 0, 0), self.position, (.05, .80, .63, 1))
         if target is not None:
             target = self._vector(target)
-            progress = float(np.clip(dwell_progress, 0, 1))
             radius = float(tolerance)
-            self._add_geom(scene, self.mujoco.mjtGeom.mjGEOM_SPHERE, (radius, 0, 0), target, (.20, .49, 1, .16))
-            self._add_geom(scene, self.mujoco.mjtGeom.mjGEOM_SPHERE, (.004, 0, 0), target, (.17, .40, .98, .95))
-            # Camera-facing rim gives the tolerance sphere a clear circle and
-            # a visible loading segment at any depth in the workspace.
-            camera = scene.camera[0]
-            up = np.asarray(camera.up)
-            right = np.cross(np.asarray(camera.forward), up)
-            right /= np.linalg.norm(right)
-            up /= np.linalg.norm(up)
-            for index in range(64):
-                angles = (2 * math.pi * index / 64, 2 * math.pi * (index + 1) / 64)
-                endpoints = [target + radius * (math.cos(angle) * right + math.sin(angle) * up) for angle in angles]
-                loaded = index < int(progress * 64)
-                self._line(scene, endpoints[0], endpoints[1], .0013 if loaded else .0008, (.05, .8, .55, 1) if loaded else (.18, .42, .96, .8))
+            self._add_geom(scene, self.mujoco.mjtGeom.mjGEOM_SPHERE, (radius, 0, 0), target, (.20, .49, 1, .07))
         return self._renderer.render()
+
+    def _mono_camera(self):
+        # mjr_render averages these two eyes for a mono viewport. Using the
+        # left eye alone offsets overlays by several pixels from the scene.
+        return self.mujoco.mjv_averageCamera(self._renderer.scene.camera[0],
+                                           self._renderer.scene.camera[1])
 
     def project_world(self, position, width=None, height=None):
         """Return target pixel coordinates after render, or None behind camera."""
         if self._renderer is None:
             return None
         width, height = self._render_size if width is None or height is None else (width, height)
-        camera = self._renderer.scene.camera[0]
+        camera = self._mono_camera()
         delta = self._vector(position) - np.asarray(camera.pos)
         forward, up = np.asarray(camera.forward), np.asarray(camera.up)
         right = np.cross(forward, up)
+        right /= np.linalg.norm(right)
         depth = float(delta @ forward)
         if depth <= 0:
             return None
         near = float(camera.frustum_near)
-        half_height = (float(camera.frustum_top) - float(camera.frustum_bottom)) * .5
+        top, bottom = float(camera.frustum_top), float(camera.frustum_bottom)
+        half_height = (top - bottom) * .5
         half_width = half_height * float(width) / float(height)
-        projected_x, projected_y = float(delta @ right) * near / depth, float(delta @ up) * near / depth
-        return ((projected_x / half_width + 1) * width * .5, (1 - projected_y / half_height) * height * .5)
+        scale = 1.0 if camera.orthographic else near / depth
+        projected_x, projected_y = float(delta @ right) * scale, float(delta @ up) * scale
+        centre_x = float(camera.frustum_center)
+        return (((projected_x - centre_x) / half_width + 1) * width * .5,
+                (top - projected_y) / (top - bottom) * height)
+
+    def projected_radius(self, position, radius_m, width=None, height=None):
+        """Pixel radius in the camera's image plane for a physical margin."""
+        if self._renderer is None:
+            return None
+        radius_m = float(radius_m)
+        if not math.isfinite(radius_m) or radius_m <= 0:
+            raise ValueError('projected radius must be finite and positive')
+        point = self._vector(position)
+        up = np.asarray(self._mono_camera().up, dtype=float)
+        up /= np.linalg.norm(up)
+        center = self.project_world(point, width, height)
+        edge = self.project_world(point + radius_m * up, width, height)
+        if center is None or edge is None:
+            return None
+        return float(np.linalg.norm(np.asarray(edge) - np.asarray(center)))
 
     def close(self):
         if self._renderer is not None:

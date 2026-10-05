@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
-from colmag.teleoperation_control import magnet_position, pointer_position
+from colmag.teleoperation_control import magnet_position, pointer_position, wheel_height_delta
 
 
 class InputMappingTests(unittest.TestCase):
@@ -33,10 +33,68 @@ class InputMappingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             pointer_position(math.inf, 0, .4)
 
+    def test_platform_wheel_sign_magnitude_and_fine_deltas(self):
+        self.assertEqual(wheel_height_delta(button=4), .001)
+        self.assertEqual(wheel_height_delta(button=5), -.001)
+        self.assertEqual(wheel_height_delta(120, window_system='win32'), .001)
+        self.assertEqual(wheel_height_delta(-240, window_system='win32'), -.002)
+        self.assertEqual(wheel_height_delta(30, window_system='win32'), .00025)
+        self.assertEqual(wheel_height_delta(-1, window_system='aqua'), -.001)
+        self.assertEqual(wheel_height_delta(3, window_system='aqua'), .003)
+        self.assertEqual(wheel_height_delta(), 0)
+        with self.assertRaises(ValueError):
+            wheel_height_delta(math.nan)
+
 
 @unittest.skipUnless(os.environ.get('DISPLAY') and importlib.util.find_spec('mujoco'),
                      'GUI rehearsal needs MuJoCo and a display (use xvfb-run).')
 class GuiCollectionTests(unittest.TestCase):
+    def test_sidebar_wheel_and_slider_reach_exact_heights_with_measured_feedback(self):
+        import tkinter as tk
+        from tools.teleoperation_demo import parser, TeleoperationWindow
+
+        with tempfile.TemporaryDirectory() as folder:
+            args = parser().parse_args(['--output-dir', str(Path(folder) / 'session')])
+            root = tk.Tk()
+            app = TeleoperationWindow(root, args)
+            try:
+                root.update()
+                app.height_label.event_generate('<Button-5>')
+                root.update()
+                self.assertEqual(app.height, .4)  # ready pose is locked
+                app.start_trial()
+                self.assertEqual(app.height_slider.cget('state'), 'normal')
+                for unused in range(30):
+                    # Real Tk events on the sidebar must bubble to the window.
+                    app.height_label.event_generate('<Button-5>')
+                self.assertAlmostEqual(app.height, .37)
+                for height_cm in (37, 39, 40, 49.2):
+                    if height_cm != 37:
+                        app.height_slider.set(height_cm)
+                        root.update()
+                    self.assertAlmostEqual(app.height, height_cm / 100)
+                    deadline = time.monotonic() + 5
+                    while abs(app.robot.position[2] - height_cm / 100) > .0015 and time.monotonic() < deadline:
+                        root.update()
+                        time.sleep(.01)
+                    self.assertLess(abs(app.robot.position[2] - height_cm / 100), .0015)
+                    self.assertIn('Measured', app.height_label.cget('text'))
+                    self.assertIn('Command', app.command_height_label.cget('text'))
+                self.assertEqual(app.height_control, 'slider')
+                self.assertEqual(app.trial.status, 'running')
+                app.cancel()
+                self.assertEqual(app.height_slider.cget('state'), 'disabled')
+                root.geometry('1000x740')
+                root.update()
+                for widget in (app.height_slider, app.feedback):
+                    self.assertTrue(widget.winfo_ismapped())
+                    self.assertLessEqual(widget.winfo_y() + widget.winfo_height(),
+                                         widget.master.winfo_height())
+                self.assertEqual(app.run.manifest['protocol'], 'mujoco_random_target_reaching_v2')
+                self.assertEqual(app.run.manifest['end_effector_reference'], 'fingertip_midpoint')
+            finally:
+                app.close()
+
     def test_board_snapshots_are_logged_and_stale_input_cancels_the_hold(self):
         import tkinter as tk
         from tools.teleoperation_demo import parser, TeleoperationWindow
@@ -64,6 +122,7 @@ class GuiCollectionTests(unittest.TestCase):
             try:
                 root.update()
                 app.start_trial()
+                self.assertEqual(app.height_slider.cget('state'), 'disabled')
                 x, y, z = app.trial.target['position_m']
                 fraction = (z - .28) / .24
                 linear = -math.log1p(-fraction * (1 - math.exp(-2))) / 2
@@ -114,9 +173,9 @@ class GuiCollectionTests(unittest.TestCase):
                     x=(u + 1) / 2 * app.canvas.winfo_width(),
                     y=(1 - v) / 2 * app.canvas.winfo_height()))
                 # Same height increment used by wheel callbacks, without a held button.
-                steps = round((target[2] - .4) / .003)
+                steps = round((target[2] - .4) / .001)
                 for unused in range(abs(steps)):
-                    app._height_change(.003 if steps > 0 else -.003)
+                    app._height_change(.001 if steps > 0 else -.001)
                 deadline = time.monotonic() + 12
                 while not app.run.completed and time.monotonic() < deadline:
                     root.update()

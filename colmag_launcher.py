@@ -1510,7 +1510,7 @@ class DataPanel(tk.Toplevel):
             RoundEntry(row, variable, width=width, height=30, font=f.f_body,
                        parent_bg=CARD).pack(side='left')
         tk.Label(task, text='Enter starts each trial. Reach the blue target and hold for the selected duration.\n'
-                 'The circle fills while the measured flange stays inside the margin; completion saves automatically.',
+                 'The circle fills while the measured finger centre stays inside the margin; completion saves automatically.',
                  bg=CARD, fg=SUBTLE, font=f.f_small, justify='left', wraplength=690).pack(anchor='w', pady=(12, 0))
 
         self.gazebo_options = tk.Frame(self.teleop_options_content, bg=BG)

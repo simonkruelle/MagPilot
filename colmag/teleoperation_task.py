@@ -1,6 +1,7 @@
 """Measured MuJoCo target-reaching trials, independent of the GUI and hardware.
 
-The actual simulated flange determines success. Commanded positions are logged
+The actual midpoint between the simulated fingertips determines success.
+Commanded positions are logged
 separately and never contribute to the dwell timer. All elapsed measurements use
 monotonic wall time; simulation time is also retained, so pauses and resets are
 visible rather than counted as successful target holds.
@@ -21,7 +22,10 @@ from colmag.robot_targets import DIGIT_CUBE_CENTER_M, DIGIT_CUBE_EDGE_M
 from colmag.target_reaching import distance, position
 
 
-PROTOCOL_ID = 'mujoco_random_target_reaching_v1'
+PROTOCOL_ID = 'mujoco_random_target_reaching_v2'
+END_EFFECTOR_FRAME = 'gripper_center'
+END_EFFECTOR_SITE = 'gripper_center'
+END_EFFECTOR_REFERENCE = 'fingertip_midpoint'
 
 
 @dataclass(frozen=True)
@@ -100,7 +104,7 @@ TRAJECTORY_FIELDS = [
 
 
 class TeleoperationTrial:
-    """One operator-started trial receiving fresh simulated flange positions."""
+    """One operator-started trial receiving fresh simulated gripper-centre positions."""
 
     def __init__(self, target, settings, start_wall_s, start_sim_s, start_position):
         self.settings = settings
@@ -116,7 +120,7 @@ class TeleoperationTrial:
         if (settings.require_common_start and
                 distance(self.start_position, settings.start_position_m) >
                 settings.start_tolerance_m + 1e-12):
-            raise ValueError('Return the flange to the common starting position first.')
+            raise ValueError('Return the gripper centre to the common starting position first.')
         self.start_wall_s = float(start_wall_s)
         self.start_sim_s = float(start_sim_s)
         if not all(math.isfinite(value) for value in (self.start_wall_s, self.start_sim_s)):
@@ -292,7 +296,19 @@ class TeleoperationRun:
 
     def __init__(self, output_dir, participant_id, session_id, settings, targets,
                  experiment_name='', participant_name='', input_source='trackpad',
-                 magnet_count=None, seed=0, metadata=None):
+                 magnet_count=None, seed=0, metadata=None, *,
+                 end_effector_frame=END_EFFECTOR_FRAME,
+                 end_effector_site=END_EFFECTOR_SITE,
+                 end_effector_reference=END_EFFECTOR_REFERENCE):
+        reference = dict(end_effector_frame=end_effector_frame,
+                         end_effector_site=end_effector_site,
+                         end_effector_reference=end_effector_reference)
+        expected = dict(end_effector_frame=END_EFFECTOR_FRAME,
+                        end_effector_site=END_EFFECTOR_SITE,
+                        end_effector_reference=END_EFFECTOR_REFERENCE)
+        if reference != expected:
+            raise ValueError('Protocol v2 measures the gripper_center fingertip midpoint; '
+                             'flange recordings belong to their original protocol.')
         if input_source not in ('serial', 'trackpad'):
             raise ValueError('input_source must be serial or trackpad')
         if (magnet_count is not None and (isinstance(magnet_count, bool) or
@@ -310,15 +326,17 @@ class TeleoperationRun:
         self.experiment_name = experiment_name
         self.input_source = input_source
         self.magnet_count = magnet_count
+        self.end_effector_identity = reference
         self.manifest = dict(
             schema_version=1, protocol=PROTOCOL_ID,
-            task='virtual_random_target_reaching', source='mujoco_measured_flange',
+            task='virtual_random_target_reaching', source='mujoco_measured_gripper_center',
             created_utc=datetime.now(timezone.utc).isoformat(),
             participant_id=participant_id, participant_name=participant_name,
             session_id=session_id, experiment_name=experiment_name,
             input_source=input_source, magnet_count=magnet_count, seed=seed,
-            robot_base_frame='fr3_link0', end_effector_frame='fr3_link8',
-            end_effector_reference='flange', position_units='m', elapsed_time_units='s',
+            robot_base_frame='fr3_link0', **reference,
+            end_effector_description='Midpoint between the two simulated fingertips',
+            position_units='m', elapsed_time_units='s',
             timing='monotonic wall time from Enter through uninterrupted measured dwell',
             completion_includes_dwell=True,
             target_sampling='uniform within tolerance-inset cube, excluding start distance',
@@ -376,7 +394,7 @@ class TeleoperationRun:
             self._write_csv(os.path.join(pending, trace_name), TRAJECTORY_FIELDS, frozen_rows)
             self._write_json(os.path.join(pending, result_name),
                              dict(row, protocol=PROTOCOL_ID, target=trial.target,
-                                  settings=asdict(self.settings)))
+                                  settings=asdict(self.settings), **self.end_effector_identity))
             self._write_csv(os.path.join(pending, 'summary.csv'), SUMMARY_FIELDS, completed)
             self._write_json(os.path.join(pending, 'manifest.json'), manifest)
             # Keep the prior summary available until the manifest commits.
