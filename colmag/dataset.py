@@ -13,11 +13,15 @@ The launcher's Data window uses these functions. They only use the standard
 library, so they can be tested without a display or the sensor board.
 """
 
+import csv
+import hashlib
 import json
+import math
 import os
 import re
 import tempfile
 from datetime import date
+from functools import lru_cache
 
 from colmag.collection_protocol import DIGITS, LETTERS, TARGET_REPS
 
@@ -26,6 +30,8 @@ DATA_DIR_NAME = 'data_collection'
 DEMO_DIR = 'demo'
 CHARACTERS_DIR = 'characters'
 TRACKING_DIR = 'tracking_error'
+TELEOPERATION_DIR = 'teleoperation'
+VIRTUAL_TASK_DIR = 'virtual_task'
 PARTICIPANTS_FILE = 'participants.json'
 COLLECTION_SETTINGS_FILE = 'collection_settings.json'
 SCHEMA_VERSION = 1
@@ -282,6 +288,276 @@ def progress(samples, participant_ids, height_mm):
                for participant_id, counts in coverage.items()
                if participant_id in participant_ids
                for n in counts.values())
+
+
+# ── Teleoperation experiments ──────────────────────────────────────────────
+
+def _teleoperation_json(path):
+    def reject_constant(value):
+        raise ValueError('nonfinite JSON number')
+
+    with open(path, encoding='utf-8') as stream:
+        return json.load(stream, parse_constant=reject_constant)
+
+
+def _teleoperation_text(value, default=''):
+    if value is None:
+        return default
+    if not isinstance(value, str):
+        raise ValueError('invalid text metadata')
+    return value.strip()
+
+
+def _teleoperation_source(value):
+    source = _teleoperation_text(value, default='unknown')
+    return 'trackpad' if source == 'touchpad' else source
+
+
+def _teleoperation_target_valid(target):
+    if not isinstance(target, dict):
+        return False
+    point, repetition = target.get('position_m'), target.get('repetition')
+    return (isinstance(target.get('target_id'), str) and bool(target['target_id']) and
+            isinstance(repetition, int) and not isinstance(repetition, bool) and repetition > 0 and
+            isinstance(point, (list, tuple)) and len(point) == 3 and all(
+                isinstance(value, (int, float)) and not isinstance(value, bool) and
+                math.isfinite(value) for value in point))
+
+
+def _teleoperation_artifact(folder, filename):
+    """Only inspect the recorder's own files, never an absolute or escaped path."""
+    if (not isinstance(filename, str) or not filename or
+            os.path.basename(filename) != filename or filename.startswith('.')):
+        raise ValueError('invalid artefact filename')
+    path = os.path.realpath(os.path.join(folder, filename))
+    if os.path.dirname(path) != os.path.realpath(folder):
+        raise ValueError('artefact outside session')
+    return path
+
+
+@lru_cache(maxsize=512)
+def _teleoperation_trace(path, mode, modified_ns, size):
+    """Validate once per immutable file revision; repeated GUI refreshes stay cheap."""
+    axes = ('actual_x_m', 'actual_y_m', 'actual_z_m') if mode == 'mujoco' else (
+        'x_m', 'y_m', 'z_m')
+    fields = ('wall_elapsed_s', 'sim_elapsed_s') + axes
+    count, endpoint = 0, None
+    with open(path, newline='', encoding='utf-8') as stream:
+        reader = csv.DictReader(stream)
+        if not reader.fieldnames or not set(fields).issubset(reader.fieldnames):
+            raise ValueError('invalid trajectory header')
+        for sample in reader:
+            if None in sample or any(value is None for value in sample.values()):
+                raise ValueError('incomplete trajectory row')
+            values = [float(sample[field]) for field in fields]
+            if not all(math.isfinite(value) for value in values):
+                raise ValueError('nonfinite trajectory row')
+            endpoint = tuple(values[-3:])
+            count += 1
+    return count, endpoint
+
+
+def _teleoperation_trial(folder, row, manifest, mode, participant_id, session_id,
+                         experiment_name, input_source):
+    """A manifest row is committed only when its matching artefacts are readable."""
+    if not isinstance(row, dict):
+        raise ValueError('invalid trial record')
+    number, samples = row.get('trial'), row.get('samples')
+    if (isinstance(number, bool) or not isinstance(number, int) or number < 1 or
+            isinstance(samples, bool) or not isinstance(samples, int) or samples < 0):
+        raise ValueError('invalid trial count')
+    statuses = ('completed', 'cancelled', 'timed_out', 'feedback_lost',
+                'clock_reset', 'simulation_stopped')
+    if row.get('status') not in statuses:
+        raise ValueError('unfinished or invalid trial')
+    if row.get('participant_id') != participant_id:
+        raise ValueError('inconsistent participant')
+    if mode == 'mujoco':
+        if (row.get('session_id') != session_id or
+                _teleoperation_text(row.get('experiment_name')) != experiment_name or
+                _teleoperation_source(row.get('input_source')) != input_source):
+            raise ValueError('inconsistent trial metadata')
+        result = _teleoperation_json(_teleoperation_artifact(folder, row.get('result_json')))
+        if not isinstance(result, dict) or any(
+                key not in result or result[key] != value for key, value in row.items()):
+            raise ValueError('inconsistent result')
+        if result.get('protocol') != manifest['protocol']:
+            raise ValueError('inconsistent result protocol')
+        for key in ('end_effector_frame', 'end_effector_site', 'end_effector_reference'):
+            # Protocol v1's original result writer stored the flange identity
+            # only in the session manifest. Later v2 results repeat it per trial.
+            if (key in manifest and
+                    (manifest['protocol'].endswith('_v2') or key in result) and
+                    result.get(key) != manifest[key]):
+                raise ValueError('inconsistent result reference')
+    elif row.get('condition') != manifest.get('condition'):
+        raise ValueError('inconsistent condition')
+    trace_path = _teleoperation_artifact(folder, row.get('trajectory_csv'))
+    stat = os.stat(trace_path)
+    count, endpoint = _teleoperation_trace(trace_path, mode, stat.st_mtime_ns, stat.st_size)
+    if count != samples:
+        raise ValueError('inconsistent trajectory count')
+    if endpoint is not None:
+        end_values = [row.get('end_{}_m'.format(axis)) for axis in 'xyz']
+        if any(isinstance(value, bool) or not isinstance(value, (int, float)) or
+               not math.isfinite(value) or not math.isclose(value, actual, abs_tol=1e-9)
+               for value, actual in zip(end_values, endpoint)):
+            raise ValueError('inconsistent trajectory endpoint')
+    if row['status'] == 'completed':
+        duration = row.get('completion_time_s')
+        if (not count or isinstance(duration, bool) or
+                not isinstance(duration, (int, float)) or not math.isfinite(duration) or
+                duration <= 0):
+            raise ValueError('empty or invalid completed trial')
+    return number, row['status']
+
+
+def scan_teleoperation_runs(data_dir):
+    """Return (sessions, problems) for committed local MuJoCo and Gazebo records.
+
+    Successful samples require a completed manifest row and a matching, nonempty
+    trajectory. MuJoCo additionally requires its matching result JSON. The older
+    Gazebo writer keeps its result in the manifest itself. Pending directories,
+    orphan files and plan-only runs never contribute. Bad files are reported and
+    skipped without preventing other participants' progress from being shown.
+    """
+    runs, problems, seen_sessions = [], {}, set()
+
+    def skip(reason):
+        problems[reason] = problems.get(reason, 0) + 1
+
+    for mode, root_name in (('mujoco', TELEOPERATION_DIR), ('gazebo', VIRTUAL_TASK_DIR)):
+        root = os.path.join(data_dir, root_name)
+        for folder, directories, filenames in os.walk(root):
+            directories[:] = sorted(name for name in directories if not name.startswith('.'))
+            if 'manifest.json' not in filenames:
+                continue
+            try:
+                manifest = _teleoperation_json(os.path.join(folder, 'manifest.json'))
+                if not isinstance(manifest, dict) or manifest.get('schema_version') != 1:
+                    raise ValueError('invalid manifest')
+                if manifest.get('source') == 'plan_only':
+                    continue
+                metadata, settings = manifest.get('metadata', {}), manifest.get('settings', {})
+                targets, trials = manifest.get('targets'), manifest.get('trials')
+                if (not isinstance(metadata, dict) or not isinstance(settings, dict) or
+                        not isinstance(targets, list) or not all(_teleoperation_target_valid(t) for t in targets) or
+                        not isinstance(trials, list)):
+                    raise ValueError('invalid manifest shape')
+                participant_id = _teleoperation_text(manifest.get('participant_id'))
+                session_id = _teleoperation_text(manifest.get(
+                    'session_id' if mode == 'mujoco' else 'run_id'))
+                if not participant_id or not session_id:
+                    raise ValueError('missing participant or session')
+                if mode == 'mujoco':
+                    protocol = manifest.get('protocol')
+                    if protocol not in ('mujoco_random_target_reaching_v1',
+                                        'mujoco_random_target_reaching_v2'):
+                        raise ValueError('unknown MuJoCo protocol')
+                    expected_source = ('mujoco_measured_flange' if protocol.endswith('_v1')
+                                       else 'mujoco_measured_gripper_center')
+                    if manifest.get('source') != expected_source:
+                        raise ValueError('invalid measured source')
+                    references = (dict(end_effector_frame='fr3_link8', end_effector_reference='flange')
+                                  if protocol.endswith('_v1') else dict(
+                                      end_effector_frame='gripper_center', end_effector_site='gripper_center',
+                                      end_effector_reference='fingertip_midpoint'))
+                    if any(manifest.get(key) != value for key, value in references.items()):
+                        raise ValueError('invalid measured reference')
+                    name_data = manifest
+                else:
+                    if manifest.get('source') != 'gazebo_measured_tf':
+                        raise ValueError('invalid measured source')
+                    protocol = manifest.get('protocol', 'gazebo_target_reaching_pilot_v1')
+                    name_data = metadata
+                experiment_name = _teleoperation_text(name_data.get('experiment_name'))
+                participant_name = _teleoperation_text(name_data.get('participant_name'))
+                input_source = _teleoperation_source(name_data.get('input_source'))
+                if input_source not in ('trackpad', 'serial', 'unknown'):
+                    raise ValueError('invalid input source')
+                if mode == 'mujoco' and input_source == 'unknown':
+                    raise ValueError('missing input source')
+                condition = _teleoperation_text(manifest.get('condition'))
+                identity = mode, participant_id, session_id
+                if identity in seen_sessions:
+                    skip('duplicate session')
+                    continue
+                config = dict(mode=mode, protocol=protocol, input_source=input_source,
+                              condition=condition, settings=settings,
+                              seed=manifest.get('seed'), targets=targets,
+                              magnet_count=manifest.get('magnet_count', metadata.get('magnet_count')),
+                              end_effector_reference=manifest.get('end_effector_reference'),
+                              end_effector_frame=manifest.get('end_effector_frame'),
+                              end_effector_site=manifest.get('end_effector_site'),
+                              mapping={key: value for key, value in metadata.items() if
+                                       key.startswith(('pointer_', 'board_', 'gripper_', 'flange_', 'wheel_')) or
+                                       key in ('camera', 'position_control', 'height_controls',
+                                               'height_slider_resolution_m', 'backend')})
+                configuration_id = hashlib.sha256(json.dumps(
+                    config, sort_keys=True, allow_nan=False).encode('utf-8')).hexdigest()[:16]
+            except (OSError, ValueError, TypeError):
+                skip('unreadable or invalid session')
+                continue
+            seen_sessions.add(identity)
+            status_counts, trial_ids = {}, set()
+            for row in trials:
+                try:
+                    number, status = _teleoperation_trial(
+                        folder, row, manifest, mode, participant_id, session_id,
+                        experiment_name, input_source)
+                    if number in trial_ids:
+                        skip('duplicate trial')
+                        continue
+                    trial_ids.add(number)
+                    status_counts[status] = status_counts.get(status, 0) + 1
+                except (OSError, ValueError, TypeError, csv.Error):
+                    skip('incomplete or inconsistent trial')
+            runs.append(dict(
+                participant_id=participant_id, participant_name=participant_name,
+                session_id=session_id, experiment_name=experiment_name, mode=mode,
+                input_source=input_source, condition=condition, protocol=protocol,
+                configuration_id=configuration_id, configuration=config,
+                completed=status_counts.get('completed', 0), attempts=sum(status_counts.values()),
+                status_counts=status_counts, planned=len(targets), target_count=len(targets),
+                created_utc=manifest.get('created_utc', ''), folder=folder))
+    return runs, problems
+
+
+def count_teleoperation_coverage(runs, experiment_name=None, mode=None,
+                                 input_source=None, condition=None):
+    """Aggregate per participant across sessions matching the selected experiment.
+
+    None accepts every value; '' selects exactly the unnamed experiment. Names
+    and conditions are trimmed, with case preserved. Planned counts come from
+    saved session manifests, rather than the launcher's next-session settings.
+    """
+    experiment_name = (None if experiment_name is None else experiment_name.strip())
+    condition = None if condition is None else condition.strip()
+    coverage, seen_sessions = {}, set()
+    for run in runs:
+        if any(expected is not None and run[key] != expected for key, expected in (
+                ('experiment_name', experiment_name), ('mode', mode),
+                ('input_source', input_source), ('condition', condition))):
+            continue
+        identity = run['mode'], run['participant_id'], run['session_id']
+        if identity in seen_sessions:
+            continue
+        seen_sessions.add(identity)
+        counts = coverage.setdefault(run['participant_id'], dict(
+            completed=0, attempts=0, sessions=0, planned=0,
+            status_counts={}, input_counts={}, protocols=[], configurations=[]))
+        for key in ('completed', 'attempts', 'planned'):
+            counts[key] += run[key]
+        counts['sessions'] += 1
+        for status, count in run['status_counts'].items():
+            counts['status_counts'][status] = counts['status_counts'].get(status, 0) + count
+        source = run['input_source']
+        counts['input_counts'][source] = counts['input_counts'].get(source, 0) + run['completed']
+        for key, value in (('protocols', run['protocol']), ('configurations', run['configuration_id'])):
+            if value not in counts[key]:
+                counts[key].append(value)
+                counts[key].sort()
+    return coverage
 
 
 # ── Tracking error runs ─────────────────────────────────────────────────────

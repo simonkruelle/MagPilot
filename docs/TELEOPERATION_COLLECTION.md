@@ -17,7 +17,7 @@ For the random-target demo, select **MuJoCo demo → Start**.
 - **Loading ring:** fills during the hold; leaving the sphere resets it.
 - **Saved automatically:** Enter starts the next target. Escape cancels and logs the attempt.
 
-<img src="teleoperation_data.png" width="560" alt="Data window with MuJoCo demo and Gazebo pilot choices in the Teleoperation Pipeline">
+<img src="teleoperation_data.png" width="560" alt="Data window with experiment history and per-participant teleoperation recording progress">
 
 ![MuJoCo target-reaching collection](teleoperation.png)
 
@@ -32,6 +32,19 @@ last scene ray, so within the cube the tool remains under that scene point while
 moving along the ray: X/Y can change together with Z. Before the first scene
 movement, height controls retain the common start's X/Y. The inset exposes depth differences
 that can be hidden when the two markers overlap in the main view.
+
+## Recording progress
+
+- **Named participant rows:** completed / planned targets, a progress bar and session count.
+- **History:** select a recorded experiment; this sets the shared experiment field for viewing and new starts.
+- **MuJoCo:** progress follows the selected input. Board and trackpad recordings stay separate.
+- **Gazebo:** progress follows the selected condition; input totals use each run's recorded source.
+- **Saved:** only valid, completed trials count toward progress. Cancelled and failed trials remain attempts.
+- **Planned:** totals come from all matching session plans, including unfinished sessions; changing the next Start's batch size does not change them.
+- **Refresh:** updates automatically every five seconds; the Refresh button updates immediately.
+
+Progress is a recording inventory. Mixed protocols or setups show their counts;
+use the matching controls and protocol rules below for performance comparisons.
 
 ## Setup
 

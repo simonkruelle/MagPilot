@@ -297,6 +297,8 @@ Point into the visible workspace and adjust Z with scrolling or the height slide
 The green point marks the measured finger centre; the top view reveals depth.
 The **Gazebo pilot** is in the same Data tab, with shared experiment and
 participant details; it records the arm controlled by the running Interface.
+Participant rows show **saved / planned targets**, a progress bar and session count
+for the selected experiment. **History** revisits earlier experiments; counts update automatically.
 
 <p align="center">
   <img src="docs/teleoperation.png" width="880" alt="MuJoCo teleoperation collection: Franka two-finger gripper, single target ring, height slider and continuous hold progress">

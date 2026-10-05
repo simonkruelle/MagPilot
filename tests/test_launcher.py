@@ -779,6 +779,81 @@ class TeleoperationCollectionTests(unittest.TestCase):
 @unittest.skipUnless(_os.environ.get('COLMAG_TEST_LAUNCHER_GUI') == '1',
                      'set COLMAG_TEST_LAUNCHER_GUI=1 under a display for the Data panel rehearsal')
 class TeleoperationPanelGuiTests(unittest.TestCase):
+    def test_saved_progress_follows_experiment_input_participant_and_live_saves(self):
+        from colmag import dataset
+        from colmag.teleoperation_task import TeleoperationRun, TeleoperationSettings, TeleoperationTrial, random_targets
+        import tkinter as tk
+
+        settings = TeleoperationSettings()
+        targets = random_targets(10, 0, settings)
+
+        def save_trial(run, status='completed'):
+            trial = TeleoperationTrial(targets[0], settings, 0, 0, settings.start_position_m)
+            for step in range(1, 24):
+                trial.update(step / 10, step / 10, targets[0]['position_m'])
+                if trial.status != 'running' or status != 'completed':
+                    break
+            if status != 'completed':
+                trial.finish(status, .2, .2)
+            run.save_trial(trial)
+
+        with tempfile.TemporaryDirectory() as folder:
+            dataset.save_participants(folder, [dict(dataset.new_participant('P01'), name='Ada'),
+                                               dict(dataset.new_participant('P02'), name='Bob')])
+            def make_run(pid, sid, experiment='Experiment A', source='trackpad'):
+                return TeleoperationRun(_os.path.join(folder, 'teleoperation', pid, sid),
+                    pid, sid, settings, targets, experiment_name=experiment, input_source=source)
+            first = make_run('P01', 'S01')
+            save_trial(first)
+            save_trial(first, 'cancelled')
+            save_trial(make_run('P01', 'S02'))
+            save_trial(make_run('P02', 'S01'))
+            save_trial(make_run('P01', 'S03', source='serial'))
+            save_trial(make_run('P01', 'S04', experiment='Experiment B'))
+            parent = tk.Tk()
+            for name, font in [('f_title', ('Arial', 20)), ('f_h', ('Arial', 12)),
+                               ('f_body', ('Arial', 11)), ('f_small', ('Arial', 9)), ('f_btn', ('Arial', 11))]:
+                setattr(parent, name, font)
+            panel = DataPanel(parent, data_dir=folder)
+            try:
+                panel.pipeline.set('teleoperation')
+                panel.experiment_name.set('Experiment A')
+                panel._pipeline_changed()
+                parent.update()
+                self.assertEqual(panel.teleop_coverage['P01']['completed'], 2)
+                self.assertEqual(panel.teleop_coverage['P01']['attempts'], 3)
+                self.assertEqual(panel.teleop_coverage['P01']['planned'], 20)
+                self.assertEqual(panel.teleop_coverage['P02']['completed'], 1)
+                self.assertEqual(panel.teleop_progress_widgets['P01'].itemcget('count', 'text'), '2 / 20')
+                self.assertIn('1 incomplete', panel.teleop_status.cget('text'))
+                # A freshly committed trial must appear without reopening Data.
+                save_trial(first)
+                panel._rescan()
+                parent.update()
+                self.assertEqual(panel.teleop_progress_widgets['P01'].itemcget('count', 'text'), '3 / 20')
+                self.assertEqual(panel.teleop_coverage['P01']['sessions'], 2)
+                panel.teleop_source.set('serial')
+                parent.update()
+                self.assertEqual(panel.teleop_progress_widgets['P01'].itemcget('count', 'text'), '1 / 10')
+                self.assertEqual(panel.teleop_progress_widgets['P02'].itemcget('count', 'text'), '0 / 0')
+                # History selects the same experiment field used for new starts.
+                with mock.patch('colmag_launcher.tk.Menu') as menu_factory:
+                    panel._choose_recorded_experiment()
+                    entries = [call.kwargs for call in menu_factory.return_value.add_command.call_args_list]
+                    self.assertEqual({entry['label'] for entry in entries}, {'Experiment A', 'Experiment B'})
+                    next(entry['command'] for entry in entries if entry['label'] == 'Experiment B')()
+                panel.teleop_source.set('trackpad')
+                parent.update()
+                self.assertEqual(panel.teleop_progress_widgets['P01'].itemcget('count', 'text'), '1 / 10')
+                self.assertNotIn('P02', panel.teleop_coverage)
+                # Editing the next batch size cannot rewrite recorded plans.
+                panel.teleop_trials.set('30')
+                panel._update_teleop_summary()
+                self.assertEqual(panel.teleop_progress_widgets['P01'].itemcget('count', 'text'), '1 / 10')
+            finally:
+                panel.destroy()
+                parent.destroy()
+
     def test_named_participant_start_routes_selected_settings_from_new_tab(self):
         from colmag import dataset
         import tkinter as tk

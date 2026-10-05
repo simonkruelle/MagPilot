@@ -1229,6 +1229,13 @@ class DataPanel(tk.Toplevel):
 
         self.participants = []
         self.samples = []
+        self.teleop_runs = []
+        self.teleop_scan_problems = {}
+        self.teleop_coverage = {}
+        self.teleop_progress_widgets = {}
+        self._teleop_refresh_job = None
+        self._teleop_scope_traces = []
+        self._rescan_job = None
         self.participants_error = None
         self.collection_settings_error = None
         self.record = None  # participant shown in the form
@@ -1272,6 +1279,9 @@ class DataPanel(tk.Toplevel):
             value=','.join(str(h) for h in dataset.HEIGHTS_MM if h > 0))
 
         self._build()
+        for variable in (self.experiment_name, self.teleop_source, self.pilot_condition):
+            self._teleop_scope_traces.append((variable,
+                variable.trace_add('write', self._teleop_scope_changed)))
         if self.collection_settings_error:
             messagebox.showerror(
                 'Collection settings',
@@ -1295,7 +1305,7 @@ class DataPanel(tk.Toplevel):
                        self.winfo_screenheight() - self.winfo_reqheight() - 64))
         self.geometry('+{}+{}'.format(x, y))
         self.focus_set()
-        self.after(self.RESCAN_MS, self._rescan)
+        self._rescan_job = self.after(self.RESCAN_MS, self._rescan)
 
     # ── Layout ──────────────────────────────────────────────────────────────
 
@@ -1326,6 +1336,9 @@ class DataPanel(tk.Toplevel):
                    font=f.f_body, parent_bg=CARD).pack(side='left')
         Pill(row, 'Save', self._save_experiment, kind='primary', width=80,
              font=f.f_btn).pack(side='right')
+        self.experiment_history = Pill(row, 'History', self._choose_recorded_experiment,
+             kind='plain', width=80, font=f.f_body)
+        self.experiment_history.pack(side='right', padx=(8, 8))
         tk.Label(experiment, text='Included in character and teleoperation sessions.',
                  bg=CARD, fg=SUBTLE, font=f.f_small).pack(anchor='w', pady=(8, 0))
 
@@ -1537,7 +1550,17 @@ class DataPanel(tk.Toplevel):
         tk.Label(task, text='Uses the running Interface input and observes actual Gazebo flange feedback.\n'
                  'Condition is a log label. Robot controls remain in the Interface window.',
                  bg=CARD, fg=SUBTLE, font=f.f_small, justify='left', wraplength=630).pack(anchor='w', pady=(10, 0))
-        people = self._box('Choose a participant', parent=self.teleoperation_panel)
+        people = self._box('Participants · recording progress', parent=self.teleoperation_panel)
+        people.pack_configure(pady=8)
+        self.teleop_scope = people.title_label
+        self.teleop_scope.configure(wraplength=690)
+        table_header = tk.Frame(people, bg=CARD)
+        table_header.pack(fill='x', pady=(0, 4))
+        for text, width in (('Participant', 220), ('Saved / planned', 230), ('Sessions', 70)):
+            column = tk.Frame(table_header, bg=CARD, width=width, height=18)
+            column.pack(side='left')
+            column.pack_propagate(False)
+            tk.Label(column, text=text, bg=CARD, fg=SUBTLE, font=f.f_small).pack(anchor='w')
         list_holder = tk.Frame(people, bg=CARD)
         list_holder.pack(fill='x')
         self.teleop_view = tk.Canvas(list_holder, bg=CARD, highlightthickness=0,
@@ -1564,12 +1587,13 @@ class DataPanel(tk.Toplevel):
 
     def _box(self, title, parent=None):
         parent = self if parent is None else parent
-        tk.Label(parent, text=title, bg=BG, fg=TEXT, font=self.parent.f_h).pack(
-            anchor='w', padx=28, pady=(12, 4))
+        title_label = tk.Label(parent, text=title, bg=BG, fg=TEXT, font=self.parent.f_h)
+        title_label.pack(anchor='w', padx=28, pady=(12, 4))
         box = tk.Frame(parent, bg=CARD, highlightbackground=BORDER,
                        highlightthickness=1)
         box.pack(fill='x', padx=28)
         inner = tk.Frame(box, bg=CARD)
+        inner.title_label = title_label
         inner.pack(fill='x', padx=14, pady=12)
         return inner
 
@@ -1621,7 +1645,7 @@ class DataPanel(tk.Toplevel):
             self.teleop_scroll.pack(side='right', fill='y')
         else:
             self.teleop_scroll.pack_forget()
-        available = max(80, budget - people_visible)
+        available = max(40, budget - people_visible)
         visible = min(height, available)
         self.teleop_options_view.configure(height=visible,
             scrollregion=(0, 0, WIDTH - 40, height))
@@ -1641,38 +1665,147 @@ class DataPanel(tk.Toplevel):
         return 'break'
 
     def _update_teleop_summary(self):
+        self._show_teleop_participants()
+        excluded_ids = {p['participant_id'] for p in self.participants if p.get('excluded')}
+        counts = [count for pid, count in self.teleop_coverage.items() if pid not in excluded_ids]
+        completed = sum(count['completed'] for count in counts)
+        planned = sum(count['planned'] for count in counts)
+        attempts = sum(count['attempts'] for count in counts)
+        sessions = sum(count['sessions'] for count in counts)
+        scope = self.experiment_name.get().strip() or 'Unnamed experiment'
+        details = '{} saved · {} attempts · {} sessions'.format(completed, attempts, sessions)
+        if attempts > completed:
+            details += ' · {} incomplete'.format(attempts - completed)
+        protocols = {value for count in counts for value in count['protocols']}
+        configurations = {value for count in counts for value in count['configurations']}
+        if len(protocols) > 1:
+            details += ' · {} protocols'.format(len(protocols))
+        if len(configurations) > 1:
+            details += ' · {} setups'.format(len(configurations))
+        if self.teleop_scan_problems:
+            details += ' · {} skipped records'.format(sum(self.teleop_scan_problems.values()))
         if self.teleop_mode.get() == 'gazebo':
-            self.summary.configure(text='Gazebo FR3 · cube corners · measured end-effector feedback')
+            self.summary.configure(text='Gazebo · {} / {} targets saved'.format(completed, planned))
+            sources = {}
+            for count in counts:
+                for source, total in count['input_counts'].items():
+                    sources[source] = sources.get(source, 0) + total
+            source_details = ' · '.join('{} {}'.format(label, sources.get(source, 0))
+                for source, label in (('trackpad', 'Trackpad'), ('serial', 'Board'), ('unknown', 'Unspecified'))
+                if sources.get(source))
+            self.teleop_scope.configure(text='{} · Gazebo · {}'.format(scope,
+                self.pilot_condition.get().strip() or 'Unnamed condition') +
+                (' · ' + source_details if source_details else ''))
             self.recording_help.configure(text='Start Robot → Arm nodes → Interface in Simulation first.\n'
                                           'Enter starts a trial; controls stay in the Interface window.')
             running = self.parent.__dict__.get('_virtual_task_running', False)
-            self.teleop_status.configure(text='Gazebo pilot running. Close its window or use Stop to finish recording.'
-                                        if running else 'Saved pilot runs: data_collection/virtual_task/<run-id>/')
+            self.teleop_status.configure(text=details +
+                (' · Recording…' if running else ' · Updates every 5 s'))
+            self._fit_teleop_options()
             return
-        self.summary.configure(text='MuJoCo FR3 · random positions · measured end-effector feedback')
+        source = 'Sensor board' if self.teleop_source.get() == 'serial' else 'Trackpad'
+        self.summary.configure(text='MuJoCo · {} · {} / {} targets saved'.format(source, completed, planned))
+        self.teleop_scope.configure(text='{} · MuJoCo · {}'.format(scope, source))
         self.recording_help.configure(text='Start opens the simulation. Enter begins a trial; hold inside the target to save.\n'
                                       'Trackpad / mouse runs without Docker. Sensor board uses the main window\'s port #.')
         status = self.parent.__dict__.get('_teleoperation_process')
         running = status is not None and status.poll() is None
-        self.teleop_status.configure(text='Simulation running. Close its window or use Stop to finish the session.'
-                                    if running else 'Saved trials: data_collection/teleoperation/<participant>/<session>/')
+        self.teleop_status.configure(text=details +
+            (' · Recording…' if running else ' · Updates every 5 s'))
+        self._fit_teleop_options()
+
+    def _teleop_scope_changed(self, *_args):
+        if self._teleop_refresh_job is not None:
+            self.after_cancel(self._teleop_refresh_job)
+        self._teleop_refresh_job = self.after_idle(self._refresh_teleop_view)
+
+    def _refresh_teleop_view(self):
+        self._teleop_refresh_job = None
+        if self.pipeline.get() == 'teleoperation':
+            self._update_teleop_summary()
+            self._fit_teleop_options()
+
+    def _choose_recorded_experiment(self):
+        menu = tk.Menu(self, tearoff=False, bg=CARD, fg=TEXT,
+                       activebackground=TRACK, activeforeground=TEXT,
+                       font=self.parent.f_body)
+        names = sorted({run['experiment_name'] for run in self.teleop_runs}, key=str.casefold)
+        if not names:
+            menu.add_command(label='No recorded experiments yet', state='disabled')
+        for name in names:
+            menu.add_command(label=name or 'Unnamed experiment',
+                             command=lambda name=name: self.experiment_name.set(name))
+        try:
+            menu.tk_popup(self.experiment_history.winfo_rootx(),
+                          self.experiment_history.winfo_rooty() + self.experiment_history.winfo_height())
+        finally:
+            menu.grab_release()
+
+    def destroy(self):
+        if self._teleop_refresh_job is not None:
+            self.after_cancel(self._teleop_refresh_job)
+            self._teleop_refresh_job = None
+        if self._rescan_job is not None:
+            self.after_cancel(self._rescan_job)
+            self._rescan_job = None
+        for variable, trace in self._teleop_scope_traces:
+            variable.trace_remove('write', trace)
+        self._teleop_scope_traces = []
+        super().destroy()
+
+    def _scan_teleop_progress(self):
+        self.teleop_runs, self.teleop_scan_problems = dataset.scan_teleoperation_runs(self.data_dir)
 
     def _show_teleop_participants(self):
+        gazebo = self.teleop_mode.get() == 'gazebo'
+        self.teleop_coverage = dataset.count_teleoperation_coverage(
+            self.teleop_runs, experiment_name=self.experiment_name.get().strip(),
+            mode='gazebo' if gazebo else 'mujoco',
+            input_source=None if gazebo else self.teleop_source.get(),
+            condition=self.pilot_condition.get().strip() if gazebo else None)
+        self.teleop_progress_widgets = {}
         for child in self.teleop_participants.winfo_children():
             child.destroy()
-        if not self.participants:
+        registered = {p['participant_id'] for p in self.participants}
+        rows = list(self.participants) + [
+            {'participant_id': pid, 'name': next((run['participant_name'] for run in self.teleop_runs
+                if run['participant_id'] == pid and run['participant_name']), '')}
+            for pid in sorted(self.teleop_coverage) if pid not in registered]
+        if not rows:
             tk.Label(self.teleop_participants, text='Add a name in the participant form and press Save.',
                      bg=CARD, fg=SUBTLE, font=self.parent.f_body).pack(anchor='w')
-        for participant in self.participants:
+        for participant in rows:
             row = tk.Frame(self.teleop_participants, bg=CARD)
             row.pack(fill='x', pady=3)
+            known = participant['participant_id'] in registered
             label = tk.Label(row, text=dataset.participant_label(participant),
-                             bg=CARD, fg=BLUE, font=self.parent.f_body, cursor='hand2')
-            label.pack(side='left')
+                             width=22, anchor='w', bg=CARD,
+                             fg=BLUE if known and not participant.get('excluded') else SUBTLE,
+                             font=self.parent.f_body, cursor='hand2' if known else '')
+            label.grid(row=0, column=0, sticky='w')
+            row.columnconfigure(0, minsize=220)
+            row.columnconfigure(1, minsize=230)
+            row.columnconfigure(2, minsize=70)
             pid = participant['participant_id']
-            label.bind('<Button-1>', lambda _, pid=pid: self.load_participant(pid))
-            Pill(row, 'Start', lambda pid=pid: self.start_teleoperation(pid),
-                 kind='primary', width=80, height=28, font=self.parent.f_body).pack(side='right')
+            count = self.teleop_coverage.get(pid, {})
+            completed, planned = count.get('completed', 0), count.get('planned', 0)
+            progress = tk.Canvas(row, width=220, height=28, bg=CARD, highlightthickness=0)
+            progress.grid(row=0, column=1, sticky='w')
+            self.teleop_progress_widgets[pid] = progress
+            progress.create_text(0, 14, anchor='w', text='{} / {}'.format(completed, planned),
+                                 fill=TEXT, font=self.parent.f_body, tags='count')
+            round_rect(progress, 98, 11, 214, 17, 3, fill=TRACK, outline='')
+            fraction = min(1, completed / planned) if planned else 0
+            if fraction:
+                colour = GREEN if completed >= planned else BLUE
+                round_rect(progress, 98, 11, 98 + max(6, 116 * fraction), 17, 3,
+                           fill=colour, outline='')
+            tk.Label(row, text=str(count.get('sessions', 0)), bg=CARD, fg=SUBTLE,
+                     font=self.parent.f_body).grid(row=0, column=2, sticky='w')
+            if pid in registered:
+                label.bind('<Button-1>', lambda _, pid=pid: self.load_participant(pid))
+                Pill(row, 'Start', lambda pid=pid: self.start_teleoperation(pid),
+                     kind='primary', width=80, height=28, font=self.parent.f_body).grid(row=0, column=3)
         self.teleop_participants.update_idletasks()
         height = self.teleop_participants.winfo_reqheight()
         visible = min(height, 3 * 34)
@@ -1704,6 +1837,7 @@ class DataPanel(tk.Toplevel):
         collection_dir = dataset.collection_data_dir(self.data_dir, demo=demo)
         self.samples, problems = dataset.scan_samples(
             collection_dir, input_source=self.source.get())
+        self._scan_teleop_progress()
 
         active = [p for p in self.participants if not p.get('excluded')]
         wanted = len(active) * (len(dataset.DIGITS) + len(dataset.LETTERS)) \
@@ -1840,6 +1974,9 @@ class DataPanel(tk.Toplevel):
         """Pick up new takes while the window is open (not participants.json)."""
         if not self.winfo_exists():
             return
+        if self._rescan_job is not None:
+            self.after_cancel(self._rescan_job)
+            self._rescan_job = None
         collection_dir = dataset.collection_data_dir(
             self.data_dir, demo=self.source.get() == 'touchpad')
         samples, _ = dataset.scan_samples(
@@ -1847,8 +1984,10 @@ class DataPanel(tk.Toplevel):
         if samples != self.samples:
             self.refresh()
         elif self.pipeline.get() == 'teleoperation':
+            self._scan_teleop_progress()
             self._update_teleop_summary()
-        self.after(self.RESCAN_MS, self._rescan)
+            self._fit_teleop_options()
+        self._rescan_job = self.after(self.RESCAN_MS, self._rescan)
 
     def _cell_colour(self, n):
         if n >= dataset.TARGET_REPS:
@@ -1872,6 +2011,7 @@ class DataPanel(tk.Toplevel):
     def new_participant(self):
         # Never reuse an ID that already has recordings on disk.
         seen = {s['participant_id'] for s in self.samples}
+        seen.update(run['participant_id'] for run in self.teleop_runs)
         for demo in (False, True):
             characters_dir = os.path.join(
                 dataset.collection_data_dir(self.data_dir, demo=demo),
