@@ -23,11 +23,17 @@ These offsets assume identical 5 mm disks, touching and upright. Enter **2.5,5,7
 ## Record
 
 - Open the [placement guide](magnet_evaluation_grid.svg). Print at **100% / Actual size**; verify the outline measures **150 × 150 mm**.
-- Align the guide with the board centre and firmware +X/+Y axes. Transfer the marks onto the cardboard if preferred; preserve the measured surface gap.
+- Align the outline with the board; match the guide's top to the playground's upward direction. Keep that orientation unchanged across all nine runs.
+- Use the **five labelled marks inside the board outline**. Transfer them onto the cardboard if preferred; preserve the measured surface gap and repeat the same exact marks each time.
 - Press **Start comparison**. Follow the terminal prompts; **Enter** records each stage, **q** pauses between captures. **Resume** continues saved stages with the original setup.
-- Each run: **2 s baseline**, all magnets ≥30 cm away → **nine grid positions**, each held still for **2 s** → **one above-sensor position** at **(+17.5,+17.5) mm**, also **2 s** → **10 s** slow square-and-diagonal trace. Each capture starts after **0.5 s settling**.
+- Each run: **2 s baseline**, all magnets ≥30 cm away → **five positions**, each held still for **2 s** → **10 s** slow square-and-diagonal trace. Each capture starts after **0.5 s settling**.
+
+  **1 Top-left → 2 Top-right → 3 Bottom-left → 4 Bottom-right → 5 Centre.**
+
 - Repeat orders: **1 → 2 → 3**, **2 → 3 → 1**, **3 → 1 → 2**. Rest the stack on the cardboard; centre it on each mark without tilting.
 - Progress updates every **5 s**. A stack reaches **3/3** only after all three complete runs are saved.
+
+Already started with the previous coordinate grid? **Resume** retains its original ten-position protocol; use the [original guide](magnet_evaluation_grid_v1.svg). To switch to the five named positions, press **q** between captures and **Start comparison** to create a new comparison. The earlier recordings remain available.
 
 ## Compare and choose
 
@@ -46,5 +52,5 @@ python3 tools/record_magnet_evaluation.py --simulate --auto \
   --magnet "Approx. 9.5–10 × 5 mm disks" \
   --arrangement "coaxial stack, upright" \
   --centre-offsets-mm 2.5,5,7.5 \
-  --output-dir /tmp/magpilot-magnet-demo
+  --output-dir /tmp/magpilot-five-position-demo
 ```

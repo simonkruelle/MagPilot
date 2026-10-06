@@ -1,8 +1,9 @@
 """Protocol and reports for the near-surface, three-stack board comparison.
 
 Only the standard library is used, so the launcher can inspect progress without
-opening the serial port. A run means a complete grid and motion capture, rather
-than three consecutive samples at one position.
+opening the serial port. A run means five named placements and a motion capture,
+rather than three consecutive samples at one position. Existing grid runs keep
+their original placement protocol.
 """
 
 import csv
@@ -18,10 +19,20 @@ TASK = 'magnet_stack_baseline'
 SCHEMA_VERSION = 1
 COUNTS = (1, 2, 3)
 REPEATS = 3
+FIVE_POSITIONS = 'five_positions_v2'
+LEGACY_GRID = 'grid_v1'
+POSITIONS = (
+    ('top_left', 'Top-left', -35.0, 35.0),
+    ('top_right', 'Top-right', 35.0, 35.0),
+    ('bottom_left', 'Bottom-left', -35.0, -35.0),
+    ('bottom_right', 'Bottom-right', 35.0, -35.0),
+    ('centre', 'Centre', 0.0, 0.0),
+)
 
 
 def settings(experiment_name, magnet='small magnets', arrangement='coaxial stack',
-             spacer_mm=5, centre_offsets_mm=None, capture_s=2, sweep_s=10):
+             spacer_mm=5, centre_offsets_mm=None, capture_s=2, sweep_s=10,
+             position_protocol=FIVE_POSITIONS):
     """Keep nominal surface condition separate from physical magnet-centre Z."""
     spacer_mm, capture_s, sweep_s = map(float, (spacer_mm, capture_s, sweep_s))
     if not all(math.isfinite(v) for v in (spacer_mm, capture_s, sweep_s)):
@@ -39,7 +50,9 @@ def settings(experiment_name, magnet='small magnets', arrangement='coaxial stack
             offsets[index] = value
     if not str(magnet).strip() or not str(arrangement).strip():
         raise ValueError('Describe the magnets and their arrangement.')
-    return dict(experiment_name=str(experiment_name).strip(), magnet=str(magnet).strip(),
+    if position_protocol not in (FIVE_POSITIONS, LEGACY_GRID):
+        raise ValueError('Unknown placement protocol.')
+    config = dict(experiment_name=str(experiment_name).strip(), magnet=str(magnet).strip(),
                 arrangement=str(arrangement).strip(), nominal_height_mm=0.0,
                 spacer_mm=spacer_mm, centre_offsets_mm=offsets,
                 magnet_counts=list(COUNTS), repeats=REPEATS,
@@ -51,6 +64,14 @@ def settings(experiment_name, magnet='small magnets', arrangement='coaxial stack
                 frame='board centre; X/Y in mm, physical Z above sensor plane',
                 height_note='0 mm above cardboard; spacer thickness is approximate; '
                             'magnet-centre offsets are above cardboard and may be approximate')
+    if position_protocol == FIVE_POSITIONS:
+        config['position_protocol'] = FIVE_POSITIONS
+    return config
+
+
+def position_protocol(config):
+    # Published v1 settings have no protocol field. Never shorten their plan.
+    return config.get('position_protocol', LEGACY_GRID)
 
 
 def plan():
@@ -65,16 +86,23 @@ def stages(config, count):
     result = [dict(stage_id='baseline', kind='baseline', duration_s=config['baseline_s'])]
     axis = config['grid_xy_mm']
     offset = config['centre_offsets_mm'][count - 1]
-    for row, y in enumerate(reversed(axis)):
-        for x in (axis if row % 2 == 0 else list(reversed(axis))):
-            result.append(dict(stage_id='x{:+g}_y{:+g}'.format(x, y), kind='static',
-                               x_mm=x, y_mm=y, nominal_height_mm=0.0,
-                               magnet_centre_z_mm=None if offset is None else config['spacer_mm'] + offset,
-                               duration_s=config['capture_s']))
-    result.append(dict(stage_id='above_sensor', kind='static', x_mm=17.5, y_mm=17.5,
-                       nominal_height_mm=0.0,
-                       magnet_centre_z_mm=None if offset is None else config['spacer_mm'] + offset,
-                       duration_s=config['capture_s']))
+    if position_protocol(config) == FIVE_POSITIONS:
+        placements = POSITIONS
+    else:
+        placements = []
+        names = {(x, y): '{}{}'.format('Top' if y > 0 else 'Bottom' if y < 0 else 'Middle',
+                                     '-left' if x < 0 else '-right' if x > 0 else '-centre')
+                 for y in axis for x in axis}
+        names[(0.0, 0.0)] = 'Centre'
+        for row, y in enumerate(reversed(axis)):
+            for x in (axis if row % 2 == 0 else list(reversed(axis))):
+                placements.append(('x{:+g}_y{:+g}'.format(x, y), names[(x, y)], x, y))
+        placements.append(('above_sensor', 'Extra mark above a sensor', 17.5, 17.5))
+    for number, (stage_id, name, x, y) in enumerate(placements, 1):
+        result.append(dict(stage_id=stage_id, kind='static', position_name=name, position_number=number,
+                           x_mm=x, y_mm=y, nominal_height_mm=0.0,
+                           magnet_centre_z_mm=None if offset is None else config['spacer_mm'] + offset,
+                           duration_s=config['capture_s']))
     result.append(dict(stage_id='sweep', kind='sweep', duration_s=config['sweep_s']))
     return result
 
@@ -94,7 +122,7 @@ def read_manifest(directory):
     try:
         expected = settings(config['experiment_name'], config['magnet'], config['arrangement'],
                             config['spacer_mm'], config['centre_offsets_mm'],
-                            config['capture_s'], config['sweep_s'])
+                            config['capture_s'], config['sweep_s'], position_protocol(config))
     except (KeyError, ValueError, TypeError) as exc:
         raise ValueError('Damaged comparison setup.') from exc
     if config != expected or value.get('input_source') not in ('serial', 'simulated'):
@@ -313,8 +341,11 @@ def report(directory, manifest):
              '- Source: **{}**'.format(manifest['input_source'].upper()),
              '- Magnets: {}; arrangement: {}.'.format(config['magnet'], config['arrangement']),
              '- Nominal height: **0 mm above cardboard**; cardboard: **{:g} mm (approx.)**.'.format(config['spacer_mm']),
-             '- 1 / 2 / 3 magnets × 3 runs; each run: magnet-away baseline, 9 grid positions + 1 above-sensor position, {:g} s sweep.'.format(config['sweep_s']),
-             '- X/Y targets: −35, 0, +35 mm from the board centre; hold the magnet axis upright.', '',
+             '- 1 / 2 / 3 magnets × 3 runs; each run: magnet-away baseline, {}, {:g} s sweep.'.format(
+                 'five named placements' if position_protocol(config) == FIVE_POSITIONS else
+                 'original nine grid positions + one above-sensor position', config['sweep_s']),
+             '- Placement protocol: {}.'.format(position_protocol(config)),
+             '- Use the marked guide positions inside the board; hold the magnet axis upright.', '',
              '| Magnets | Repeat | Captures | XY RMS error (mm) | Z RMS error (approx. mm) | XYZ jitter (mm) | Poses in teleop range (%) |',
              '| --- | --- | --- | --- | --- | --- | --- |']
     for value in summaries:
@@ -335,6 +366,7 @@ def report(directory, manifest):
               '- “In teleop range” checks ±50 mm X/Y and ≤150 mm corrected Z, matching the control input gate; finite pose data are required.',
               '- Rates divide received packets by the recording window. Gaps measure host delivery, not firmware sample timestamps.',
               '- XY RMS includes finite outliers. Error requires correct physical target placement.',
+              '- Guide coordinates remain saved internally. Named corner marks are inside the board, not its physical outer edges.',
               '- XY/Z errors combine per-position mean squared errors equally; jitter is the mean root-sum-square of raw XYZ standard deviations.',
               '- Z errors in summary.json use supplied centre offsets; approximate stack geometry produces approximate ground truth. Blank offsets omit Z errors.',
               '- Existing height bias is assumed: abs(raw Z) − 10 mm. Raw Z is preserved; this test does not recalibrate firmware.',

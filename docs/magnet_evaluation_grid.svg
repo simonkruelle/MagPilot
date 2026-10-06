@@ -1,91 +1,44 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="180mm" height="180mm" viewBox="0 0 180 180">
-  <title>MagPilot magnet baseline placement guide — print at actual size</title>
-  <desc>150 by 150 millimetre board outline. Nine static targets in serpentine order at X and Y minus 35, zero and plus 35 millimetres, plus a tenth target above the sensor at plus 17.5, plus 17.5 millimetres. Sensor centres are spaced 35 millimetres apart. X increases right and Y increases upwards.</desc>
+  <title>MagPilot magnet baseline — five named placement marks</title>
+  <desc>Print at actual size. The board outline is 150 by 150 millimetres. Protocol five_positions_v2: 1 Top-left at X=-35, Y=+35 mm; 2 Top-right at X=+35, Y=+35 mm; 3 Bottom-left at X=-35, Y=-35 mm; 4 Bottom-right at X=+35, Y=-35 mm; 5 Centre at X=0, Y=0 mm. All five marks lie inside the board outline. X increases right and Y increases upwards. Trace the inner square and both diagonals for the motion capture.</desc>
   <defs>
-    <g id="sensor">
-      <circle r="0.8" fill="#d7dbe0"/>
-      <circle r="2.2" fill="none" stroke="#c7cdd5" stroke-width="0.2" stroke-dasharray="0.4 0.7"/>
-    </g>
     <g id="target">
-      <circle r="2" fill="white" stroke="#0a84ff" stroke-width="0.35"/>
-      <path d="M-3 0 H3 M0 -3 V3" stroke="#0a84ff" stroke-width="0.2"/>
-      <circle r="0.35" fill="#0a84ff"/>
+      <circle r="6" fill="white" stroke="#0a84ff" stroke-width="0.45"/>
+      <path d="M-8 0 H8 M0 -8 V8" stroke="#0a84ff" stroke-width="0.25"/>
+      <circle r="0.55" fill="#0a84ff"/>
     </g>
   </defs>
   <rect width="180" height="180" fill="white"/>
   <g font-family="Arial, Helvetica, sans-serif" fill="#1d1d1f">
-    <text x="15" y="8.4" font-size="5" font-weight="700">Magnet baseline · placement guide</text>
-    <text x="15" y="12.2" font-size="2.7" fill="#6e6e73">Board-centre coordinates in mm · nominal 0 mm above cardboard</text>
+    <text x="15" y="8.4" font-size="5" font-weight="700">Magnet baseline · five positions</text>
+    <text x="15" y="12.2" font-size="2.8" fill="#6e6e73">Place on the cardboard · keep the board facing the same way</text>
     <rect x="15" y="15" width="150" height="150" fill="none" stroke="#1d1d1f" stroke-width="0.4"/>
+    <text x="90" y="24" text-anchor="middle" font-size="4" font-weight="700" fill="#6e6e73">TOP</text>
 
-    <!-- The physical sensor grid has 35 mm pitch and centres at ±17.5/±52.5. -->
-    <g>
-      <use href="#sensor" x="37.5" y="37.5"/>
-      <use href="#sensor" x="72.5" y="37.5"/>
-      <use href="#sensor" x="107.5" y="37.5"/>
-      <use href="#sensor" x="142.5" y="37.5"/>
-      <use href="#sensor" x="37.5" y="72.5"/>
-      <use href="#sensor" x="72.5" y="72.5"/>
-      <use href="#sensor" x="107.5" y="72.5"/>
-      <use href="#sensor" x="142.5" y="72.5"/>
-      <use href="#sensor" x="37.5" y="107.5"/>
-      <use href="#sensor" x="72.5" y="107.5"/>
-      <use href="#sensor" x="107.5" y="107.5"/>
-      <use href="#sensor" x="142.5" y="107.5"/>
-      <use href="#sensor" x="37.5" y="142.5"/>
-      <use href="#sensor" x="72.5" y="142.5"/>
-      <use href="#sensor" x="107.5" y="142.5"/>
-      <use href="#sensor" x="142.5" y="142.5"/>
-    </g>
-    <g fill="none" stroke="#7fb6ee" stroke-width="0.28">
+    <!-- ±35 mm from the board centre: marked inner positions, not PCB edges. -->
+    <g fill="none" stroke="#8db5d9" stroke-width="0.32">
       <path d="M55 55 H125 V125 H55 Z"/>
-      <path d="M55 55 L125 125 M125 55 L55 125" stroke-dasharray="1.2 1"/>
-    </g>
-    <path d="M90 49 V131 M49 90 H131" stroke="#d9dee5" stroke-width="0.18" stroke-dasharray="0.8 1.2"/>
-
-    <g stroke="#63666b" stroke-width="0.25" fill="none">
-      <path d="M24 31 H38"/>
-      <path d="M24 31 V20"/>
-    </g>
-    <path d="M38 31 L35.7 29.9 V32.1 Z M24 20 L22.9 22.3 H25.1 Z" fill="#63666b"/>
-    <g font-size="3" fill="#63666b">
-      <text x="39.5" y="32">+X</text>
-      <text x="27" y="22">+Y</text>
-      <text x="130" y="23">150 × 150 mm board</text>
+      <path d="M55 55 L125 125 M125 55 L55 125" stroke-width="0.22" stroke-dasharray="1.5 1.5"/>
     </g>
 
-    <!-- Static order matches colmag.magnet_evaluation.stages(). -->
+    <!-- Static order matches five_positions_v2 in magnet_evaluation.stages(). -->
     <use href="#target" x="55" y="55"/>
-    <use href="#target" x="90" y="55"/>
     <use href="#target" x="125" y="55"/>
-    <use href="#target" x="125" y="90"/>
-    <use href="#target" x="90" y="90"/>
-    <use href="#target" x="55" y="90"/>
     <use href="#target" x="55" y="125"/>
-    <use href="#target" x="90" y="125"/>
     <use href="#target" x="125" y="125"/>
-    <use href="#target" x="107.5" y="72.5"/>
+    <use href="#target" x="90" y="90"/>
 
-    <g text-anchor="middle" font-size="2.8" fill="#174a78">
-      <text x="55" y="47.5">1 · (−35, +35)</text>
-      <text x="90" y="47.5">2 · (0, +35)</text>
-      <text x="125" y="47.5">3 · (+35, +35)</text>
-      <text x="125" y="82.5">4 · (+35, 0)</text>
-      <text x="90" y="82.5">5 · (0, 0)</text>
-      <text x="55" y="82.5">6 · (−35, 0)</text>
-      <text x="55" y="134">7 · (−35, −35)</text>
-      <text x="90" y="134">8 · (0, −35)</text>
-      <text x="125" y="134">9 · (+35, −35)</text>
-      <text x="116" y="64">10 · above sensor</text>
-      <text x="116" y="68">(+17.5, +17.5)</text>
+    <g text-anchor="middle" font-size="5.2" font-weight="700" fill="#174a78">
+      <text x="55" y="43">1 · Top-left</text>
+      <text x="125" y="43">2 · Top-right</text>
+      <text x="55" y="141">3 · Bottom-left</text>
+      <text x="125" y="141">4 · Bottom-right</text>
+      <text x="90" y="78">5 · Centre</text>
     </g>
 
-    <g font-size="3" fill="#6e6e73">
-      <text x="90" y="151" text-anchor="middle">Sweep: square + both diagonals · 10 s</text>
-      <circle cx="27" cy="158" r="1.2" fill="none" stroke="#0a84ff" stroke-width="0.3"/>
-      <text x="30" y="159">Static target · centre the stack</text>
-      <use href="#sensor" x="122" y="158"/>
-      <text x="126" y="159">Sensor reference</text>
+    <g text-anchor="middle" font-size="3.2" fill="#6e6e73">
+      <text x="90" y="152">Hold still at 1 → 2 → 3 → 4 → 5</text>
+      <text x="90" y="159">Sweep: around the square, then both diagonals · 10 s</text>
     </g>
     <path d="M15 167 V170 M165 167 V170 M15 168.5 H165" stroke="#63666b" stroke-width="0.2"/>
     <rect x="77" y="166.5" width="26" height="4" fill="white"/>

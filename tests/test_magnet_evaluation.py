@@ -45,12 +45,14 @@ class MagnetEvaluationTests(unittest.TestCase):
         for count in (1, 2, 3):
             self.assertEqual([item['repetition'] for item in plan if item['magnet_count'] == count], [1, 2, 3])
             stages = evaluation.stages(self.config(), count)
-            self.assertEqual(len(stages), 12)
+            self.assertEqual(len(stages), 7)
             stationary = [stage for stage in stages if stage['kind'] == 'static']
-            self.assertEqual(len(stationary), 10)
+            self.assertEqual(len(stationary), 5)
             self.assertTrue(all(stage['nominal_height_mm'] == 0 for stage in stationary))
             self.assertTrue(all(stage['magnet_centre_z_mm'] == 5+2.5*count for stage in stationary))
-            self.assertEqual((stationary[-1]['x_mm'], stationary[-1]['y_mm']), (17.5, 17.5))
+            self.assertEqual([stage['position_name'] for stage in stationary],
+                             ['Top-left', 'Top-right', 'Bottom-left', 'Bottom-right', 'Centre'])
+            self.assertEqual((stationary[-1]['x_mm'], stationary[-1]['y_mm']), (0, 0))
 
     def test_unknown_centre_omits_z_error_and_bad_numbers_are_rejected(self):
         config = evaluation.settings('x')
@@ -106,7 +108,7 @@ class MagnetEvaluationTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 recorder.run(folder, manifest, SimulatedSource(rate_hz=50), auto=True)
             self.assertEqual(evaluation.progress(folder), {1: 3, 2: 3, 3: 3})
-            self.assertEqual(len(manifest['captures']), 108)
+            self.assertEqual(len(manifest['captures']), 63)
             self.assertEqual(evaluation.list_comparisons(data, 'Other'), [])
             self.assertEqual(evaluation.list_comparisons(data, 'Baseline')[0]['input_source'], 'simulated')
             for name in ('report.md', 'comparison.svg', 'summary.json'):
@@ -126,7 +128,7 @@ class MagnetEvaluationTests(unittest.TestCase):
             resumed = recorder.prepare(folder, self.config(), 'simulated', resume=True)
             with contextlib.redirect_stdout(io.StringIO()):
                 recorder.run(folder, resumed, SimulatedSource(rate_hz=50), auto=True)
-            self.assertEqual(len(resumed['captures']), 108)
+            self.assertEqual(len(resumed['captures']), 63)
             self.assertEqual(resumed['captures'][0], previous)
             with self.assertRaises(ValueError):
                 recorder.prepare(folder, self.config(), 'serial', resume=True)
@@ -171,6 +173,53 @@ class MagnetEvaluationTests(unittest.TestCase):
                 self.assertEqual(evaluation.list_comparisons(data), [])
                 with self.assertRaises(ValueError):
                     recorder.prepare(folder, self.config(), 'serial', resume=True)
+
+    def test_legacy_grid_remains_resumable_with_its_original_ten_positions(self):
+        config = evaluation.settings('Legacy', 'disk', 'upright', 5, [2.5, 5, 7.5],
+                                     .1, .1, evaluation.LEGACY_GRID)
+        self.assertNotIn('position_protocol', config)
+        stages = evaluation.stages(config, 1)
+        self.assertEqual(len(stages), 12)
+        self.assertEqual(stages[1]['stage_id'], 'x-35_y+35')
+        self.assertEqual(stages[-2]['stage_id'], 'above_sensor')
+        with tempfile.TemporaryDirectory() as folder:
+            manifest = recorder.prepare(folder, config, 'simulated')
+            answers = iter(['', '', 'q'])
+            with contextlib.redirect_stdout(io.StringIO()):
+                recorder.run(folder, manifest, SimulatedSource(rate_hz=50), prompt=lambda _: next(answers))
+            self.assertEqual(evaluation.read_manifest(folder)['settings'], config)
+            resumed = recorder.prepare(folder, config, 'simulated', resume=True)
+            with contextlib.redirect_stdout(io.StringIO()):
+                recorder.run(folder, resumed, SimulatedSource(rate_hz=50), auto=True)
+            self.assertEqual(len(resumed['captures']), 108)
+            self.assertEqual(evaluation.progress(folder), {1: 3, 2: 3, 3: 3})
+            with open(os.path.join(folder, 'report.md')) as stream:
+                self.assertIn('grid_v1', stream.read())
+            with self.assertRaises(ValueError):
+                recorder.prepare(folder, evaluation.settings('Legacy', 'disk', 'upright', 5,
+                                 [2.5, 5, 7.5], .1, .1), 'simulated', resume=True)
+
+    def test_named_prompts_match_the_printable_guide_and_hide_coordinates(self):
+        import xml.etree.ElementTree as ET
+        root = ET.parse(os.path.join(os.path.dirname(__file__), '..', 'docs', 'magnet_evaluation_grid.svg')).getroot()
+        namespace = {'svg': 'http://www.w3.org/2000/svg'}
+        targets = [element for element in root.findall('.//svg:use', namespace)
+                   if element.get('href') == '#target']
+        expected = [(90+x, 90-y) for _, _, x, y in evaluation.POSITIONS]
+        self.assertEqual([(float(target.get('x')), float(target.get('y'))) for target in targets], expected)
+        with tempfile.TemporaryDirectory() as folder:
+            manifest = recorder.prepare(folder, self.config(), 'simulated')
+            prompts = io.StringIO()
+            with contextlib.redirect_stdout(prompts):
+                recorder.run(folder, manifest, SimulatedSource(rate_hz=50), auto=True)
+            self.assertNotIn('X=', prompts.getvalue())
+            self.assertNotIn('Y=', prompts.getvalue())
+            for name in ('Top-left', 'Top-right', 'Bottom-left', 'Bottom-right', 'Centre'):
+                self.assertIn(name, prompts.getvalue())
+
+    def test_unknown_placement_protocol_is_rejected(self):
+        with self.assertRaises(ValueError):
+            evaluation.settings('x', position_protocol='unknown')
 
     def test_automatic_real_capture_is_blocked_and_double_resume_is_locked(self):
         with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stderr(io.StringIO()):

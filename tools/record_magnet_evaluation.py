@@ -57,6 +57,9 @@ def run(directory, manifest, source, prompt=input, auto=False):
     print('MAGNET BASELINE · {} · {}'.format(config['experiment_name'], manifest['input_source'].upper()))
     print('0 mm above cardboard; ~{:g} mm cardboard above sensors.'.format(config['spacer_mm']))
     print('Use identical magnets, arrangement, orientation and placement guide. Keep the stack upright.')
+    print('Positions: {}.'.format('Top-left → Top-right → Bottom-left → Bottom-right → Centre'
+          if evaluation.position_protocol(config) == evaluation.FIVE_POSITIONS else
+          'Original grid; use the original numbered placement guide'))
     print('Three full runs per count. Count order rotates between repeats. Enter captures; q saves and quits.')
     try:
         for index, item in enumerate(evaluation.plan(), 1):
@@ -74,7 +77,8 @@ def run(directory, manifest, source, prompt=input, auto=False):
                 if stage['kind'] == 'baseline':
                     instruction = 'Move ALL magnets at least 30 cm away from the board'
                 elif stage['kind'] == 'static':
-                    instruction = 'Rest stack on cardboard at X={:+g}, Y={:+g} mm; keep it still'.format(stage['x_mm'], stage['y_mm'])
+                    instruction = '{} · {}: rest the stack on this guide mark; keep it still'.format(
+                        stage['position_number'], stage['position_name'])
                 else:
                     instruction = 'Trace the printed square, then its diagonals, slowly for {:g} s; keep the same surface gap'.format(stage['duration_s'])
                 while True:
@@ -126,6 +130,9 @@ def main(argv=None):
     parser.add_argument('--centre-offsets-mm', default='', help='1/2/3 magnet centre heights above cardboard in mm; blank or ? means unknown')
     parser.add_argument('--capture-s', type=float, default=2)
     parser.add_argument('--sweep-s', type=float, default=10)
+    parser.add_argument('--position-protocol', choices=(evaluation.FIVE_POSITIONS, evaluation.LEGACY_GRID),
+                        default=evaluation.FIVE_POSITIONS,
+                        help='New comparisons use five named placements; original grid is retained for Resume')
     parser.add_argument('--output-dir', required=True)
     parser.add_argument('--simulate', action='store_true')
     parser.add_argument('--dry-run', action='store_true')
@@ -134,7 +141,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         config = evaluation.settings(args.experiment_name, args.magnet, args.arrangement,
-                                     args.spacer_mm, offsets(args.centre_offsets_mm), args.capture_s, args.sweep_s)
+                                     args.spacer_mm, offsets(args.centre_offsets_mm), args.capture_s, args.sweep_s,
+                                     args.position_protocol)
         if args.auto and not args.simulate:
             raise ValueError('Automatic capture is only available with simulated input; board tests need physical placement.')
         if not args.dry_run and not args.simulate and not args.port:
@@ -147,7 +155,8 @@ def main(argv=None):
                 raise ValueError('This comparison is already recording in another window.') from exc
             manifest = prepare(args.output_dir, config, 'simulated' if args.simulate else 'serial', args.resume)
             if args.dry_run:
-                print('Plan: 1/2/3 magnets × 3 runs · 9 grid positions + above-sensor point + baseline + sweep')
+                print('Plan: 1/2/3 magnets × 3 runs · {} + baseline + sweep'.format(
+                    'five named placements' if args.position_protocol == evaluation.FIVE_POSITIONS else 'original grid'))
                 print('Physical cover: {} mm; nominal writing condition: 0 mm'.format(args.spacer_mm))
                 print('Report: {}'.format(os.path.join(args.output_dir, 'report.md')))
                 return 0

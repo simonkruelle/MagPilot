@@ -548,6 +548,7 @@ class MagnetEvaluationCommandTests(unittest.TestCase):
         args = shlex.split(build_magnet_evaluation_command('/host/dev/ttyACM0', config, 'baseline_test'))
         self.assertEqual(args[args.index('--experiment-name')+1], config['experiment_name'])
         self.assertEqual(args[args.index('--port')+1], '/host/dev/ttyACM0')
+        self.assertEqual(args[args.index('--position-protocol')+1], 'five_positions_v2')
         self.assertEqual(args[args.index('--output-dir')+1], 'data_collection/magnet_evaluation/baseline_test')
         self.assertNotIn('--auto', args)
         demo = shlex.split(build_magnet_evaluation_command('', config, 'baseline_demo', demo=True, resume=True))
@@ -558,6 +559,13 @@ class MagnetEvaluationCommandTests(unittest.TestCase):
             build_magnet_evaluation_command('', config, 'board')
         with self.assertRaises(ValueError):
             build_magnet_evaluation_command('port', config, '../outside')
+
+    def test_legacy_resume_command_keeps_the_original_grid_protocol(self):
+        from colmag import magnet_evaluation
+        config = magnet_evaluation.settings('Legacy', position_protocol=magnet_evaluation.LEGACY_GRID)
+        args = shlex.split(build_magnet_evaluation_command('port', config, 'legacy', resume=True))
+        self.assertEqual(args[args.index('--position-protocol')+1], 'grid_v1')
+        self.assertIn('--resume', args)
 
     @mock.patch('colmag_launcher.in_container', return_value=(0, '123 python3 tools/record_magnet_evaluation.py'))
     def test_serial_ownership_and_stop_all_cover_magnet_comparisons(self, container):
@@ -961,6 +969,43 @@ class TeleoperationPanelGuiTests(unittest.TestCase):
 
 @unittest.skipUnless(_os.environ.get('COLMAG_TEST_LAUNCHER_GUI') == '1', 'requires a display')
 class MagnetEvaluationPanelGuiTests(unittest.TestCase):
+    def test_legacy_resume_and_new_start_keep_separate_guides_and_plans(self):
+        from colmag import magnet_evaluation as evaluation
+        from tools import record_magnet_evaluation as recorder
+        import tkinter as tk
+        with tempfile.TemporaryDirectory() as folder:
+            config = evaluation.settings('Legacy', 'disk', 'upright', 5, [2.5, 5, 7.5],
+                                         position_protocol=evaluation.LEGACY_GRID)
+            comparison = _os.path.join(folder, 'magnet_evaluation', 'legacy_test')
+            recorder.prepare(comparison, config, 'serial')
+            parent = tk.Tk()
+            for name, font in [('f_title', ('Arial', 20)), ('f_h', ('Arial', 12)),
+                               ('f_body', ('Arial', 11)), ('f_small', ('Arial', 9)), ('f_btn', ('Arial', 11))]:
+                setattr(parent, name, font)
+            parent.start_magnet_evaluation = mock.Mock()
+            panel = DataPanel(parent, data_dir=folder)
+            try:
+                panel.experiment_name.set('Legacy')
+                panel.pipeline.set('evaluation')
+                panel._pipeline_changed()
+                parent.update()
+                self.assertTrue(panel.legacy_evaluation_guide.winfo_ismapped())
+                self.assertIn('original 10-position grid', panel.evaluation_status.cget('text'))
+                panel.start_magnet_evaluation(resume=True)
+                self.assertEqual(parent.start_magnet_evaluation.call_args.args[0], config)
+                panel.start_magnet_evaluation()
+                new_config = parent.start_magnet_evaluation.call_args.args[0]
+                self.assertEqual(evaluation.position_protocol(new_config), evaluation.FIVE_POSITIONS)
+                self.assertEqual(len(evaluation.stages(new_config, 1)), 7)
+                with mock.patch('colmag_launcher.subprocess.Popen') as open_file:
+                    panel.open_magnet_evaluation_guide()
+                    self.assertTrue(open_file.call_args.args[0][1].endswith('/magnet_evaluation_grid.svg'))
+                    panel.open_magnet_evaluation_guide(legacy=True)
+                    self.assertTrue(open_file.call_args.args[0][1].endswith('/magnet_evaluation_grid_v1.svg'))
+            finally:
+                panel.destroy()
+                parent.destroy()
+
     def test_sensor_panel_start_and_resume_with_progress_and_source_separation(self):
         from colmag import magnet_evaluation as evaluation
         from tools import record_magnet_evaluation as recorder
@@ -976,7 +1021,7 @@ class MagnetEvaluationPanelGuiTests(unittest.TestCase):
             # One complete board-designated software fixture, clearly marked
             # by its temporary folder; never mix this into the actual dataset.
             manifest['purpose'] = 'test_fixture'
-            answers = iter([''] * 13 + ['q'])  # install + 12 captures; quit at next stack
+            answers = iter([''] * 8 + ['q'])  # install + 7 captures; quit at next stack
             with contextlib.redirect_stdout(io.StringIO()):
                 recorder.run(comparison, manifest, SimulatedSource(rate_hz=5), prompt=lambda _: next(answers))
             parent = tk.Tk()

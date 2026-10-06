@@ -331,6 +331,8 @@ Board captures keep stable, dark ink and include slow movements; raw sensor valu
 
 **Data → Sensor Evaluation** compares **1 / 2 / 3 magnets × 3 runs**. Start opens
 the guided placements; **q** pauses and **Resume** keeps completed captures.
+Each new run uses **top-left, top-right, bottom-left, bottom-right and centre**
+marks, followed by a short sweep. The prompts use names; coordinates stay in the logs.
 The nominal **0 mm** condition is above the approximately **5 mm cardboard**;
 the magnet-centre offset is recorded separately. Progress bars and a comparison
 report show tracking error, jitter, raw field response and delivery timing.

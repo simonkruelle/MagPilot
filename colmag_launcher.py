@@ -732,6 +732,7 @@ def build_magnet_evaluation_command(serial_port, settings, run_id, demo=False, r
             '--centre-offsets-mm', ','.join('?' if value is None else str(value)
                                            for value in settings['centre_offsets_mm']),
             '--capture-s', str(settings['capture_s']), '--sweep-s', str(settings['sweep_s']),
+            '--position-protocol', magnet_evaluation.position_protocol(settings),
             '--output-dir', os.path.join(dataset.DATA_DIR_NAME, 'magnet_evaluation', run_id)]
     args += ['--simulate', '--auto'] if demo else ['--port', serial_port]
     if resume:
@@ -1537,7 +1538,7 @@ class DataPanel(tk.Toplevel):
                    font=f.f_body, parent_bg=CARD).pack(side='left')
         tk.Label(comparison, text='Nominal condition: 0 mm above cardboard. Offsets are above the cardboard.\n'
                  '2.5 / 5 / 7.5 mm assume touching, upright 5 mm disks; verify before testing.\n'
-                 'Each run: baseline → 9 grid positions + 1 above a sensor → 10 s sweep.',
+                 'New run: baseline → top-left / top-right / bottom-left / bottom-right / centre → sweep.',
                  bg=CARD, fg=SUBTLE, font=f.f_small, justify='left').pack(anchor='w', pady=(0, 10))
         self.evaluation_progress = {}
         for count in magnet_evaluation.COUNTS:
@@ -1561,9 +1562,11 @@ class DataPanel(tk.Toplevel):
              kind='plain', width=90, font=f.f_body).pack(side='left', padx=8)
         Pill(row, 'Open report', self.open_magnet_evaluation_report,
              kind='plain', width=115, font=f.f_body).pack(side='left')
-        Pill(row, 'Placement guide', lambda: subprocess.Popen(
-             ['xdg-open', os.path.join(REPO_DIR, 'docs', 'magnet_evaluation_grid.svg')]),
+        Pill(row, 'Placement guide', self.open_magnet_evaluation_guide,
              kind='plain', width=145, font=f.f_body).pack(side='right')
+        self.legacy_evaluation_guide = Pill(row, 'Original guide',
+             lambda: self.open_magnet_evaluation_guide(legacy=True),
+             kind='plain', width=125, font=f.f_body)
 
         # Extended heights/orientations remain available beneath the baseline.
         tracking = self._box('Advanced tracking error · other heights', parent=self.evaluation_content)
@@ -2255,7 +2258,18 @@ class DataPanel(tk.Toplevel):
             'Counts refer to this comparison; board and simulated results stay separate.'.format(
                 latest['run_id'], latest['settings']['spacer_mm'], latest['settings']['magnet'])
             if latest else 'No {} comparison for this experiment yet. Start creates a new comparison.'.format(source.lower())))
+        legacy = latest and magnet_evaluation.position_protocol(latest['settings']) == magnet_evaluation.LEGACY_GRID
+        if legacy:
+            self.evaluation_status.configure(text='{} · original 10-position grid.\n'
+                'Resume keeps the original grid; Start comparison uses the five named marks.'.format(latest['run_id']))
+            self.legacy_evaluation_guide.pack(side='right', padx=8)
+        else:
+            self.legacy_evaluation_guide.pack_forget()
         self._fit_evaluation()
+
+    def open_magnet_evaluation_guide(self, legacy=False):
+        filename = 'magnet_evaluation_grid_v1.svg' if legacy else 'magnet_evaluation_grid.svg'
+        subprocess.Popen(['xdg-open', os.path.join(REPO_DIR, 'docs', filename)])
 
     def _fit_evaluation(self, _event=None):
         if self.pipeline.get() != 'evaluation':
