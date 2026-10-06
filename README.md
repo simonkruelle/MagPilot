@@ -41,6 +41,17 @@ Board repaired. Three **Ø≈9.5–10 × 5 mm** disk magnets available.
 The [magnet baseline comparison](docs/MAGNET_EVALUATION.md) is ready in **Data → Sensor Evaluation**:
 1, 2 and 3 magnets, three runs each, at nominal 0 mm above the cardboard cover.
 
+**Reloadable magnetic pen · Prototype v1**
+
+A fixed-tip stylus for **1–5 disk magnets**, with spacers above shorter stacks.
+Printable parts and fit-test pieces are ready; assembled-pen tracking is the next check.
+
+<p align="center">
+  <a href="hardware/magnetic_pen_v1/README.md"><img src="hardware/magnetic_pen_v1/preview.png" width="880" alt="MagPilot magnetic pen prototype: assembled profile, exploded magnet stack and chamber section"></a>
+  <br>
+  <sub>CAD prototype · <a href="hardware/magnetic_pen_v1/drawing.pdf">Dimensioned drawing</a> · <a href="hardware/magnetic_pen_v1/magnetic_pen_v1.zip">Print files</a> · <a href="hardware/magnetic_pen_v1/PRINTING_K1_MAX.md">K1 Max printing guide</a></sub>
+</p>
+
 <p align="center">
   <img src="docs/reports/assets/project_timeline.png" width="880" alt="Proposed ten-week project plan: virtual task and pilot start in Week 1">
   <br>
@@ -261,6 +272,9 @@ flowchart LR
 </table>
 
 </div>
+
+The [reloadable magnetic pen prototype](hardware/magnetic_pen_v1/README.md)
+holds 1–5 disk magnets, with printable parts, spacers and fit-test pieces.
 
 ## A control language for each task
 

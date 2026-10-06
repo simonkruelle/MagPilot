@@ -1,0 +1,259 @@
+{
+  "parameters": {
+    "version": "MagPilot magnetic pen v1 prototype",
+    "units": "mm",
+    "magnet_diameter_mm": 10.0,
+    "magnet_thickness_mm": 5.0,
+    "max_magnets": 5,
+    "magnet_bore_diameter_mm": 10.4,
+    "grip_diameter_mm": 15.0,
+    "upper_barrel_diameter_mm": 12.8,
+    "overall_length_mm": 130.0,
+    "lower_magnet_face_from_contact_mm": 8.0,
+    "stack_axial_allowance_mm": 0.8,
+    "spacer_diameter_mm": 10.0,
+    "spacer_vent_diameter_mm": 3.0,
+    "washer_nominal_thickness_mm": 1.2,
+    "washer_diameter_mm": 9.9,
+    "washer_vent_diameter_mm": 3.0,
+    "neck_diameter_mm": 12.2,
+    "neck_length_mm": 7.0,
+    "closure_radial_clearance_mm": 0.2,
+    "lug_radial_height_mm": 0.7,
+    "lug_height_mm": 1.8,
+    "lug_angle_deg": 18.0,
+    "closure_axial_clearance_mm": 0.2,
+    "closure_angle_clearance_deg": 2.0,
+    "closure_turn_deg": 45.0,
+    "stylus_tip_radius_mm": 1.2,
+    "tip_kind": "rounded, non-marking plastic stylus",
+    "fit_coupon_bores_mm": [
+      10.0,
+      10.2,
+      10.4,
+      10.6
+    ],
+    "note": "Starting dimensions for approximately 9.5-10 mm disks, not a verified printer fit. Magnets and washer remain separate hardware. Change bore after fit coupon, retain spacers above stack, verify actual tip and stack offsets."
+  },
+  "printable_meshes": {
+    "lower_grip": {
+      "non_manifold_edges": 0,
+      "connected_components": 1,
+      "volume_mm3": 2901.6444128321914,
+      "vertices": 3466,
+      "faces": 6928
+    },
+    "upper_barrel": {
+      "non_manifold_edges": 0,
+      "connected_components": 1,
+      "volume_mm3": 7761.039554406584,
+      "vertices": 4598,
+      "faces": 9192
+    },
+    "spacer_5mm": {
+      "non_manifold_edges": 0,
+      "connected_components": 1,
+      "volume_mm3": 357.26432787096576,
+      "vertices": 640,
+      "faces": 1280
+    },
+    "spacer_10mm": {
+      "non_manifold_edges": 0,
+      "connected_components": 1,
+      "volume_mm3": 714.5286557419315,
+      "vertices": 640,
+      "faces": 1280
+    },
+    "spacer_15mm": {
+      "non_manifold_edges": 0,
+      "connected_components": 1,
+      "volume_mm3": 1071.7929836129597,
+      "vertices": 640,
+      "faces": 1280
+    },
+    "spacer_20mm": {
+      "non_manifold_edges": 0,
+      "connected_components": 1,
+      "volume_mm3": 1429.0573114839492,
+      "vertices": 640,
+      "faces": 1280
+    },
+    "washer_1p2mm": {
+      "non_manifold_edges": 0,
+      "connected_components": 1,
+      "volume_mm3": 83.86839275060355,
+      "vertices": 640,
+      "faces": 1280
+    },
+    "bore_fit_coupon": {
+      "non_manifold_edges": 0,
+      "connected_components": 1,
+      "volume_mm3": 5076.408525381578,
+      "vertices": 1377,
+      "faces": 2750
+    },
+    "closure_fit_grip": {
+      "non_manifold_edges": 0,
+      "connected_components": 1,
+      "volume_mm3": 548.8480640571852,
+      "vertices": 1250,
+      "faces": 2496
+    },
+    "closure_fit_cap": {
+      "non_manifold_edges": 0,
+      "connected_components": 1,
+      "volume_mm3": 1318.6237226926564,
+      "vertices": 2358,
+      "faces": 4716
+    }
+  },
+  "rigid_fit_checks": [
+    {
+      "cap_lift_mm": 12,
+      "cap_turn_deg": 0,
+      "rigid_overlap_mm3": 0.0
+    },
+    {
+      "cap_lift_mm": 10,
+      "cap_turn_deg": 0,
+      "rigid_overlap_mm3": 0.0
+    },
+    {
+      "cap_lift_mm": 8,
+      "cap_turn_deg": 0,
+      "rigid_overlap_mm3": 0.0
+    },
+    {
+      "cap_lift_mm": 6,
+      "cap_turn_deg": 0,
+      "rigid_overlap_mm3": 0.0
+    },
+    {
+      "cap_lift_mm": 4,
+      "cap_turn_deg": 0,
+      "rigid_overlap_mm3": 0.0
+    },
+    {
+      "cap_lift_mm": 3,
+      "cap_turn_deg": 0,
+      "rigid_overlap_mm3": 0.0
+    },
+    {
+      "cap_lift_mm": 2,
+      "cap_turn_deg": 0,
+      "rigid_overlap_mm3": 0.0
+    },
+    {
+      "cap_lift_mm": 1,
+      "cap_turn_deg": 0,
+      "rigid_overlap_mm3": 0.0
+    },
+    {
+      "cap_lift_mm": 0.5,
+      "cap_turn_deg": 0,
+      "rigid_overlap_mm3": 0.0
+    },
+    {
+      "cap_lift_mm": 0,
+      "cap_turn_deg": 0,
+      "rigid_overlap_mm3": 0.0
+    },
+    {
+      "cap_lift_mm": 0,
+      "cap_turn_deg": 3.75,
+      "rigid_overlap_mm3": 0.0
+    },
+    {
+      "cap_lift_mm": 0,
+      "cap_turn_deg": 7.5,
+      "rigid_overlap_mm3": 0.0
+    },
+    {
+      "cap_lift_mm": 0,
+      "cap_turn_deg": 11.25,
+      "rigid_overlap_mm3": 0.0
+    },
+    {
+      "cap_lift_mm": 0,
+      "cap_turn_deg": 15.0,
+      "rigid_overlap_mm3": 0.0
+    },
+    {
+      "cap_lift_mm": 0,
+      "cap_turn_deg": 18.75,
+      "rigid_overlap_mm3": 0.0
+    },
+    {
+      "cap_lift_mm": 0,
+      "cap_turn_deg": 22.5,
+      "rigid_overlap_mm3": 0.0
+    },
+    {
+      "cap_lift_mm": 0,
+      "cap_turn_deg": 26.25,
+      "rigid_overlap_mm3": 0.0
+    },
+    {
+      "cap_lift_mm": 0,
+      "cap_turn_deg": 30.0,
+      "rigid_overlap_mm3": 0.0
+    },
+    {
+      "cap_lift_mm": 0,
+      "cap_turn_deg": 33.75,
+      "rigid_overlap_mm3": 0.0
+    },
+    {
+      "cap_lift_mm": 0,
+      "cap_turn_deg": 37.5,
+      "rigid_overlap_mm3": 0.0
+    },
+    {
+      "cap_lift_mm": 0,
+      "cap_turn_deg": 41.25,
+      "rigid_overlap_mm3": 0.0
+    },
+    {
+      "cap_lift_mm": 0,
+      "cap_turn_deg": 45.0,
+      "rigid_overlap_mm3": 0.0
+    }
+  ],
+  "locked_cap_pull_at_0p6mm_overlap_mm3": 0.8217197538484923,
+  "lower_face_from_contact_mm": 8.0,
+  "usable_pocket_height_mm": 25.799999999999997,
+  "configurations": [
+    {
+      "magnets": 1,
+      "spacer_length_mm": 20.0,
+      "geometric_stack_centre_from_contact_mm": 10.5
+    },
+    {
+      "magnets": 2,
+      "spacer_length_mm": 15.0,
+      "geometric_stack_centre_from_contact_mm": 13.0
+    },
+    {
+      "magnets": 3,
+      "spacer_length_mm": 10.0,
+      "geometric_stack_centre_from_contact_mm": 15.5
+    },
+    {
+      "magnets": 4,
+      "spacer_length_mm": 5.0,
+      "geometric_stack_centre_from_contact_mm": 18.0
+    },
+    {
+      "magnets": 5,
+      "spacer_length_mm": 0.0,
+      "geometric_stack_centre_from_contact_mm": 20.5
+    }
+  ],
+  "limitations": [
+    "Geometric prototype; physical print, closure retention and bore fit untested.",
+    "Washer must be compressible foam or sufficiently compliant elastomer, validated by fit; rigid plastic STL would prevent closing at nominal thickness.",
+    "No magnets, graphite or metal parts are included in printable meshes.",
+    "Bayonet requires washer preload and a retention test; no validated mechanical life.",
+    "Pen changes magnet height relative to bare-disk recordings; test height/tilt and recalibrate."
+  ]
+}

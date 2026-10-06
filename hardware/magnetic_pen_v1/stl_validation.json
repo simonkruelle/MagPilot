@@ -1,0 +1,222 @@
+{
+  "bore_fit_coupon.stl": {
+    "triangles": 2750,
+    "edge_incidence_2": true,
+    "consistent_orientation": true,
+    "positive_volume_mm3": 5076.4085253815765,
+    "bounds_min_mm": [
+      -29.0,
+      -8.5,
+      0.0
+    ],
+    "bounds_max_mm": [
+      29.0,
+      8.5,
+      7.199999809265137
+    ],
+    "dimensions_mm": [
+      58.0,
+      17.0,
+      7.199999809265137
+    ],
+    "sha256": "680e53b94cc1670f656fcb4125ace0108355c7ded6acb2a6afde8c4383486aa9"
+  },
+  "closure_fit_cap.stl": {
+    "triangles": 4716,
+    "edge_incidence_2": true,
+    "consistent_orientation": true,
+    "positive_volume_mm3": 1318.623722692657,
+    "bounds_min_mm": [
+      -7.5,
+      -7.5,
+      0.0
+    ],
+    "bounds_max_mm": [
+      7.5,
+      7.5,
+      11.39999771118164
+    ],
+    "dimensions_mm": [
+      15.0,
+      15.0,
+      11.39999771118164
+    ],
+    "sha256": "f8b4e16f2467eac9e6355859a8554006ed0af2d785e94f0bc53f6805049ddd20"
+  },
+  "closure_fit_grip.stl": {
+    "triangles": 2496,
+    "edge_incidence_2": true,
+    "consistent_orientation": true,
+    "positive_volume_mm3": 548.8480640104228,
+    "bounds_min_mm": [
+      -7.5,
+      -7.499997138977051,
+      0.0
+    ],
+    "bounds_max_mm": [
+      7.5,
+      7.500002861022949,
+      9.399999618530273
+    ],
+    "dimensions_mm": [
+      15.0,
+      15.0,
+      9.399999618530273
+    ],
+    "sha256": "70adbd82c8143f500cbe2901c94efc98a7e9561b8cf56c83533a564976a901bc"
+  },
+  "lower_grip.stl": {
+    "triangles": 6928,
+    "edge_incidence_2": true,
+    "consistent_orientation": true,
+    "positive_volume_mm3": 2901.6443136821235,
+    "bounds_min_mm": [
+      -7.5,
+      -7.499999046325684,
+      0.0
+    ],
+    "bounds_max_mm": [
+      7.5,
+      7.500002861022949,
+      40.79999923706055
+    ],
+    "dimensions_mm": [
+      15.0,
+      15.000001907348633,
+      40.79999923706055
+    ],
+    "sha256": "f8dfb9d2f29105d3fbb97f7c9864929c1d42f59956fe2e6c5191c316096c8c6a"
+  },
+  "spacer_10mm.stl": {
+    "triangles": 1280,
+    "edge_incidence_2": true,
+    "consistent_orientation": true,
+    "positive_volume_mm3": 714.5286557419315,
+    "bounds_min_mm": [
+      -5.0,
+      -5.0,
+      0.0
+    ],
+    "bounds_max_mm": [
+      5.0,
+      5.0,
+      10.0
+    ],
+    "dimensions_mm": [
+      10.0,
+      10.0,
+      10.0
+    ],
+    "sha256": "18d3b2bf7a8a23517c2df663c0ee9b0e4c584aecbf4ffad28c4fbe1de0e470d0"
+  },
+  "spacer_15mm.stl": {
+    "triangles": 1280,
+    "edge_incidence_2": true,
+    "consistent_orientation": true,
+    "positive_volume_mm3": 1071.7929836129597,
+    "bounds_min_mm": [
+      -5.0,
+      -5.0,
+      0.0
+    ],
+    "bounds_max_mm": [
+      5.0,
+      5.0,
+      15.0
+    ],
+    "dimensions_mm": [
+      10.0,
+      10.0,
+      15.0
+    ],
+    "sha256": "02a06e0184238f1f1358e2e4fdef023e9f355cc257759586fd1a64016a1d11a8"
+  },
+  "spacer_20mm.stl": {
+    "triangles": 1280,
+    "edge_incidence_2": true,
+    "consistent_orientation": true,
+    "positive_volume_mm3": 1429.0573114839492,
+    "bounds_min_mm": [
+      -5.0,
+      -5.0,
+      0.0
+    ],
+    "bounds_max_mm": [
+      5.0,
+      5.0,
+      20.0
+    ],
+    "dimensions_mm": [
+      10.0,
+      10.0,
+      20.0
+    ],
+    "sha256": "6fcf1d4efeec4d69a8602c37be5a3d130a48c14edc0ccd65d4b713871dfc4d66"
+  },
+  "spacer_5mm.stl": {
+    "triangles": 1280,
+    "edge_incidence_2": true,
+    "consistent_orientation": true,
+    "positive_volume_mm3": 357.26432787096576,
+    "bounds_min_mm": [
+      -5.0,
+      -5.0,
+      0.0
+    ],
+    "bounds_max_mm": [
+      5.0,
+      5.0,
+      5.0
+    ],
+    "dimensions_mm": [
+      10.0,
+      10.0,
+      5.0
+    ],
+    "sha256": "e05719e281391ae3e0108f45e58e2ab889e1c498a2aa25261eda7b239c2b9be8"
+  },
+  "upper_barrel.stl": {
+    "triangles": 9192,
+    "edge_incidence_2": true,
+    "consistent_orientation": true,
+    "positive_volume_mm3": 7761.039473258671,
+    "bounds_min_mm": [
+      -7.5,
+      -7.5,
+      0.0
+    ],
+    "bounds_max_mm": [
+      7.5,
+      7.5,
+      96.19999694824219
+    ],
+    "dimensions_mm": [
+      15.0,
+      15.0,
+      96.19999694824219
+    ],
+    "sha256": "40efcf62b3b8d51929e34eaaee98d2f58a752d28c6d0c53164fe1bf4f65420d7"
+  },
+  "washer_1p2mm.stl": {
+    "triangles": 1280,
+    "edge_incidence_2": true,
+    "consistent_orientation": true,
+    "positive_volume_mm3": 83.86839275060355,
+    "bounds_min_mm": [
+      -4.949999809265137,
+      -4.949999809265137,
+      0.0
+    ],
+    "bounds_max_mm": [
+      4.949999809265137,
+      4.949999809265137,
+      1.2000000476837158
+    ],
+    "dimensions_mm": [
+      9.899999618530273,
+      9.899999618530273,
+      1.2000000476837158
+    ],
+    "sha256": "98739bea116cc7260b1b889b9b0b54adf6c6366883398443e9a469dd153f43f1"
+  }
+}

@@ -1,0 +1,167 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1110" viewBox="0 0 1440 1110" role="img" aria-labelledby="title desc">
+  <title id="title">MagPilot magnetic pen v1 — reloadable stylus prototype</title>
+  <desc id="desc">Dimensioned concept side view of a 130 mm pen and an enlarged lower chamber with an 8 mm tip-to-magnet offset, 10.4 mm bore and 25.8 mm loaded length. Five diagrams show one through five 5 mm magnets with spacers above them. This is an unprinted prototype, not a validated manufacturing drawing.</desc>
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="1" y2="0">
+      <stop stop-color="#29323f"/>
+      <stop offset=".48" stop-color="#4e5969"/>
+      <stop offset=".7" stop-color="#424c5b"/>
+      <stop offset="1" stop-color="#202936"/>
+    </linearGradient>
+    <linearGradient id="magnet" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#cbd2da"/>
+      <stop offset=".5" stop-color="#aeb8c5"/>
+      <stop offset="1" stop-color="#8794a6"/>
+    </linearGradient>
+    <pattern id="plastic" width="10" height="10" patternUnits="userSpaceOnUse">
+      <path d="M-2 10 10-2M8 12 12 8" stroke="#ccd5df" stroke-width="1"/>
+    </pattern>
+    <marker id="arrow" markerWidth="7" markerHeight="7" refX="3.5" refY="3.5" orient="auto-start-reverse"><path d="M7 0 0 3.5 7 7" fill="none" stroke="#7c8a9c" stroke-width="1"/></marker>
+    <style>
+      text{font-family:Inter,"Helvetica Neue",Arial,sans-serif;fill:#202834}
+      .small{font-size:16px;fill:#697586}
+      .note{font-size:17px;fill:#556273}
+      .label{font-size:19px;font-weight:600}
+      .dim{font-size:17px;fill:#556273}
+      .line{fill:none;stroke:#aeb9c8;stroke-width:1.4}
+      .measure{fill:none;stroke:#7c8a9c;stroke-width:1.3;marker-start:url(#arrow);marker-end:url(#arrow)}
+      .leader{fill:none;stroke:#aeb9c8;stroke-width:1.3}
+    </style>
+  </defs>
+
+  <rect width="1440" height="1110" fill="#ffffff"/>
+  <text x="64" y="64" font-size="16" font-weight="700" letter-spacing="2.5" fill="#087cff">MAGPILOT · HARDWARE</text>
+  <text x="64" y="121" font-size="44" font-weight="700">One pen. Five magnet configurations.</text>
+  <text x="66" y="159" font-size="21" fill="#697586">Fixed tip. Reloadable stack. Spacers above the magnets.</text>
+  <rect x="1185" y="50" width="188" height="34" rx="17" fill="#edf4fc"/>
+  <text x="1279" y="72" text-anchor="middle" font-size="14" font-weight="600" fill="#087cff">V1 · UNPRINTED PROTOTYPE</text>
+
+  <!-- Assembled side view: four screen pixels per millimetre. -->
+  <rect x="64" y="190" width="603" height="555" rx="22" fill="#f6f8fb"/>
+  <text x="340" y="230" class="label">Slim assembled profile</text>
+  <path d="M219 252Q219 240 230 240Q241 240 241 252L255.6 584L258 606L260 653L259.5 696L247 714L234.5 750Q230 760 225.5 750L213 714L200.5 696L200 653L202 606L204.4 584Z" transform="translate(0,-40)" fill="url(#body)"/>
+  <path d="M202 566 258 566" stroke="#121b27" stroke-width="1.3"/>
+  <path d="M218 676 242 676" stroke="#758091" stroke-width=".8" opacity=".5"/>
+  <circle cx="230" cy="720" r="2.6" fill="#087cff"/>
+  <path d="M169 200H194M169 720H207" class="line"/>
+  <path d="M176 205V715" class="measure"/>
+  <text x="94" y="455" class="dim">130 mm</text>
+  <text x="94" y="480" class="dim">overall</text>
+  <path d="M204.4 413V432M255.6 413V432M208 424H252" class="measure"/>
+  <text x="287" y="402" class="dim">Ø12.8 mm</text>
+  <path d="M200 642V662M260 642V662M204 653H256" class="measure"/>
+  <text x="287" y="640" class="dim">Ø15 mm grip</text>
+  <path d="M253 315H342" class="leader"/>
+  <text x="358" y="309" class="label">Light upper barrel</text>
+  <text x="358" y="335" class="note">Tapered silhouette</text>
+  <path d="M260 566H342" class="leader"/>
+  <text x="358" y="560" class="label">45° twist closure</text>
+  <text x="358" y="586" class="note">Two-lug bayonet · fit trial first</text>
+  <path d="M235 713H342" class="leader"/>
+  <text x="358" y="701" class="label">Rounded plastic tip</text>
+  <text x="358" y="727" class="note">Non-marking · radius 1.2 mm</text>
+
+  <!-- Enlarged cutaway of the load chamber, schematic closure only. -->
+  <rect x="692" y="190" width="684" height="555" rx="22" fill="#f6f8fb"/>
+  <text x="721" y="230" class="label">Lower chamber · enlarged section</text>
+  <text x="721" y="257" class="small">Shown with 3 magnets + a 10 mm spacer</text>
+  <path d="M856 322H978V566L949 604L927 619Q922 627 917 619L885 604L856 566Z" fill="#e2e8ef" stroke="#b5c0cc" stroke-width="1.6"/>
+  <path d="M856 322H978V566L949 604L927 619Q922 627 917 619L885 604L856 566Z" fill="url(#plastic)"/>
+  <rect x="875.4" y="352.6" width="83.2" height="206.4" fill="#ffffff" stroke="#8c9caf" stroke-width="1.4"/>
+  <rect x="877" y="359" width="80" height="80" rx="2" fill="#cfc6f1" stroke="#a192d2"/>
+  <path d="M917 359V439" stroke="#b2a4df" stroke-width="2" stroke-dasharray="4 4"/>
+  <rect x="877.4" y="352.6" width="79.2" height="6.4" fill="#087cff"/>
+  <rect x="877" y="439" width="80" height="40" rx="2" fill="url(#magnet)" stroke="#7d8b9e"/>
+  <rect x="877" y="479" width="80" height="40" rx="2" fill="url(#magnet)" stroke="#7d8b9e"/>
+  <rect x="877" y="519" width="80" height="40" rx="2" fill="url(#magnet)" stroke="#7d8b9e"/>
+  <path d="M855 559H979" stroke="#087cff" stroke-width="1.3"/>
+  <path d="M879 559V573L913 615" fill="none" stroke="#aeb9c8" stroke-width="1.2"/>
+  <circle cx="922" cy="623" r="3.4" fill="#087cff"/>
+  <path d="M841 352.6H865M841 559H865M848 357V555" class="measure"/>
+  <text x="718" y="447" class="dim">25.8 mm</text>
+  <text x="718" y="472" class="dim">pocket</text>
+  <path d="M1005 559H980M1005 623H950M998 564V618" class="measure"/>
+  <text x="1016" y="594" class="dim">8 mm*</text>
+  <path d="M875.4 310V336M958.6 310V336M880 322H954" class="measure"/>
+  <text x="917" y="301" class="dim" text-anchor="middle">Ø10.4 mm bore</text>
+  <path d="M956 356H1080" class="leader"/>
+  <text x="1096" y="352" class="label">Soft washer</text>
+  <text x="1096" y="377" class="note">1.2 mm → ~0.8 mm</text>
+  <path d="M955 411H1080" class="leader"/>
+  <text x="1096" y="407" class="label">Spacer above stack</text>
+  <text x="1096" y="432" class="note">10 mm in this example</text>
+  <path d="M955 501H1080" class="leader"/>
+  <text x="1096" y="497" class="label">Your disk magnets</text>
+  <text x="1096" y="522" class="note">Ø~9.5–10 × 5 mm</text>
+  <text x="721" y="719" class="small">*Bottom magnet face above contact. Closure details omitted.</text>
+
+  <!-- Equal-height configurations: magnets below, spacer above. -->
+  <text x="64" y="798" font-size="25" font-weight="700">Swap the count. Keep the lower face fixed.</text>
+  <rect x="995" y="779" width="15" height="15" rx="3" fill="#aeb8c5"/>
+  <text x="1020" y="792" class="small">Magnets</text>
+  <rect x="1110" y="779" width="15" height="15" rx="3" fill="#cfc6f1"/>
+  <text x="1135" y="792" class="small">Spacer</text>
+  <rect x="1218" y="779" width="15" height="15" rx="3" fill="#087cff"/>
+  <text x="1243" y="792" class="small">Washer</text>
+
+  <g transform="translate(64 820)">
+    <rect width="250" height="216" rx="18" fill="#f6f8fb"/>
+    <text x="24" y="35" class="label">1 magnet</text>
+    <rect x="34" y="59" width="50" height="4" fill="#087cff"/>
+    <rect x="34" y="63" width="50" height="96" fill="#cfc6f1" stroke="#a192d2"/>
+    <rect x="34" y="159" width="50" height="24" fill="url(#magnet)" stroke="#7d8b9e"/>
+    <text x="105" y="104" class="label">20 mm</text>
+    <text x="105" y="129" class="note">spacer</text>
+    <text x="24" y="205" class="small">Centre: 10.5 mm above tip</text>
+  </g>
+  <g transform="translate(329 820)">
+    <rect width="250" height="216" rx="18" fill="#f6f8fb"/>
+    <text x="24" y="35" class="label">2 magnets</text>
+    <rect x="34" y="59" width="50" height="4" fill="#087cff"/>
+    <rect x="34" y="63" width="50" height="72" fill="#cfc6f1" stroke="#a192d2"/>
+    <rect x="34" y="135" width="50" height="24" fill="url(#magnet)" stroke="#7d8b9e"/>
+    <rect x="34" y="159" width="50" height="24" fill="url(#magnet)" stroke="#7d8b9e"/>
+    <text x="105" y="104" class="label">15 mm</text>
+    <text x="105" y="129" class="note">spacer</text>
+    <text x="24" y="205" class="small">Centre: 13.0 mm above tip</text>
+  </g>
+  <g transform="translate(594 820)">
+    <rect width="250" height="216" rx="18" fill="#f6f8fb"/>
+    <text x="24" y="35" class="label">3 magnets</text>
+    <rect x="34" y="59" width="50" height="4" fill="#087cff"/>
+    <rect x="34" y="63" width="50" height="48" fill="#cfc6f1" stroke="#a192d2"/>
+    <rect x="34" y="111" width="50" height="24" fill="url(#magnet)" stroke="#7d8b9e"/>
+    <rect x="34" y="135" width="50" height="24" fill="url(#magnet)" stroke="#7d8b9e"/>
+    <rect x="34" y="159" width="50" height="24" fill="url(#magnet)" stroke="#7d8b9e"/>
+    <text x="105" y="104" class="label">10 mm</text>
+    <text x="105" y="129" class="note">spacer</text>
+    <text x="24" y="205" class="small">Centre: 15.5 mm above tip</text>
+  </g>
+  <g transform="translate(859 820)">
+    <rect width="250" height="216" rx="18" fill="#f6f8fb"/>
+    <text x="24" y="35" class="label">4 magnets</text>
+    <rect x="34" y="59" width="50" height="4" fill="#087cff"/>
+    <rect x="34" y="63" width="50" height="24" fill="#cfc6f1" stroke="#a192d2"/>
+    <rect x="34" y="87" width="50" height="24" fill="url(#magnet)" stroke="#7d8b9e"/>
+    <rect x="34" y="111" width="50" height="24" fill="url(#magnet)" stroke="#7d8b9e"/>
+    <rect x="34" y="135" width="50" height="24" fill="url(#magnet)" stroke="#7d8b9e"/>
+    <rect x="34" y="159" width="50" height="24" fill="url(#magnet)" stroke="#7d8b9e"/>
+    <text x="105" y="104" class="label">5 mm</text>
+    <text x="105" y="129" class="note">spacer</text>
+    <text x="24" y="205" class="small">Centre: 18.0 mm above tip</text>
+  </g>
+  <g transform="translate(1124 820)">
+    <rect width="250" height="216" rx="18" fill="#f6f8fb"/>
+    <text x="24" y="35" class="label">5 magnets</text>
+    <rect x="34" y="59" width="50" height="4" fill="#087cff"/>
+    <rect x="34" y="63" width="50" height="24" fill="url(#magnet)" stroke="#7d8b9e"/>
+    <rect x="34" y="87" width="50" height="24" fill="url(#magnet)" stroke="#7d8b9e"/>
+    <rect x="34" y="111" width="50" height="24" fill="url(#magnet)" stroke="#7d8b9e"/>
+    <rect x="34" y="135" width="50" height="24" fill="url(#magnet)" stroke="#7d8b9e"/>
+    <rect x="34" y="159" width="50" height="24" fill="url(#magnet)" stroke="#7d8b9e"/>
+    <text x="105" y="104" class="label">No spacer</text>
+    <text x="105" y="129" class="note">Full stack</text>
+    <text x="24" y="205" class="small">Centre: 20.5 mm above tip</text>
+  </g>
+  <text x="65" y="1071" class="small">Dimensions in mm · Concept section, not a validated manufacturing drawing · Fit coupons and assembled-pen calibration required</text>
+</svg>
