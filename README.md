@@ -36,15 +36,11 @@ and fly the arm in real time.
 
 <sub>Week 1 · 5 October 2026 · <a href="docs/reports/MagPilot_Lab_Update_2026-10-05.md">Read update</a> · <a href="docs/reports/MagPilot_Lab_Update_2026-10-05.pdf">PDF slides</a></sub>
 
-Board repaired. Three **Ø≈9.5–10 × 5 mm** disk magnets available.
-**Virtual task development starts in Week 1.**
-The [magnet baseline comparison](docs/MAGNET_EVALUATION.md) is ready in **Data → Sensor Evaluation**:
-1, 2 and 3 magnets, three runs each, at nominal 0 mm above the cardboard cover.
+**Week 1:** Board repaired · Pen prototype printing · Virtual target-reaching demo.
 
 **Reloadable magnetic pen · Prototype v1**
 
-A fixed-tip stylus for **1–5 disk magnets**, with spacers above shorter stacks.
-Printable parts and fit-test pieces are ready; assembled-pen tracking is the next check.
+**1–5 disk magnets** · Fixed tip · Interchangeable spacers.
 
 <p align="center">
   <a href="hardware/magnetic_pen_v1/README.md"><img src="hardware/magnetic_pen_v1/preview.png" width="880" alt="MagPilot magnetic pen prototype: assembled profile, exploded magnet stack and chamber section"></a>
@@ -56,6 +52,39 @@ Printable parts and fit-test pieces are ready; assembled-pen tracking is the nex
   <img src="docs/reports/assets/project_timeline.png" width="880" alt="Proposed ten-week project plan: virtual task and pilot start in Week 1">
   <br>
   <sub>Relative project weeks · <a href="docs/LAB_MEETING_PLAN.md">Full plan</a></sub>
+</p>
+
+<br>
+
+## Data Pipeline
+
+**Characters. Targets. Sensor evaluation.**
+Open **Data** in the Control Center to collect recordings and view progress.
+
+<table>
+  <tr>
+    <th width="33%">Character collection</th>
+    <th width="34%">Teleoperation</th>
+    <th width="33%">Sensor evaluation</th>
+  </tr>
+  <tr>
+    <td align="center"><strong>0–9 · A–J</strong><br><sub>10 takes per character</sub></td>
+    <td align="center"><strong>Random 3D targets</strong><br><sub>Reach · hold 2 seconds · save</sub></td>
+    <td align="center"><strong>1 / 2 / 3 magnets</strong><br><sub>3 runs per stack</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><a href="docs/DATA_COLLECTION.md">Collection guide →</a></td>
+    <td align="center"><a href="docs/TELEOPERATION_COLLECTION.md">Task guide →</a></td>
+    <td align="center"><a href="docs/MAGNET_EVALUATION.md">Test guide →</a></td>
+  </tr>
+</table>
+
+<p align="center">
+  <a href="docs/TELEOPERATION_COLLECTION.md"><img src="docs/teleoperation.png" width="880" alt="MuJoCo target-reaching collection with the Franka gripper, a target sphere and a filling hold-progress ring"></a>
+  <br>
+  <sub>MuJoCo · Trackpad or sensor board · Trajectory and completion time saved automatically</sub>
+  <br>
+  <sub><a href="docs/DATA_COLLECTION.md">Setup and recording controls</a> · <a href="docs/teleoperation_data.png">Participant progress</a> · <a href="docs/LAB_MEETING_PLAN.md#held-out-evaluation">Evaluation plan</a></sub>
 </p>
 
 <br>
@@ -82,7 +111,7 @@ piece of metal. MagPilot turns them into a complete robot interface:
 </div>
 
 MagPilot maps the board into a **30 × 60 × 56 cm** control volume in front of
-the robot. The separate **24 cm cube** defines only the nine digit targets:
+the robot. Digit targets and MuJoCo collection use a **24 cm cube**:
 eight corners for `1-8`, then the center for `9`.
 
 ## Two modes, one surface
@@ -298,96 +327,10 @@ same menu. The controller and safety pipeline stay unchanged.
 python3 colmag_launcher.py
 ```
 
-The **Control Center** starts and monitors the robot, arm controller, and
-interface from one window. Green means running; amber means simulation is
-active with Gazebo closed. Select any stage to view and copy its live log. The
-**Action mapping** button opens the task vocabulary used by classified
-characters.
+The **Control Center** starts and monitors the robot, arm controller and interface.
+Open **Data** for recording, or **Action mapping** to customise character actions.
 
-**Data → Teleoperation Pipeline → MuJoCo demo** opens the FR3 in **MuJoCo**. Press **Enter**
-to reveal a random target, move with the trackpad or magnet board, and hold
-with the centre between the gripper fingertips inside the blue sphere for
-**2 seconds**. The loading ring fills; the measured
-trajectory and completion time save automatically. No held button is needed.
-Point into the visible workspace and adjust Z with scrolling or the height slider.
-The green point marks the measured finger centre; the top view reveals depth.
-The **Gazebo pilot** is in the same Data tab, with shared experiment and
-participant details; it records the arm controlled by the running Interface.
-Participant rows show **saved / planned targets**, a progress bar and session count
-for the selected experiment. **History** revisits earlier experiments; counts update automatically.
-Board tracking interruptions hold the simulated arm and reset the loading ring;
-fresh valid tracking resumes the same timed trial. Connection failures remain visible.
-
-<p align="center">
-  <img src="docs/teleoperation.png" width="880" alt="MuJoCo teleoperation collection: Franka two-finger gripper, single target ring, height slider and continuous hold progress">
-  <br>
-  <sub><a href="docs/TELEOPERATION_COLLECTION.md">Setup, controls and saved data</a> · Trackpad demo works without the sensor board</sub>
-</p>
-
-For hardware, choose **magnetometer**, select the numbered serial port shown in
-the log, and enter the robot IP when needed. Startup clears stale ROS processes,
-and closing the app shuts the pipeline down in order.
-
-The **Data** window collects digits **0–9** and uppercase letters **A–J**, with
-ten takes per character. Enter an **experiment name** (for example, `Pen v2
-pilot`), add participant names, and press Save. The coverage table shows names
-alongside stable participant IDs. Experiment names are stored in recording
-metadata; each Start opens a new numbered participant session.
-
-In the recording window, select a character with **0–9** or **A–J**, position
-the pen, then press **Enter** to start. Draw one character and press **Enter**
-again to stop and save **before lifting or repositioning the pen**. An operator
-can press the key for the participant. **Escape** cancels an unfinished take;
-after a successful save, Enter starts another take of the selected character.
-Stopping freezes the samples before CSV, image and metadata generation. The
-collection view hides the gesture buttons and the launcher disables OCR.
-Board captures keep stable, dark ink and include slow movements; raw sensor values remain intact.
-
-**Data → Sensor Evaluation** compares **1 / 2 / 3 magnets × 3 runs**. Start opens
-the guided placements; **q** pauses and **Resume** keeps completed captures.
-Each new run uses **top-left, top-right, bottom-left, bottom-right and centre**
-marks, followed by a short sweep. The prompts use names; coordinates stay in the logs.
-The nominal **0 mm** condition is above the approximately **5 mm cardboard**;
-the magnet-centre offset is recorded separately. Progress bars and a comparison
-report show tracking error, jitter, raw field response and delivery timing.
-See the [test procedure and placement guide](docs/MAGNET_EVALUATION.md).
-Recordings live in the gitignored `data_collection/` folder.
-
-To demonstrate the pipeline without the sensor board, select **Demo (mouse)**
-in Data, save a participant and experiment name, then press the participant's
-**Start** button. Select a character, position the cursor, press **Enter**, then
-move the mouse to draw. Press **Enter** again to stop the ink and save. The
-experimenter can select the character and press Enter while the participant
-only draws; no held key or mouse button is required. The recording window shows
-the capture state, character preview and progress. Movement outside a capture
-does not add ink, and a take with no drawing samples is discarded rather than
-counted. Optional blank/still controls remain available separately.
-Demo recordings and coverage live separately in `data_collection/demo/`.
-Docker must be running; neither a sensor board nor robot is needed.
-
-The selected character supplies the ground-truth label for scoring. A protected
-test set will hold out complete participants, including all their sessions and
-takes; labels and label-bearing filenames must stay out of model inputs. Fit
-learned preprocessing on training data, tune on validation data, and evaluate
-the test set after freezing the pipeline. Participant splits are a planned
-collection milestone. See the [evaluation plan](docs/LAB_MEETING_PLAN.md#held-out-evaluation).
-
-The [project plan](docs/LAB_MEETING_PLAN.md) tracks the meeting decisions and
-next milestones. The repaired board and three smaller magnets enable comparisons
-with one, two or three magnets. Virtual robot-arm target-reaching development
-and its pilot now start in **Week 1**; see the
-[pilot instructions](docs/VIRTUAL_TASK_PILOT.md).
-
-[Weekly lab updates](docs/reports/README.md) provide a GitHub review index.
-The **Week 1** update includes a [short written report](docs/reports/MagPilot_Lab_Update_2026-10-05.md),
-[two-page PDF](docs/reports/MagPilot_Lab_Update_2026-10-05.pdf) and
-[editable Word document](docs/reports/MagPilot_Lab_Update_2026-10-05.docx).
-
-> **Pitch deck.** A keynote-style presentation of the project lives in
-> [`presentation/`](presentation/) (`MagPilot_Keynote.pptx`, an eight-part
-> remote-controlled pitch with speaker notes) - see
-> [presentation/README.md](presentation/README.md) for the run-of-show and
-> where the demo videos slot in.
+<sub><a href="docs/DATA_COLLECTION.md">Data setup</a> · <a href="#quick-start">Hardware setup and troubleshooting</a> · <a href="presentation/README.md">Pitch deck</a></sub>
 
 ## Quick start
 

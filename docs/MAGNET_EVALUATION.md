@@ -1,6 +1,6 @@
 # Near-surface magnet comparison
 
-**Goal:** choose a writing baseline from **1, 2 or 3 small magnets**, with **three complete runs per stack**. The physical comparison has not been performed yet.
+**Goal:** choose a writing baseline from **1, 2 or 3 small magnets**, with **three complete runs per stack**.
 
 ![Sensor Evaluation in the launcher](sensor_evaluation.png)
 
@@ -42,7 +42,7 @@ Already started with the previous coordinate grid? **Resume** retains its origin
 - Raw fields retain firmware units. Constant channels during motion need inspection; they do not establish saturation.
 - Z analysis retains the existing **abs(raw Z) − 10 mm** correction. This comparison does **not** recalibrate it; approximate offsets give approximate Z error.
 - Select a repeatable near-surface baseline first. Then test greater teleoperation heights separately; additional magnets do not guarantee useful range.
-- A later modular pen could accept **1–5 disks**. Measure diameter, insertion clearance and housing walls before CAD; choose the tested 1–3 baseline first.
+- The [reloadable pen prototype](../hardware/magnetic_pen_v1/README.md) holds **1–5 disks**. Check printed fit and repeat the tracking comparison in the assembled housing before choosing its working height.
 
 Software-only rehearsal; synthetic results do not select a physical magnet:
 
