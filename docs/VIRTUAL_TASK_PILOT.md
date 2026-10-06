@@ -1,4 +1,6 @@
-# Week 1 — virtual target-reaching pilot
+# Week 2 — virtual target-reaching pilot
+
+Week 2: **5–11 October 2026**. Progress is reviewed at the **12 October** meeting.
 
 For the integrated **Data → Teleoperation Pipeline** demo with random targets,
 a loading ring and a two-second hold, use the
@@ -90,7 +92,7 @@ python3 tools/target_reaching_pilot.py --participant-id P01 \
 Hardware-free plan check (no ROS, no measurement):
 
 ```bash
-python3 tools/target_reaching_pilot.py --dry-run --run-id week1_plan
+python3 tools/target_reaching_pilot.py --dry-run --run-id week2_plan
 python3 tests/test_target_reaching.py
 ```
 

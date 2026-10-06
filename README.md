@@ -34,9 +34,9 @@ and fly the arm in real time.
 
 **[Weekly lab reports →](docs/reports/README.md)**
 
-<sub>Week 1 · 5 October 2026 · <a href="docs/reports/MagPilot_Lab_Update_2026-10-05.md">Read update</a> · <a href="docs/reports/MagPilot_Lab_Update_2026-10-05.pdf">PDF slides</a></sub>
+<sub>Week 2 · 5–11 October 2026 · Meeting: 12 October · <a href="docs/reports/MagPilot_Lab_Update_2026-10-12.md">Read update</a> · <a href="docs/reports/MagPilot_Lab_Update_2026-10-12.pdf">PDF slides</a></sub>
 
-**Week 1:** Board repaired · Pen prototype printing · Virtual target-reaching demo.
+**Week 2:** Teleoperation collection · Board repair and diagnostics · Magnet comparison · Pen printing.
 
 **Reloadable magnetic pen · Prototype v1**
 
@@ -49,7 +49,7 @@ and fly the arm in real time.
 </p>
 
 <p align="center">
-  <img src="docs/reports/assets/project_timeline.png" width="880" alt="Proposed ten-week project plan: virtual task and pilot start in Week 1">
+  <img src="docs/reports/assets/project_timeline.png" width="880" alt="Proposed ten-week project plan: virtual task and pilot start in Week 2">
   <br>
   <sub>Relative project weeks · <a href="docs/LAB_MEETING_PLAN.md">Full plan</a></sub>
 </p>

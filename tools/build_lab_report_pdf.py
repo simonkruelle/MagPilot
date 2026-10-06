@@ -222,7 +222,7 @@ def render_timeline_asset(output):
             boxstyle='round,pad=0,rounding_size=.10',
             facecolor=BLUE if index < 2 else '#BFC7D2', edgecolor='none',
             zorder=3))
-    fig.text(.025, .94, 'Proposed ten-week plan · relative weeks',
+    fig.text(.025, .94, 'Ten-week plan · Week 2 starts 5 October',
              fontsize=15, fontweight='bold', color=INK, va='top')
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=180)
@@ -248,7 +248,7 @@ def main():
     metadata = {
         'Title': 'MagPilot lab update — 5 October 2026',
         'Author': 'MagPilot',
-        'Subject': 'Data collection, pen decisions, and proposed project timeline',
+        'Subject': 'Week 1 character collection and Week 2 handoff',
     }
     with PdfPages(args.output, metadata=metadata) as pdf:
         for number, fig in enumerate(figures, 1):

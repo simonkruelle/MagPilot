@@ -1,6 +1,6 @@
 # Week 1 — MagPilot lab update
 
-**5 October 2026 · `paper` branch** · [Two-page PDF](MagPilot_Lab_Update_2026-10-05.pdf) · [Editable Word report](MagPilot_Lab_Update_2026-10-05.docx)
+**28 September–4 October 2026 · reviewed 5 October · `paper` branch** · [Two-page PDF](MagPilot_Lab_Update_2026-10-05.pdf) · [Editable Word report](MagPilot_Lab_Update_2026-10-05.docx)
 
 ## Completed
 
@@ -8,14 +8,13 @@
 - Participant names/stable IDs; experiment names stored with takes.
 - Operator **Enter** starts/stops recording; participant only draws. Frozen samples produce matched CSV/PNG/JSON.
 - Mouse demo files/counts stay separate from sensor recordings. Collection checks and GUI rehearsal passed.
-- **Sensor board repaired. Three smaller magnets received.**
 
-## Meeting decision and immediate priority
+## Week 2 handoff — 5 October meeting
 
-- Start the **virtual robot-arm target-reaching task in Week 1**, because it is the main implementation risk.
+- Start the **virtual robot-arm target-reaching task in Week 2**, because it is the main implementation risk.
 - Log target and actual end-effector positions, completion time, endpoint error and unsuccessful trials.
 - Pilot the task before formal participant evaluation; compare controller conditions using the same targets and starting pose.
-- Initial recorder and launch instructions: [Virtual task pilot](../VIRTUAL_TASK_PILOT.md). Simulated-arm validation and participant results remain pending.
+- Board repair, diagnostics, magnet comparison, pen printing and the new collector belong to [Week 2](MagPilot_Lab_Update_2026-10-12.md), reviewed at the **12 October** meeting.
 
 ## Hardware and collection next
 
@@ -28,7 +27,7 @@
 
 | Project weeks | Deliverable |
 |---|---|
-| **1–3** | **Virtual target-reaching task, logging and early pilot — start immediately.** |
+| **2–3** | **Virtual target-reaching task, logging and early pilot — start in Week 2.** |
 | 1–2 | Hardware/pen comparison and reliable recording. |
 | 3 | Character pilot; freeze setup/protocol. |
 | 4–6 | Formal collection and preprocessing. |
@@ -36,7 +35,7 @@
 | 9 | Participant evaluation. |
 | 10 | Analysis, paper/report and buffer. |
 
-![Proposed schedule: virtual task development and pilot begin in Week 1.](assets/project_timeline.png)
+![Proposed schedule: virtual task development and pilot begin in Week 2.](assets/project_timeline.png)
 
 ## Week 1 — launcher and recording
 

@@ -1,14 +1,18 @@
-# MagPilot — Week 1 decisions and project plan
+# MagPilot — Week 2 decisions and project plan
 
-Meeting: 5 October 2026. Time zone: Europe/Berlin. Branch: `paper`.
+Week 2: **5–11 October 2026**. Decisions: **5 October** meeting.
+Next review: **12 October**. Status as of **6 October**. Branch: `paper`.
+
+Project weeks run Monday–Sunday, starting **28 September 2026** (Week 1).
+The 12 October meeting reviews Week 2's work and begins Week 3.
 
 **Meeting outcome:** The sensor board is repaired and three smaller magnets are
 available for one-, two- and three-magnet comparisons. Start the virtual
-robot-arm target-reaching task immediately in **Week 1**: this is the main
+robot-arm target-reaching task immediately in **Week 2**: this is the main
 implementation risk. Develop and pilot completion-time/error measurement while
 hardware comparisons and character collection proceed in parallel.
 
-Review: [Week 1 update](reports/MagPilot_Lab_Update_2026-10-05.md) ·
+Review: [Week 2 update](reports/MagPilot_Lab_Update_2026-10-12.md) ·
 [Weekly reports](reports/README.md) · [Virtual task pilot](VIRTUAL_TASK_PILOT.md).
 
 **3–5 minute launcher demo**
@@ -28,9 +32,10 @@ The Data table refreshes periodically; use its refresh control if the newly save
 
 **Current software versus the next milestones**
 
-- Implemented: participant names/IDs, experiment metadata, shared character protocol, explicit capture boundaries, cancel/repeat, matched recording artifacts, frozen rows and save retry. Board diagnostics and a ground-truth tracking recorder also exist.
-- Immediate priority: develop/pilot virtual robot-arm target reaching; log target and actual end-effector positions, completion time, endpoint error and unsuccessful trials. Use consistent targets and starting poses across control conditions.
-- Parallel work: check the repaired board; compare one-, two- and three-magnet pen/cover configurations; record a small real-sensor character pilot; inspect timing, raw channel response, segmentation and file consistency.
+- Week 1 foundations: participant names/IDs, experiment metadata, shared character protocol, explicit capture boundaries, cancel/repeat, matched artifacts, frozen rows and save retry.
+- Week 2 software: MuJoCo random-target collection in Data, measured fingertip midpoint, two-second continuous hold, automatic trajectory/time saving and participant progress. Gazebo pilot remains in the same panel. Participant timing comparisons are pending.
+- Week 2 hardware: board repaired; nine near-surface runs completed (three each for 1/2/3 magnets). Approximate placement prevents an absolute-accuracy ranking. Reloadable pen CAD is ready; the first 3D print is in progress.
+- Next checks: printed fit/closure, assembled-pen character pilot and measured height comparisons; rehearse robot target reaching before formal timing comparisons.
 - Before formal collection: freeze the pen/cover and protocol; add documented quality review and accepted/rejected takes, recoverable progress, reproducible preprocessing and participant-separated dataset splits.
 - Later milestones: recognition-model comparison, measured tracking-error maps and formal participant evaluation of the already-piloted virtual task.
 
@@ -58,8 +63,8 @@ at nominal **0 mm above ~5 mm cardboard**. A printed guide fixes placement;
 raw fields, timing and pose error/jitter feed the comparison report.
 [Protocol and operator steps](MAGNET_EVALUATION.md).
 
-A later pen can use a cartridge for **1–5 disks** with repeatable stops. Measure
-actual disk clearance and include housing walls in the outside diameter. Record
+The [reloadable pen prototype](../hardware/magnetic_pen_v1/README.md) holds
+**1–5 disks** with spacers; its first print is in progress. Check actual fit and record
 the active stack centre for each configuration; select a writing baseline from
 the 1–3 comparison, then test greater heights before assigning teleoperation stacks.
 
@@ -67,7 +72,7 @@ At equal remanence/material grade, the idealized magnetic moment is `m = Br × V
 
 Treat calculations as screening estimates. Field geometry depends on magnetization and the measurement position; K&J's calculator assumes axial magnetization for discs/cylinders/rings and recommends measurement in the actual configuration. [K&J Magnetics: field calculator and assumptions](https://www.kjmagnetics.com/magnetic-field-calculator.asp).
 
-No smaller candidate is yet proven sufficient. The saved September probe, reanalyzed with probe v1.2, suggests channel flat tops during one sweep; this is a setup-specific observation, not a universal saturation threshold or evidence about an untested smaller pen.
+The Week 2 near-surface comparison suggests one magnet as a practical first writing baseline; run ranges overlap, and approximate hand placement prevents an accuracy ranking. Assembled-pen and height validation remain pending. Flat tops in the September probe and new sweeps need inspection; they do not confirm sensor saturation.
 
 **With the repaired board: hardware and character pilot**
 
@@ -81,7 +86,7 @@ No smaller candidate is yet proven sufficient. The saved September probe, reanal
 
 | Planned weeks | Priority and deliverable |
 |---|---|
-| **1–3** | **Virtual robot-arm target-reaching implementation and early pilot. Start in Week 1; establish targets, start pose, logging, completion rule and configurable control conditions.** |
+| **2–3** | **Virtual robot-arm target-reaching implementation and early pilot. Start in Week 2; establish targets, start pose, logging, completion rule and configurable control conditions.** |
 | 1–2 | Hardware requirements/CAD/print iterations alongside reliable launcher recording; verify the repaired board and compare one-/two-/three-magnet configurations. |
 | 3 | Real-sensor pilot; fix remaining acquisition issues; freeze pen/cover; finish the tracking ground-truth procedure. |
 | 4–6 | Formal participant collection with fixed conditions; preprocessing and participant-based splits. Collect tracking references and begin baseline networks in parallel. |
@@ -89,7 +94,7 @@ No smaller candidate is yet proven sufficient. The saved September probe, reanal
 | 9 | Teleoperation participant evaluation and preliminary analysis. |
 | 10 | Final recognition/tracking/teleoperation figures, documentation and paper/report; buffer for delays. |
 
-These are relative project weeks. The virtual task now starts in **Week 1**, in
+These are relative project weeks anchored to **28 September 2026**. The virtual task starts in **Week 2**, in
 parallel with pen/recording work; it is no longer deferred until weeks 6–8.
 Before formal evaluation, agree on participant numbers, comparison controllers,
 target difficulty/tolerance, starting poses, trial order and timeout handling.

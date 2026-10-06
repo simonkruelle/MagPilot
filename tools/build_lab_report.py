@@ -24,7 +24,7 @@ KJ_REFERENCE = 'https://www.kjmagnetics.com/blog/magnetic-dipole-moment'
 WEEK_LABEL = 'Week 1'
 
 PAGE1_TITLE = 'MagPilot | Lab update'
-SUBTITLE = '5 October 2026 · meeting update · paper branch'
+SUBTITLE = '28 September–4 October 2026 · reviewed 5 October · paper branch'
 UPDATES = (
     'Protocol: 0–9 / A–J; ten takes each (200 per participant).',
     'Participant names and stable IDs; experiment names accompany takes.',
@@ -32,13 +32,13 @@ UPDATES = (
     'Separate demo files/counts; software checks + GUI rehearsal passed.',
 )
 PEN_QUESTIONS = (
-    'Sensor board repaired; three smaller magnets available for experiments.',
-    'Compare one-, two- and three-magnet configurations; document geometry, grade and orientation.',
-    'Measure signal/clipping at the writing gap and teleoperation range.',
+    'Week 2 begins 5 October: board repair and magnet diagnostics.',
+    'Compare one-, two- and three-magnet configurations; document geometry and orientation.',
+    'Prototype a reloadable pen; check writing and teleoperation heights.',
 )
-HARDWARE_TITLE = 'Hardware update'
+HARDWARE_TITLE = 'Week 2 handoff'
 NEXT_STEPS = (
-    'Start the virtual robot-arm target-reaching pilot now; compare completion times and endpoint errors.',
+    'Start virtual target reaching in Week 2; log completion times and endpoint errors.',
     'Character pilot: 40–60 takes/person (2–3 repetitions); myself + 1–2 colleagues. Not collected.',
     'Next: review/resume, preprocessing and participant-separated splits.',
 )
@@ -55,7 +55,7 @@ CAPTURE_NOTES = (
     'Hardware pilot and new-pen validation remain pending.',
 )
 PROJECT_PHASES = (
-    ('Virtual task + pilot', 1, 3),
+    ('Virtual task + pilot', 2, 3),
     ('Hardware + recording', 1, 2),
     ('Pilot + protocol freeze', 3, 3),
     ('Full collection + preprocessing', 4, 6),
@@ -174,7 +174,7 @@ def document_xml(assets):
     right += image_paragraph(
         assets['project_timeline'], 'rIdTimeline', 2, 5.35, 2.3,
         'Proposed weeks 1 through 10: virtual target-reaching task and pilot start '
-        'in week one alongside hardware and recording; setup freeze, formal '
+        'in week two alongside hardware and recording; setup freeze, formal '
         'collection, model and tracking analysis, evaluation, final report and buffer.')
     reference = run('Reference: ', size=20, colour='546675')
     reference += '<w:hyperlink r:id="rIdKJ"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/>' \
@@ -297,7 +297,7 @@ def build_report(asset_dir, output):
 <cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"
 xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/"
 xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:title>MagPilot lab update — 5 October 2026</dc:title>
-<dc:subject>Data collection, pen decisions, and proposed project timeline</dc:subject>
+<dc:subject>Week 1 character collection and Week 2 handoff</dc:subject>
 <dc:creator>MagPilot</dc:creator><dcterms:created xsi:type="dcterms:W3CDTF">{}</dcterms:created>
 </cp:coreProperties>'''.format(now)
     app = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
